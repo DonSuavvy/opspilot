@@ -43,12 +43,12 @@ not the reply text.
 | | |
 |---|---|
 | **Data model** | 15-table Drizzle schema + migrations — workspaces, customers, subscriptions, invoices, tickets, KB articles, SOPs + SOP versions, agent runs, run spans, approvals, audit log, eval cases/runs/results — plus a lazy client that picks TLS from the parsed host. 20 tests |
-| **Policy engine** | Pure refund + escalation rules, with both the stored policy blob *and* the evaluation input parsed rather than trusted. 89 tests |
+| **Policy engine** | Pure refund + escalation rules, with both the stored policy blob *and* the evaluation input parsed rather than trusted. 93 tests |
 | **Tool registry** | 9 tools with Zod schemas → strict JSON Schema, three-class safety model, boot-time validation. 42 tests, plus 9 pinning the nine tools' wire schemas |
 | **Seed** | Deterministic Beacon Analytics dataset — 30 customers, 54 invoices, 20 KB articles, 8 tickets |
 | **Infra** | Next.js 16, Tailwind v4, shadcn/ui on Radix, Vitest, GitHub Actions CI, Docker Postgres |
 
-**160 tests passing** — 89 + 42 + 9 + 20, across four files. No test requires a
+**164 tests passing** — 93 + 42 + 9 + 20, across four files. No test requires a
 database.
 
 ### Coming (see [`docs/PLAN.md`](docs/PLAN.md))
@@ -237,11 +237,14 @@ itself:
 | **A right answer from a false premise** | Seven speculative schema additions were rejected because "those tables have zero rows." One of them targeted `invoices`, which holds 54 — a figure the same document reports elsewhere. The conclusion survived on evidence (all 54 rows satisfy every constraint proposed), but the reason written down was wrong, and one item was overturned outright. |
 | **An explanation of the wrong mechanism** | Both the docs and a code comment explained `.strict()` as catching misspelled policy keys. It cannot: a misspelling leaves the real key absent, and an absent required key is rejected either way. What it actually catches is an *extra* key alongside a valid policy — narrower, real, and now stated correctly. |
 
-**160 tests, up from 131.** Two further defects that pass turned up are recorded
-as **open**: one because every available fix changes a contract the eval scorers
-depend on, so it needs a decision rather than whichever option was cheapest to
-type, and one because it is a comment that overstates what its code does. Left
-open and written down, not quietly closed.
+**164 tests, up from 131.** Two further defects turned up while fixing those.
+The first was the escalation engine carrying the refund engine's bug pointing the
+other way — an unreadable customer lifetime value silently *dropped* a churn-risk
+escalation, where bad refund data had silently *approved*. It was held open
+rather than patched, because every available fix changed a contract the eval
+scorers key off; it is now closed with the option that was chosen rather than the
+one that was cheapest to type. The second is still open and written down: a
+comment claiming its guard catches more than it does.
 
 The point isn't that the reviews found things. It's that **shipping a green gate
 is where verification starts, not where it stops** — and that the failures are

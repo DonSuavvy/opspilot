@@ -14,13 +14,15 @@ overclaim the rest of this file exists to record. Most were caught before they
 could matter. Several were caught only because the code was reviewed by someone
 other than the person who wrote it.
 
-Two things this file does **not** claim. **Entry 13 is open** — a live defect,
-deliberately unfixed because every available fix is a contract change that needs
-an owner's decision rather than a default. And entries 9 and 10 carry dated
-corrections: a later pass found that both had described their own fixes
-inaccurately. Those corrections are marked in place rather than edited away,
-because a defect log that quietly rewrites itself is worth about as much as a
-green suite that never had a failing test.
+Two things this file does **not** claim. **Entry 14 is open** — a live defect,
+left that way because it is a comment overstating what its code does rather than
+anything that changes a decision. Entry 13 was held open for the same discipline
+and is now closed: every available fix was a contract change, so it waited for an
+owner's decision instead of taking whichever option was cheapest to type. And
+entries 9 and 10 carry dated corrections: a later pass found that both had
+described their own fixes inaccurately. Those corrections are marked in place
+rather than edited away, because a defect log that quietly rewrites itself is
+worth about as much as a green suite that never had a failing test.
 
 ## How this repo is checked
 

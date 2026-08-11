@@ -29,7 +29,7 @@ at [`docs/reviews/round-2-verification-prompt.md`](reviews/round-2-verification-
 **Headline:** five documentation claims that do not hold, one **critical live
 defect** in the policy engine, a smaller live defect in Round 2's own TLS fix,
 and one of Round 2's rejected findings overturned outright. Two further defects
-are recorded **open** rather than closed by default. Suite 131 → **160**. The
+are recorded **open** rather than closed by default. Suite 131 → **164**. The
 code findings are fixed in `fc0b78d`, `49127b3` and `2273ae1`; the claims are
 corrected in place in the Round 2 section below, each marked as a Round 3
 correction rather than quietly rewritten.
@@ -105,28 +105,38 @@ reports errors is as unbalanced as a review that only reports successes.
 
 ### Verification evidence
 
-Measured this session, on `2273ae1` plus the documentation edits in this round
-— named that precisely because "which tree did the gate run against" is exactly
-what R3-04 was about:
+Measured on `48db720`, the last commit that changes code — named that precisely
+because "which tree did the gate run against" is exactly what R3-04 was about.
+The only commit after it is the documentation edit recording these numbers:
 
 ```
-typecheck exit=0    test exit=0    lint exit=0
+typecheck exit=0    test exit=0    lint exit=0    verify:boot exit=0    verify:seed PASS
 ```
 
-- **Suite:** **160 passed (4 files)** — 89 `refund.test.ts`, 42
+- **Suite:** **164 passed (4 files)** — 93 `refund.test.ts`, 42
   `registry.test.ts`, 9 `tools.test.ts`, 20 `client.test.ts`. Counted per file,
   because the three-way split is what R3-07 was about.
-- **Trajectory:** 79 → 131 (Round 2) → 160. Both endpoints were measured per
+- **Trajectory:** 79 → 131 (Round 2) → 164. Both endpoints were measured per
   file, so the decomposition is checked rather than inferred: Round 2's suite was
-  70 / 42 / 9 / 10 and this one is 89 / 42 / 9 / 20 — 19 policy tests and 10
+  70 / 42 / 9 / 10 and this one is 93 / 42 / 9 / 20 — 23 policy tests and 10
   db-client tests added, and **nothing** to registry or tools. Measuring that
   split is what exposed R3-07 in the first place: `registry.test.ts` counted 42,
   not the 51 the prose claimed, because 51 was silently `registry` plus `tools`.
-- **Clean-clone CI parity — genuinely, this time.** Fresh `git clone`, no
-  `.next/`, full `npm ci` (exit 0), then `typecheck` → `test` → `lint`, all exit
-  0, 4 files / 160 tests. The clone was confirmed to contain the work under
-  review: `invalid_invoice_data` present in `src/policy/refund.ts`, migrations
-  `0000`, `0001` and `0002` all present.
+- **No test requires a database:** 164 passing with `DATABASE_URL` and
+  `ANTHROPIC_API_KEY` both unset.
+- **Clean-clone CI parity — genuinely, this time.** Fresh `git clone` of
+  `48db720`, no `.next/`, full `npm ci` (exit 0), then `typecheck` → `test` →
+  `lint`, all exit 0, 4 files / 164 tests. The clone was confirmed to contain the
+  work under review: `invalid_invoice_data` present in `src/policy/refund.ts`,
+  migrations `0000`, `0001` and `0002` all present.
+- **Migrations `0001` and `0002` validated against a real Postgres.** Both
+  applied inside `BEGIN … ROLLBACK` on the shared PG17 container: 5 `ALTER
+  TABLE`, 2 `CREATE INDEX`, all accepted. `serialized_messages` became `text`
+  and `eval_runs.workspace_id` became `uuid` inside the transaction, and
+  Postgres reported the delete rule on both new foreign keys as `ON DELETE
+  CASCADE` — read from `pg_constraint`, not from the migration file. After
+  rollback the container is byte-identical: `jsonb`, column absent, 54 invoices,
+  1 applied migration, 0 leftover indexes. Neither migration is applied.
 - **Mutation testing, `src/policy/refund.ts`:** 14 reversions, **11 killed, 3
   survived** — all three the `.strict()` calls. Now pinned: removing each in
   turn fails **exactly one** named test (`rejects an unknown key inside the
@@ -153,15 +163,12 @@ These are gaps in **this** round, and they are larger than Round 2's.
 - Both gaps have the same cause: **two sub-agents assigned to them terminated on
   a session limit before reporting.** Recorded as an absence rather than left to
   look like coverage, which is the failure mode this file exists to prevent.
-- **Migration `0002` has never been parsed by Postgres.** It was generated and
-  read, not applied. `0001` and `0002` are both unapplied.
-- **The eval-table cascade is reasoned from the emitted DDL, not observed.**
-  Proving it needs the migration applied and a workspace actually deleted.
-- **`FAILURES.md` entry 13 was not executed.** It is reasoned from the code and
-  from JavaScript comparison semantics (`NaN >= x` and `undefined >= x` are both
-  `false`), not from a run. Said here because the defect is deliberately
-  unfixed, and a reproduction transcript that was never produced would be the
-  exact defect this round is correcting.
+- **Neither migration is applied.** Both were validated — Postgres parsed and
+  accepted them inside a rolled-back transaction, and reported `ON DELETE
+  CASCADE` on both new foreign keys from `pg_constraint` — so "the DDL is valid"
+  is now observed rather than inferred. What remains unobserved is the
+  *behaviour*: no workspace has actually been deleted and no eval row watched to
+  disappear with it. That needs the migration applied for real.
 - **No live Anthropic API call**, and **Neon is still untested** — both carried
   forward unchanged from Round 2.
 
@@ -595,7 +602,7 @@ test exit=0            typecheck exit=0
 
   **Now genuinely true, at `2273ae1`.** Round 3 re-ran it after the work was
   committed: fresh `git clone`, no `.next/`, full `npm ci` (exit 0), then
-  `typecheck` (exit 0) → `test` (exit 0, 4 files / **160 tests**) → `lint`
+  `typecheck` (exit 0) → `test` (exit 0, 4 files / **164 tests**) → `lint`
   (exit 0). The clone was confirmed to contain the fixes — `invalid_invoice_data`
   present in `src/policy/refund.ts`, migrations `0000`, `0001` and `0002` all
   present. This is still the only way to surface the `next typegen` class of
