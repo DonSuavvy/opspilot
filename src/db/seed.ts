@@ -422,9 +422,22 @@ async function seed() {
         push("INV-2006", 12);
         break;
       default: {
-        // Filler volume: three months of ordinary paid invoices.
+        /**
+         * Filler volume: three months of ordinary paid invoices.
+         *
+         * Ages are deliberately kept clear of BOTH window boundaries (14 and
+         * 30 days) by at least 6 days: 4-7, 36-39, 68-71.
+         *
+         * The earlier formula (`m * 30 + (i % 7)`) put three fillers at
+         * *exactly* 30 days whenever `i % 7 === 0`. Those evaluated "outside
+         * the window" only because real time elapses between seeding and
+         * evaluation — a ~74ms margin. Nothing was broken, since paidAt is
+         * fixed and `now` only advances, but "exactly one invoice flips" was
+         * true by accident rather than by construction. Now it's by
+         * construction, and verify-seed asserts it across every row.
+         */
         for (let m = 1; m <= 3; m += 1) {
-          push(`INV-${3000 + i * 10 + m}`, m * 30 + (i % 7));
+          push(`INV-${3000 + i * 10 + m}`, m * 32 - 28 + (i % 4));
         }
       }
     }

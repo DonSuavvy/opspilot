@@ -29,8 +29,8 @@ export function getDb(): Db {
   const url = process.env.DATABASE_URL;
   if (!url) {
     throw new Error(
-      "DATABASE_URL is not set. Copy .env.example to .env.local and fill it in, " +
-        "or run `npm run db:up` for a local Postgres on port 5433.",
+      "DATABASE_URL is not set. Run `cp .env.example .env.local`, then " +
+        "`npm run db:up` for a local Postgres on port 5434.",
     );
   }
 

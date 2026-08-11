@@ -144,6 +144,59 @@ async function main() {
       ` — without this the demo shows nothing`,
   );
 
+  /**
+   * The quantified claim. Checking three named invoices does not establish
+   * "exactly one invoice flips" — that ranges over the whole dataset, and a
+   * second invoice crossing the boundary would muddy the demo without any
+   * hardcoded assertion noticing. So evaluate every row.
+   */
+  const allInvoices = await db
+    .select()
+    .from(invoices)
+    .where(eq(invoices.workspaceId, workspace.id));
+
+  const outcomeAt = (invoice: (typeof allInvoices)[number], windowDays: number) =>
+    evaluateRefund({
+      invoice: {
+        id: invoice.id,
+        status: invoice.status,
+        amountCents: invoice.amountCents,
+        refundedCents: invoice.refundedCents,
+        paidAt: invoice.paidAt,
+      },
+      requestedCents: invoice.amountCents,
+      reason: "service_issue",
+      now,
+      policy: {
+        ...DEFAULT_POLICY,
+        refund: { ...DEFAULT_POLICY.refund, windowDays },
+      },
+    }).outcome;
+
+  const flipped = allInvoices.filter(
+    (inv) => outcomeAt(inv, 30) !== outcomeAt(inv, 14),
+  );
+
+  check(
+    flipped.length === 1 && flipped[0].number === "INV-2002",
+    `across all ${allInvoices.length} invoices, exactly one flips and it is INV-2002 ` +
+      `(got ${flipped.length}: ${flipped.map((f) => f.number).join(", ") || "none"})`,
+  );
+
+  // Nothing may sit within a day of either boundary, or the "exactly one"
+  // property becomes a race against wall-clock drift rather than a fact.
+  const nearBoundary = allInvoices.filter((inv) => {
+    if (!inv.paidAt) return false;
+    const age = (now.getTime() - inv.paidAt.getTime()) / 86_400_000;
+    return Math.abs(age - 14) < 1 || Math.abs(age - 30) < 1;
+  });
+
+  check(
+    nearBoundary.length === 0,
+    `no invoice sits within a day of a window boundary ` +
+      `(got ${nearBoundary.length}: ${nearBoundary.map((f) => f.number).join(", ") || "none"})`,
+  );
+
   /* ---------------------------------------------------------------------- */
 
   console.log("\n\x1b[1m3. Duplicate charge is always refundable\x1b[0m");

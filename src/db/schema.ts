@@ -304,6 +304,15 @@ export const sops = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     slug: text("slug").notNull(),
     title: text("title").notNull(),
+    /**
+     * Intentionally has no FK constraint, unlike every other relationship
+     * column in this schema. `sops` and `sop_versions` are mutually
+     * referential (sop_versions.sop_id → sops.id, and this pointing back), so
+     * a real FK needs a deferred constraint added after both tables exist.
+     * The invariant — that this points at a sop_version belonging to the same
+     * sop_id and workspace_id — is enforced in application code, not the
+     * database. Revisit when Day 4's SOP editor starts writing here.
+     */
     activeVersionId: uuid("active_version_id"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()

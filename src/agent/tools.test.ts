@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildRegistry } from "./registry";
+import { buildRegistry, UNSUPPORTED_KEYWORDS } from "./registry";
 import { NotImplementedError, TOOLS } from "./tools";
 
 const registry = buildRegistry(TOOLS);
@@ -90,19 +90,9 @@ describe("production tool set", () => {
    * this asserts the stripping actually covered the whole production set.
    */
   it("emits strict-legal JSON Schema for every tool", () => {
-    const illegal = [
-      "minimum",
-      "maximum",
-      "exclusiveMinimum",
-      "exclusiveMaximum",
-      "multipleOf",
-      "minLength",
-      "maxLength",
-      "pattern",
-      "minItems",
-      "maxItems",
-      "$schema",
-    ];
+    // Imported rather than re-listed: a hand-copied subset drifts from the
+    // real blocklist, and this test is the regression net for the whole thing.
+    const illegal = UNSUPPORTED_KEYWORDS;
 
     for (const spec of registry.toAnthropicTools()) {
       const keywords = keywordsIn(spec.input_schema);

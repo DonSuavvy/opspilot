@@ -111,6 +111,10 @@ the policy and can explain it to a customer. Once in the **`issue_refund`
 handler**, which revalidates against the stored policy config and rejects
 out-of-policy calls with `is_error: true` — which the agent then has to handle.
 
+> **Built today:** the policy engine both halves call, and the schema that keeps
+> them in the same versioned row. **Day 2:** the handler that performs the
+> second check — tool handlers currently throw `NotImplementedError` by design.
+
 Both representations live in the same versioned row, so editing the SOP updates
 what the model reads and what the code enforces atomically. They cannot drift.
 
@@ -173,12 +177,15 @@ the dashboard exists to report.
 
 ## Stack
 
-Next.js 16 (App Router, TypeScript strict) · Tailwind v4 · shadcn/ui on Radix ·
-Drizzle ORM → Postgres (Neon) · Zod 4 · Vitest · raw `@anthropic-ai/sdk` ·
-Vercel · GitHub Actions
+**In the repo today:** Next.js 16 (App Router, TypeScript strict) · Tailwind v4 ·
+shadcn/ui on Radix · Drizzle ORM → Postgres · Zod 4 · Vitest · GitHub Actions
 
-Public demo runs `claude-haiku-4-5` (rate-capped, ~pennies per run); quality
-mode and the model bake-off use `claude-sonnet-5` / `claude-opus-5`.
+**Arriving with the agent loop and deploy:** raw `@anthropic-ai/sdk` (Day 2) ·
+Neon · Vercel (Day 8)
+
+The public demo *will* run `claude-haiku-4-5` (rate-capped, ~pennies per run),
+with quality mode and the model bake-off on `claude-sonnet-5` / `claude-opus-5`.
+There is no deployed demo yet — the link lands here on Day 8.
 
 ---
 

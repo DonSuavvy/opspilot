@@ -28,7 +28,7 @@ Anything that doesn't make this arc better gets cut first.
 ## Architecture
 
 ```
-Next.js 15 (App Router, TS strict) ── Vercel
+Next.js 16 (App Router, TS strict) ── Vercel
 ├── UI: Tailwind + shadcn/ui
 │   ├── Inbox (tickets + scenario injector)
 │   ├── Trace viewer (live SSE waterfall)
@@ -141,7 +141,7 @@ TDD applies per the global protocol: policy engine, tool handlers, eval scorers,
 
 | Day | Ship | Gate to pass |
 |---|---|---|
-| 1 | Scaffold (Next 15, Drizzle, Neon, CI skeleton), schema + seeds, **tool registry + safety classes + policy engine (test-first)** | Unit tests green; boot validation fails loudly on a bad tool |
+| 1 | Scaffold (Next 16, Drizzle, Neon, CI skeleton), schema + seeds, **tool registry + safety classes + policy engine (test-first)** | Unit tests green; boot validation fails loudly on a bad tool |
 | 2 | Agent loop + SSE streaming + run/span persistence + cost accounting | A ticket resolves end-to-end from `curl`; spans + costs in DB |
 | 3 | Inbox UI + trace viewer (live waterfall) | Demo arc step 1 works in the browser |
 | 4 | SOP versioning + editor + prompt assembly + caching + diff view | Demo arc step 2 works; cache metrics visible |

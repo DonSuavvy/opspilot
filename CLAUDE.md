@@ -71,6 +71,13 @@ accounting. Write the test, run it, *watch it fail*, then implement.
 If you wrote code before the test: delete the implementation, write the test,
 watch it fail, reimplement.
 
+**Commit the failing test separately from the implementation.** Days 1's commits
+landed tests and implementation together, which means the RED step is invisible
+in `git log` — an independent audit correctly flagged the TDD claim as
+*unverifiable from history*, not false. Two commits (`test: <x> (RED)` then
+`feat: <x> (GREEN)`) costs nothing and turns a process claim into evidence
+anyone can check. Do this from Day 2 onward.
+
 ### Verification before completion
 
 Never claim "done" or "works" without fresh evidence from this session. Run the
