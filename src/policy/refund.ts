@@ -7,7 +7,7 @@
  * reject it with `is_error: true` when it is out of policy. Never trust the
  * model. This module is what makes that claim true.
  *
- * Three properties this file must keep:
+ * Four properties this file must keep:
  *
  * 1. **Pure.** No database access, no `Date.now()`, no I/O. `now` is an
  *    argument. This is what lets the eval suite be deterministic even though
@@ -25,13 +25,22 @@
 import { z } from "zod";
 
 
-export type InvoiceStatus =
-  | "draft"
-  | "open"
-  | "paid"
-  | "refunded"
-  | "partially_refunded"
-  | "void";
+/**
+ * Every invoice status, as a value and not only as a type. The union below is
+ * derived from this array so the runtime list and the compile-time type cannot
+ * drift: adding a status adds it to both, and a status that exists in the type
+ * but not the list would otherwise read as bad data on every invoice.
+ */
+export const INVOICE_STATUSES = [
+  "draft",
+  "open",
+  "paid",
+  "refunded",
+  "partially_refunded",
+  "void",
+] as const;
+
+export type InvoiceStatus = (typeof INVOICE_STATUSES)[number];
 
 export type RefundReason =
   | "duplicate_charge"
@@ -45,6 +54,8 @@ export type RefundOutcome = "approve" | "requires_approval" | "deny";
 export type RefundViolation =
   | "non_integer_amount"
   | "non_positive_amount"
+  /** The invoice row itself is unreadable — see `evaluateRefund`. */
+  | "invalid_invoice_data"
   | "invoice_not_paid"
   | "invoice_already_refunded"
   | "amount_exceeds_invoice_balance"
@@ -97,9 +108,15 @@ const cents = z.number().int().nonnegative().safe();
  * it silently deletes that limit. A `refund: {}` blob approved a $99,999.99
  * refund on a 400-day-old invoice with zero violations.
  *
- * `.strict()` is what catches the misspelling — without it, `maxRefundCent`
- * would be dropped as an unknown key and `maxRefundCents` would read as
- * missing, which is the same silent failure wearing a different hat.
+ * A *misspelled* key is caught by the required-key check on its own:
+ * `maxRefundCent` leaves `maxRefundCents` absent, and an absent required key is
+ * rejected whether or not the object is strict. `.strict()` guarantees
+ * something narrower and still load-bearing — it rejects an **extra** key
+ * alongside an otherwise-complete, valid policy. That is the Day-4 SOP editor
+ * writing a limit this engine does not implement: without `.strict()` the key
+ * is dropped in silence and the operator is left believing a rule is enforced
+ * that no line of code reads. It is applied at all three levels because each
+ * object only sees its own keys — the outer one cannot police `refund`.
  */
 export const policyConfigSchema = z
   .object({
@@ -174,7 +191,10 @@ export interface RefundDecision {
   /** Zero on denial; the requested amount otherwise. */
   approvedCents: number;
   violations: RefundViolation[];
-  /** Days elapsed since payment, or null when the invoice was never paid. */
+  /**
+   * Days elapsed since payment; null when the invoice has no usable payment
+   * date. Never `NaN` — the trace viewer and the eval scorers read this.
+   */
   ageDays: number | null;
 }
 
@@ -186,6 +206,28 @@ const SETTLED: ReadonlySet<InvoiceStatus> = new Set<InvoiceStatus>([
   "partially_refunded",
   "refunded",
 ]);
+
+const KNOWN_STATUS: ReadonlySet<string> = new Set(INVOICE_STATUSES);
+
+/**
+ * A cents field on an invoice row: whole, non-negative, and small enough that
+ * integer arithmetic is still arithmetic. `Number.isSafeInteger` already
+ * rejects `NaN`, `Infinity`, fractions and non-numbers; the explicit `>= 0` is
+ * what rejects a negative amount or a negative refunded total.
+ */
+function isCentsField(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+/**
+ * A `Date` that actually denotes a moment. `new Date(undefined)` is an Invalid
+ * Date — a real `Date` instance whose `getTime()` is `NaN`, so it survives both
+ * an `instanceof` test and a `?? null` normalisation and then poisons every
+ * comparison downstream.
+ */
+function isUsableDate(value: unknown): value is Date {
+  return value instanceof Date && Number.isFinite(value.getTime());
+}
 
 /**
  * The only violation that escalates rather than denies. Everything else is a
@@ -201,6 +243,21 @@ export function evaluateRefund(input: RefundEvaluationInput): RefundDecision {
   // deletes the limit in silence. Refusing to decide is the only safe answer
   // to a policy that cannot be read.
   const rules = parsePolicyConfig(input.policy).refund;
+
+  // `now` is injected by the calling code — never by the model, never by the
+  // database — so an unusable clock is a bug in the caller rather than bad
+  // data, and it gets the same answer as an unreadable policy: refuse to
+  // decide. Left unchecked it is the worst of the lot, because `NaN` fails
+  // *every* comparison: it would skip the future-dated guard and the refund
+  // window both, and approve silently with zero violations.
+  if (!isUsableDate(now)) {
+    throw new TypeError(
+      "evaluateRefund: `now` must be a valid Date. It is supplied by the " +
+        "caller, so an invalid clock is a programmer error — and a NaN age " +
+        "silently skips the refund window rather than failing it.",
+    );
+  }
+
   const violations: RefundViolation[] = [];
 
   // Safe, not merely integral: above 2^53 `n + 1 === n`, so arithmetic on the
@@ -212,22 +269,48 @@ export function evaluateRefund(input: RefundEvaluationInput): RefundDecision {
     violations.push("non_positive_amount");
   }
 
-  // Normalised once. `settled` used `!== null` while the age used truthiness,
-  // and they disagreed on `undefined` — which a Drizzle row or a JSON round
-  // trip can produce — so an invoice with no payment date was "settled" and
-  // skipped the window check entirely. A nullable field gets one null test.
-  const paidAt = invoice.paidAt ?? null;
+  // `invoice` crosses a runtime boundary the interface above does not police:
+  // a Drizzle row, a JSON round trip, and from Day 2 a model-proposed tool
+  // argument. Bad data here is a violation rather than a throw, because this
+  // engine's job is to report every reason a refund was refused and a ZodError
+  // shows the trace viewer nothing. Each field is tested separately so a bad
+  // one withdraws only the rules that actually read it.
+  const statusOk = KNOWN_STATUS.has(invoice.status);
+  const amountOk = isCentsField(invoice.amountCents);
+  const refundedOk = isCentsField(invoice.refundedCents);
+
+  // `null` and `undefined` both mean "never paid": a nullable column, and a
+  // partial select of that same column. Anything else that is not a usable
+  // Date is bad data — including the ISO string a JSON round trip makes of a
+  // Date, because deserialising belongs to the boundary that serialised it.
+  // Previously an Invalid Date survived `?? null`, made `ageDays` NaN, and so
+  // skipped both the future-dated guard and the window check.
+  const paidAtRaw: unknown = invoice.paidAt;
+  const paidAtOk =
+    paidAtRaw === null || paidAtRaw === undefined || isUsableDate(paidAtRaw);
+  const paidAt: Date | null = isUsableDate(paidAtRaw) ? paidAtRaw : null;
+
+  // Pushed at a fixed point in the sequence rather than wherever the first bad
+  // field happened to be found, so the array stays order-stable and carries one
+  // entry however many fields are wrong.
+  if (!statusOk || !amountOk || !refundedOk || !paidAtOk) {
+    violations.push("invalid_invoice_data");
+  }
 
   const settled = SETTLED.has(invoice.status) && paidAt !== null;
   if (!settled) {
     violations.push("invoice_not_paid");
   }
 
-  const balanceCents = invoice.amountCents - invoice.refundedCents;
-  if (balanceCents <= 0) {
-    violations.push("invoice_already_refunded");
-  } else if (requestedCents > balanceCents) {
-    violations.push("amount_exceeds_invoice_balance");
+  // Skipped rather than run on garbage: `NaN <= 0` and `x > NaN` are both
+  // false, so an unchecked balance withdraws *both* of these rules at once.
+  if (amountOk && refundedOk) {
+    const balanceCents = invoice.amountCents - invoice.refundedCents;
+    if (balanceCents <= 0) {
+      violations.push("invoice_already_refunded");
+    } else if (requestedCents > balanceCents) {
+      violations.push("amount_exceeds_invoice_balance");
+    }
   }
 
   const ageDays =
@@ -298,6 +381,17 @@ export function evaluateEscalation(
 ): EscalationDecision {
   // Same reasoning as evaluateRefund: an unreadable policy silently disables
   // every toggle below, which here means quietly *not* escalating.
+  //
+  // This validates the *whole* policy and then reads only `.escalation`, so a
+  // malformed `refund` block disables escalation too. That coupling is a
+  // deliberate precondition, not an oversight. `policy_config` is one jsonb
+  // blob in one versioned `sop_versions` row: it is valid or it is not, and
+  // "half-enforced SOP" is not a state this system should ever run in. The
+  // failure is also loud — this throws rather than under-escalating in
+  // silence, which is the direction that matters for a function whose job
+  // includes catching prompt injection. Parsing only the sub-schema would buy
+  // a narrower blast radius at the cost of running on a policy already known
+  // to be broken.
   const rules = parsePolicyConfig(input.policy).escalation;
   const reasons: EscalationReason[] = [];
 

@@ -5,6 +5,7 @@ import {
   evaluateEscalation,
   evaluateRefund,
   parsePolicyConfig,
+  policyConfigSchema,
   type PolicyConfig,
   type RefundEvaluationInput,
 } from "./refund";
@@ -732,5 +733,284 @@ describe("the engine refuses to run on an unparseable policy", () => {
 
   it("still evaluates a well-formed policy normally", () => {
     expect(evaluateRefund(input({})).outcome).toBe("approve");
+  });
+});
+
+/**
+ * `.strict()` guarantees exactly one thing: an otherwise-complete, valid policy
+ * carrying an *extra* key is rejected instead of silently ignored. A
+ * *misspelled* key is caught by the required-key check with or without it —
+ * verified against Zod 4.4.3, where `maxRefundCent` (no trailing s) is rejected
+ * either way as `invalid_type` on the absent `maxRefundCents`.
+ *
+ * That distinction is why these tests assert the extra-key case and the issue
+ * path. A test written against the misspelling story passes with `.strict()`
+ * removed, which is how all three of these calls survived a mutation run: 14
+ * reversions, 11 killed, and the three survivors were precisely these.
+ *
+ * The path pins *which* level did the rejecting, so the outer test cannot pass
+ * on an inner rejection if the schema is ever restructured.
+ */
+describe("policyConfigSchema rejects keys it does not recognise", () => {
+  function unrecognizedKeyPaths(raw: unknown): PropertyKey[][] {
+    const result = policyConfigSchema.safeParse(raw);
+    if (result.success) return [];
+    return result.error.issues
+      .filter((issue) => issue.code === "unrecognized_keys")
+      .map((issue) => [...issue.path]);
+  }
+
+  /**
+   * The realistic failure: the Day-4 SOP editor writes a limit this engine
+   * does not implement. Ignoring it silently would leave the operator believing
+   * a floor is enforced that no line of code reads.
+   */
+  it("rejects an unknown key inside the refund block", () => {
+    const raw = {
+      refund: { ...DEFAULT_POLICY.refund, minRefundCents: 500 },
+      escalation: DEFAULT_POLICY.escalation,
+    };
+
+    expect(unrecognizedKeyPaths(raw)).toEqual([["refund"]]);
+    expect(() => parsePolicyConfig(raw)).toThrow();
+  });
+
+  it("rejects an unknown key inside the escalation block", () => {
+    const raw = {
+      refund: DEFAULT_POLICY.refund,
+      escalation: {
+        ...DEFAULT_POLICY.escalation,
+        escalateOnRefundRequest: true,
+      },
+    };
+
+    expect(unrecognizedKeyPaths(raw)).toEqual([["escalation"]]);
+    expect(() => parsePolicyConfig(raw)).toThrow();
+  });
+
+  it("rejects an unknown key at the top level", () => {
+    const raw = { ...DEFAULT_POLICY, subscription: { maxDowngrades: 1 } };
+
+    expect(unrecognizedKeyPaths(raw)).toEqual([[]]);
+    expect(() => parsePolicyConfig(raw)).toThrow();
+  });
+});
+
+/**
+ * `RefundEvaluationInput` is a TypeScript interface over values that arrive at
+ * runtime — from Drizzle rows, from a JSON round trip, and from Day 2 onward
+ * from model-proposed tool arguments. The interface is erased at build time and
+ * guarantees nothing about any of them.
+ *
+ * Every rule below a bad field is a `>` comparison, and every comparison
+ * against `NaN` is `false`. So a single poisoned number does not throw and does
+ * not deny: it silently deletes the rules that depended on it. The reproduction
+ * this suite was written against had `paidAt = new Date(undefined)` and
+ * `amountCents = NaN` each auto-approving with *zero* violations.
+ *
+ * The split is deliberate. `now` is supplied by the calling code, never by the
+ * model or the database, so an invalid clock is a programmer bug and throws.
+ * `invoice.*` is external data, so a bad field is a violation — the engine's
+ * job is exhaustive violations the trace viewer can render, and a ZodError
+ * shows the reader nothing.
+ */
+describe("evaluateRefund — the evaluation input is data, not a type", () => {
+  /** Exactly the reviewer's reproduction: an Invalid Date is still a Date. */
+  const INVALID_DATE = new Date(undefined as never);
+
+  /**
+   * Matched against the deliberate message, not merely `/now/`. A bare
+   * `now.getTime is not a function` also contains "now", so the looser regex
+   * let a non-Date pass this test with the guard deleted — the assertion has
+   * to distinguish a designed refusal from an incidental crash.
+   */
+  describe("`now` is the caller's responsibility, so it throws", () => {
+    const DELIBERATE = /must be a valid Date/;
+
+    it("throws on an Invalid Date rather than deleting every time-based rule", () => {
+      expect(() => evaluateRefund({ ...input({}), now: INVALID_DATE })).toThrow(
+        DELIBERATE,
+      );
+    });
+
+    it("throws when `now` is not a Date at all", () => {
+      expect(() =>
+        evaluateRefund({ ...input({}), now: NOW.getTime() as never }),
+      ).toThrow(DELIBERATE);
+    });
+  });
+
+  describe("`invoice` is external data, so it becomes a violation", () => {
+    it("flags an Invalid Date paidAt instead of approving it", () => {
+      const decision = evaluateRefund(
+        input({ invoice: { paidAt: INVALID_DATE } }),
+      );
+
+      expect(decision.outcome).toBe("deny");
+      expect(decision.approvedCents).toBe(0);
+      expect(decision.violations).toContain("invalid_invoice_data");
+      // Never NaN: the decision is consumed by the trace viewer and the scorers.
+      expect(decision.ageDays).toBeNull();
+    });
+
+    /**
+     * What a real JSON round trip produces from a `Date`. Deserialization is
+     * the job of the boundary that serialized it; this engine's contract is
+     * `Date | null` and it reports anything else rather than guessing.
+     */
+    it("flags an ISO-string paidAt instead of throwing a raw TypeError", () => {
+      const decision = evaluateRefund(
+        input({ invoice: { paidAt: NOW.toISOString() as never } }),
+      );
+
+      expect(decision.outcome).toBe("deny");
+      expect(decision.violations).toContain("invalid_invoice_data");
+      expect(decision.ageDays).toBeNull();
+    });
+
+    /**
+     * The one combination where the old code had *two* independent reasons to
+     * skip the window check: the duplicate-charge bypass waives it outright,
+     * and a NaN age would have skipped it anyway.
+     */
+    it("denies a duplicate charge with an unusable paidAt even though the window is waived", () => {
+      const decision = evaluateRefund(
+        input({
+          invoice: { paidAt: INVALID_DATE },
+          reason: "duplicate_charge",
+        }),
+      );
+
+      expect(decision.outcome).toBe("deny");
+      expect(decision.violations).toContain("invalid_invoice_data");
+    });
+
+    it("flags a NaN amountCents instead of deleting both balance rules", () => {
+      const decision = evaluateRefund(
+        input({
+          invoice: { amountCents: Number.NaN },
+          requestedCents: 3000,
+        }),
+      );
+
+      expect(decision.outcome).toBe("deny");
+      expect(decision.approvedCents).toBe(0);
+      expect(decision.violations).toContain("invalid_invoice_data");
+    });
+
+    /** A partial Drizzle select omits the column entirely. */
+    it("flags an undefined refundedCents instead of approving", () => {
+      const decision = evaluateRefund(
+        input({
+          invoice: { amountCents: 2000, refundedCents: undefined as never },
+          requestedCents: 3000,
+        }),
+      );
+
+      expect(decision.outcome).toBe("deny");
+      expect(decision.violations).toContain("invalid_invoice_data");
+    });
+
+    it("flags a NaN refundedCents on a fully refunded invoice", () => {
+      const decision = evaluateRefund(
+        input({
+          invoice: {
+            status: "refunded",
+            amountCents: 2000,
+            refundedCents: Number.NaN,
+          },
+          requestedCents: 3000,
+        }),
+      );
+
+      expect(decision.outcome).toBe("deny");
+      expect(decision.violations).toContain("invalid_invoice_data");
+    });
+
+    /**
+     * A negative amount is the case that proves the balance rules must be
+     * *skipped* rather than merely left to fail: `-4900 - 0 <= 0` is true, so
+     * running them on bad data invents a second, false reason — the invoice
+     * reads as "already refunded" when nothing was ever refunded.
+     */
+    it("flags a negative amountCents without inventing a refund that never happened", () => {
+      const decision = evaluateRefund(
+        input({ invoice: { amountCents: -4900 }, requestedCents: 100 }),
+      );
+
+      expect(decision.violations).toContain("invalid_invoice_data");
+      expect(decision.violations).not.toContain("invoice_already_refunded");
+    });
+
+    it("flags a fractional amountCents — money is never a float", () => {
+      const decision = evaluateRefund(
+        input({ invoice: { amountCents: 4900.5 }, requestedCents: 100 }),
+      );
+
+      expect(decision.violations).toContain("invalid_invoice_data");
+    });
+
+    /**
+     * From Day 2 the status can arrive from a model-proposed tool argument.
+     * An unrecognised one already failed closed via SETTLED; naming it makes
+     * the trace say *why* rather than claiming the invoice was never paid.
+     */
+    it("flags an unrecognised invoice status", () => {
+      const decision = evaluateRefund(
+        input({ invoice: { status: "PAID" as never } }),
+      );
+
+      expect(decision.outcome).toBe("deny");
+      expect(decision.violations).toContain("invalid_invoice_data");
+    });
+
+    it.each(["open", "void", "draft"] as const)(
+      "does not flag the valid %s status as bad data",
+      (status) => {
+        const decision = evaluateRefund(
+          input({ invoice: { status, paidAt: null } }),
+        );
+
+        expect(decision.violations).not.toContain("invalid_invoice_data");
+        expect(decision.violations).toContain("invoice_not_paid");
+      },
+    );
+  });
+
+  it("reports invalid_invoice_data exactly once however many fields are bad", () => {
+    const decision = evaluateRefund(
+      input({
+        invoice: {
+          status: "nonsense" as never,
+          amountCents: Number.NaN,
+          refundedCents: undefined as never,
+          paidAt: INVALID_DATE,
+        },
+      }),
+    );
+
+    expect(
+      decision.violations.filter((v) => v === "invalid_invoice_data"),
+    ).toHaveLength(1);
+  });
+
+  /**
+   * Exhaustive violations, property 3 of the file header: a poisoned field
+   * suppresses only the rules that read it. The window check does not read
+   * `amountCents`, so it must still fire.
+   */
+  it("still reports the rules that do not depend on the bad field", () => {
+    const decision = evaluateRefund(
+      input({
+        invoice: { amountCents: Number.NaN, paidAt: daysAgo(90) },
+        requestedCents: 3000,
+      }),
+    );
+
+    expect(decision.violations).toContain("invalid_invoice_data");
+    expect(decision.violations).toContain("outside_refund_window");
+    // The balance rules read amountCents, so they must not fire on garbage.
+    expect(decision.violations).not.toContain("amount_exceeds_invoice_balance");
+    expect(decision.violations).not.toContain("invoice_already_refunded");
   });
 });
