@@ -134,6 +134,86 @@ describe("toStrictJsonSchema", () => {
     expect(properties.when.format).toBe("date-time");
   });
 
+  /**
+   * The sanitizer walks the schema tree deleting keys that match a keyword
+   * blocklist. Inside `properties`, the keys are *field names*, not keywords —
+   * so a tool field named `pattern` was being deleted from `properties` while
+   * surviving in `required`, producing a schema that demands a field it also
+   * forbids. Nothing could ever validate against it, and boot validation could
+   * not see it because the sanitizer returns quietly rather than throwing.
+   */
+  it.each(["pattern", "maximum", "minLength", "uniqueItems"])(
+    "does not delete a tool field whose name collides with keyword %s",
+    (fieldName) => {
+      const schema = toStrictJsonSchema(
+        z.object({ [fieldName]: z.string(), other: z.string() }),
+      );
+
+      expect(Object.keys(schema.properties)).toContain(fieldName);
+      expect(schema.required).toContain(fieldName);
+    },
+  );
+
+  it("never lets required reference a property that does not exist", () => {
+    const schema = toStrictJsonSchema(
+      z.object({
+        pattern: z.string(),
+        maximum: z.number(),
+        nested: z.object({ minLength: z.string() }),
+      }),
+    );
+
+    const orphaned = schema.required.filter((r) => !(r in schema.properties));
+    expect(orphaned).toEqual([]);
+  });
+
+  it("preserves an object-valued default verbatim", () => {
+    const schema = toStrictJsonSchema(
+      z.object({
+        cfg: z
+          .object({ pattern: z.string(), keep: z.string() })
+          .default({ pattern: "abc", keep: "z" }),
+      }),
+    );
+
+    const cfg = (schema.properties as Record<string, Record<string, unknown>>)
+      .cfg;
+    expect(cfg.default).toEqual({ pattern: "abc", keep: "z" });
+  });
+
+  /**
+   * z.record() is an open-ended map. Strict mode requires every object to be
+   * closed, so an open map cannot be expressed at all — forcing
+   * additionalProperties:false would produce a field that silently accepts
+   * nothing. Failing at boot is the honest outcome.
+   */
+  it("rejects an open-ended record rather than silently closing it", () => {
+    expect(() =>
+      toStrictJsonSchema(z.object({ meta: z.record(z.string(), z.number()) })),
+    ).toThrow(ToolRegistryError);
+  });
+
+  it("closes objects nested inside unions and $defs", () => {
+    const inner = z.object({ a: z.string() });
+    const schema = toStrictJsonSchema(
+      z.object({ choice: z.union([inner, z.object({ b: z.string() })]) }),
+    );
+
+    const found: unknown[] = [];
+    const walk = (n: unknown) => {
+      if (Array.isArray(n)) return n.forEach(walk);
+      if (n && typeof n === "object") {
+        const node = n as Record<string, unknown>;
+        if (node.type === "object") found.push(node.additionalProperties);
+        Object.values(node).forEach(walk);
+      }
+    };
+    walk(schema);
+
+    expect(found.length).toBeGreaterThan(1);
+    expect(found.every((v) => v === false)).toBe(true);
+  });
+
   it("preserves nested objects as strict too", () => {
     const schema = toStrictJsonSchema(
       z.object({ meta: z.object({ source: z.string().min(1) }) }),
