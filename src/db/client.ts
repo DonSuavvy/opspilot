@@ -50,8 +50,12 @@ export function resolveSsl(url: string): false | { rejectUnauthorized: true } {
     );
   }
 
-  // URL keeps IPv6 literals bracketed; the set stores them bare.
-  const host = hostname.replace(/^\[|\]$/g, "");
+  // URL keeps IPv6 literals bracketed; the set stores them bare. The case fold
+  // is not redundant: `URL` lowercases hostnames only for *special* schemes,
+  // and `postgres:` is not one, so `@LOCALHOST/` arrives cased exactly as typed.
+  // `toLowerCase`, never the locale-sensitive `toLocaleLowerCase`. Folding
+  // cannot fail open: only case variants of a loopback name fold onto one.
+  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
   return LOCAL_HOSTS.has(host) ? false : { rejectUnauthorized: true };
 }
 
