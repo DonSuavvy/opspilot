@@ -14,6 +14,14 @@ overclaim the rest of this file exists to record. Most were caught before they
 could matter. Several were caught only because the code was reviewed by someone
 other than the person who wrote it.
 
+Two things this file does **not** claim. **Entry 13 is open** — a live defect,
+deliberately unfixed because every available fix is a contract change that needs
+an owner's decision rather than a default. And entries 9 and 10 carry dated
+corrections: a later pass found that both had described their own fixes
+inaccurately. Those corrections are marked in place rather than edited away,
+because a defect log that quietly rewrites itself is worth about as much as a
+green suite that never had a failing test.
+
 ## How this repo is checked
 
 The project's core engineering principle is **never trust the model** — the
@@ -321,14 +329,60 @@ not only at the boundary**. The first attempt validated only in a
 original probe showed `evaluateRefund` still approving $99,999.99, because a
 guarantee nothing is obliged to invoke is documentation, not enforcement. That
 is the same "claimed but not enforced" pattern this very file catalogues, so the
-parse moved inside both `evaluateRefund` and `evaluateEscalation`. `.strict()`
-is what catches the misspelling — without it a typo'd key is dropped as unknown
-and the real key reads as missing, which is the identical silent failure.
+parse moved inside both `evaluateRefund` and `evaluateEscalation`.
+
+**Correction — 2026-08-12.** This entry originally continued: *"`.strict()` is
+what catches the misspelling — without it a typo'd key is dropped as unknown and
+the real key reads as missing, which is the identical silent failure."* **That
+mechanism cannot occur.** A misspelling leaves the correct key absent, and an
+absent required key is rejected with or without `.strict()`. Measured against
+the installed Zod 4.4.3:
+
+```
+typo: maxRefundCent (missing final s)
+  .strict()        REJECTED (invalid_type: expected number, received undefined
+                             | unrecognized_keys: "maxRefundCent")
+  without strict   REJECTED (invalid_type: expected number, received undefined)
+all 4 correct keys PLUS one bogus extra key
+  .strict()        REJECTED (unrecognized_keys: "maxRefundDollars")
+  without strict   ACCEPTED                            <-- the real difference
+```
+
+`.strict()` buys something narrower and still worth having: it rejects an
+**extra** key alongside an otherwise-complete, valid policy. That is the Day-4
+SOP editor writing a limit this engine does not implement — without it the key
+is dropped in silence and the operator believes a rule is enforced that no line
+of code reads. The code comment carried the same wrong explanation and was
+corrected with it.
+
+**The class was only half-closed — 2026-08-12.** The argument above applies
+word for word to `RefundEvaluationInput`, and this entry made it without
+noticing. That interface is erased at build time too, its `invoice` arrives from
+a Drizzle row, and from Day 2 its fields carry model-proposed values. Nothing
+parsed it either. `new Date(undefined)` is an Invalid Date — a real `Date`
+instance — so it survived normalisation and poisoned `ageDays`, and NaN is false
+against both `< 0` and `> windowDays`, skipping the future-dated guard **and**
+the window check at once:
+
+```
+paidAt = new Date(undefined)   before: approve $50.00 on a 400-day-old invoice, violations=[]
+amountCents = NaN              before: approve $30.00 against a $20.00 invoice, violations=[]
+```
+
+Under $100 those auto-approved with no human; between $100 and $500 they reached
+the approval queue with an empty violations list, which is the trap this entry
+describes two paragraphs above. Fixed in `2273ae1`: invoice fields now yield a
+single `invalid_invoice_data` violation rather than throwing, because this
+engine's job is to report *every* violation so the trace viewer can show why a
+refund was refused, and a `ZodError` shows the reader nothing.
 
 **Lesson:** a TypeScript interface is a claim about a value, not a check on it.
 Wherever a typed value crosses a runtime boundary — a database, a request body,
 a file — the type is a comment until something parses it. And "I added a
-validator" is not the same as "the thing is validated."
+validator" is not the same as "the thing is validated." Nor is naming a bug
+class the same as checking every place it applies: this entry described the
+class precisely and then shipped with the second instance still open, one
+argument to the left of the one it fixed.
 
 ---
 
@@ -352,13 +406,25 @@ fix for entry 1**.
 
 **Fix:** tests that feed `assertConsistent` an inconsistency the sanitizer
 cannot produce, via Zod's `.meta()` raw-schema injection. Both mutations are now
-killed. The whole suite was then mutation-tested: fourteen deliberate reversions
-of every fix in this round, fourteen caught.
+killed. Fourteen further deliberate reversions were then run across the round's
+fixes, and all fourteen were caught.
+
+**Correction — 2026-08-12.** That last sentence originally read *"the whole
+suite was then mutation-tested: fourteen deliberate reversions of every fix in
+this round, fourteen caught."* Fourteen reversions that all die prove those
+fourteen lines are covered. They are not a statement about every fix, and the
+sentence was written as though they were. A later pass ran fourteen **different**
+reversions on `src/policy/refund.ts` alone: **11 killed, 3 survived**, all three
+being the `.strict()` calls this file describes in entry 9. They are pinned now
+— removing each in turn fails exactly one named test. A separate 6 reversions on
+`src/db/client.ts` were all killed.
 
 **Lesson:** a test that passes is not evidence of coverage. The only way to know
 an assertion is load-bearing is to break the thing it guards and watch it fail.
 A regression test written in the same sitting as its fix is especially suspect,
-because it was written by someone who already knew the answer.
+because it was written by someone who already knew the answer. And a kill rate
+describes the mutants somebody chose: when the same party picks the mutants and
+reports the score, the number is evidence about the picker as much as the suite.
 
 ---
 
@@ -425,3 +491,95 @@ order), and an honest reason for waiting.
 costs more than a missing feature. The feature is a to-do; the explanation is
 evidence about whether the author knows the system. Comments asserting what a
 database *cannot* do should be tested exactly like code.
+
+---
+
+## 13. The escalation engine has entry 9's bug, pointing the other way — 2026-08-12
+
+**Severity: medium (latent). Status: OPEN — deliberately not fixed.**
+
+**Caught by:** fixing entry 9's other half. Once `evaluateRefund` was made to
+parse its own input, the same question was asked of `evaluateEscalation` and it
+had not been.
+
+`evaluateEscalation` parses its `policy` argument and **not** its input. The
+churn-risk rule reads:
+
+```ts
+input.customerLifetimeValueCents >= rules.churnRiskLtvCents && dissatisfied
+```
+
+`customerLifetimeValueCents` is typed `number`, which is erased at build time;
+the value arrives from a Drizzle row. `NaN >= x` and `undefined >= x` are both
+`false`, so a missing or unparseable lifetime value does not throw and does not
+escalate — it silently drops `churn_risk`. **A dissatisfied $5,000 customer gets
+handled as routine.**
+
+This is entry 9's failure mode in the opposite direction. There, a deleted limit
+made the engine *over*-permissive and approved refunds it should have denied.
+Here a deleted limit makes it *under*-escalate, so the failure is invisible: no
+violation, no error, one fewer row in a queue nobody is counting. Silent
+under-escalation is the harder of the two to notice in production.
+
+**Why it is still open.** Every fix is a contract change, and picking one by
+default is how a headline metric ends up meaning something nobody agreed to:
+
+- a new `EscalationReason` for unknown LTV changes the enum the eval scorers key
+  off;
+- throwing contradicts this engine's stated job of returning exhaustive reasons
+  rather than failing;
+- treating unknown LTV as a churn risk inflates escalation rate, which is a
+  Mission Control KPI — the exact metric entry 5's bug inflated.
+
+Recorded as an open defect with a named owner decision rather than closed with
+whichever option was cheapest to type.
+
+**Evidence status:** reasoned from the source and from JavaScript comparison
+semantics (`NaN >= 500000` and `undefined >= 500000` both evaluate to `false`,
+confirmed), **not** from an executed reproduction. This file's standard is
+reproduce-before-fixing; nothing is being fixed here, and inventing a transcript
+that was never produced would be the same overclaim the corrections above exist
+to record.
+
+**Lesson:** when a bug class is found in one function, the next move is to grep
+for its siblings, not to fix the instance. Entry 9 named the class and shipped
+with two more instances live — one in its own module's other exported function.
+
+---
+
+## 14. A guard that catches less than its comment claims — 2026-08-12
+
+**Severity: low (dev papercut).**
+
+**Caught by:** testing the claim in a comment instead of reading it — the same
+move that produced entry 12.
+
+`src/db/client.ts` says its `resolveSsl` throw "surfaces a bad `DATABASE_URL`
+here rather than on the first query several layers away." It catches less than
+that. Drop the scheme — one easy way to mistype a connection string — and
+`new URL()` parses it happily:
+
+```
+input          : "localhost:5434/opspilot"
+did NOT throw  : protocol=localhost: hostname=""
+resolveSsl()   : { rejectUnauthorized: true }   <- TLS
+```
+
+`localhost:` is read as the *protocol* and the hostname is empty, so the string
+is not malformed as far as `URL` is concerned. The empty hostname misses
+`LOCAL_HOSTS`, TLS is demanded, and the failure lands on connect — precisely
+where the comment promises it will not.
+
+**Impact status: not a security bug.** It fails closed. An empty hostname is not
+a loopback host, so the mistake produces TLS-against-nothing and a confusing
+connection error, never a silent plaintext connection to a remote host. That is
+the direction entry 11's TLS fix cared about, and it still holds.
+
+**Why record it at all:** the code is fine; the *comment* overstates what the
+code does, and this repository's own entry 12 argues that a confidently wrong
+explanation costs more than a missing feature. A reader who trusts this comment
+will not check their connection string when a query fails.
+
+**Lesson:** `new URL()` is a parser, not a validator. It accepts any
+`scheme:opaque` string, so "it parsed" means "it was URL-shaped," not "it is the
+kind of URL you wanted."

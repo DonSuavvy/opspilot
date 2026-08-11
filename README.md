@@ -42,13 +42,14 @@ not the reply text.
 
 | | |
 |---|---|
-| **Data model** | 15-table Drizzle schema + migrations — workspaces, customers, subscriptions, invoices, tickets, KB articles, SOPs + SOP versions, agent runs, run spans, approvals, audit log, eval cases/runs/results — plus a lazy client that picks TLS from the parsed host. 10 tests |
-| **Policy engine** | Pure refund + escalation rules, with the stored policy blob parsed rather than trusted. 70 tests |
-| **Tool registry** | 9 tools with Zod schemas → strict JSON Schema, three-class safety model, boot-time validation. 51 tests |
+| **Data model** | 15-table Drizzle schema + migrations — workspaces, customers, subscriptions, invoices, tickets, KB articles, SOPs + SOP versions, agent runs, run spans, approvals, audit log, eval cases/runs/results — plus a lazy client that picks TLS from the parsed host. 20 tests |
+| **Policy engine** | Pure refund + escalation rules, with both the stored policy blob *and* the evaluation input parsed rather than trusted. 89 tests |
+| **Tool registry** | 9 tools with Zod schemas → strict JSON Schema, three-class safety model, boot-time validation. 42 tests, plus 9 pinning the nine tools' wire schemas |
 | **Seed** | Deterministic Beacon Analytics dataset — 30 customers, 54 invoices, 20 KB articles, 8 tickets |
 | **Infra** | Next.js 16, Tailwind v4, shadcn/ui on Radix, Vitest, GitHub Actions CI, Docker Postgres |
 
-**131 tests passing.** No test requires a database.
+**160 tests passing** — 89 + 42 + 9 + 20, across four files. No test requires a
+database.
 
 ### Coming (see [`docs/PLAN.md`](docs/PLAN.md))
 
@@ -217,14 +218,35 @@ Each was reproduced independently before being touched, and several reviewer
 findings were rejected on the evidence — including one hypothesis the reviewer
 was explicitly asked to test and correctly disproved. One of my own tests
 initially passed for the wrong reason and had to be rebuilt. The fixes went
-RED → GREEN with the failing output recorded, and each is pinned by a mutation
-test: fourteen deliberate reversions to the fixed code, all fourteen caught by
-the suite. **131 tests, up from 79 at the start of this round** (71 before the
-first one).
+RED → GREEN with the failing output recorded, and fourteen deliberate reversions
+to the fixed code were all caught by the suite. That round ended at **131 tests,
+up from 79** (71 before the first one).
+
+### Then a third pass audited the second one
+
+Written up as Round 3 in [`docs/REVIEWS.md`](docs/REVIEWS.md), run by an agent
+that had not taken part in Round 2 and told to treat its write-up as marketing
+until executed. It found the round had been right about the code and wrong about
+itself:
+
+| | |
+|---|---|
+| **A bug class fixed halfway** | Round 2 made the policy engine parse the policy blob because a TypeScript interface is erased at runtime. The engine's *other* argument is the same kind of claim, arriving from a Drizzle row, and nothing parsed it either. `new Date(undefined)` is an Invalid Date — a real `Date` — so it poisoned the age calculation, and NaN is false against both `< 0` and `> window`, skipping the future-dated guard **and** the window check at once: **$50.00 approved on a 400-day-old invoice with zero violations.** Round 2 described this class precisely, then shipped with the second instance open. |
+| **"Every fix is pinned by a mutation test"** | Fourteen reversions that all die prove those fourteen lines are covered — not that every fix is. A different fourteen on one file left **three alive**, all of them `.strict()` calls. Now pinned: removing each fails exactly one named test. |
+| **A gate run against the wrong tree** | Round 2 claimed clean-clone CI parity. Its work was uncommitted at the time, so the clone reproduced the *pre-review* tree — 79 tests, and not one occurrence of the function the round was built around. The check passed, on code that did not contain the fixes. It has since been re-run properly, on the committed tree. |
+| **A right answer from a false premise** | Seven speculative schema additions were rejected because "those tables have zero rows." One of them targeted `invoices`, which holds 54 — a figure the same document reports elsewhere. The conclusion survived on evidence (all 54 rows satisfy every constraint proposed), but the reason written down was wrong, and one item was overturned outright. |
+| **An explanation of the wrong mechanism** | Both the docs and a code comment explained `.strict()` as catching misspelled policy keys. It cannot: a misspelling leaves the real key absent, and an absent required key is rejected either way. What it actually catches is an *extra* key alongside a valid policy — narrower, real, and now stated correctly. |
+
+**160 tests, up from 131.** Two further defects that pass turned up are recorded
+as **open**: one because every available fix changes a contract the eval scorers
+depend on, so it needs a decision rather than whichever option was cheapest to
+type, and one because it is a comment that overstates what its code does. Left
+open and written down, not quietly closed.
 
 The point isn't that the reviews found things. It's that **shipping a green gate
 is where verification starts, not where it stops** — and that the failures are
-written down rather than quietly patched.
+written down rather than quietly patched, including the ones in the write-ups of
+earlier reviews.
 
 ---
 

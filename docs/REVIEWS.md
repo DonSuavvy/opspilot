@@ -16,6 +16,183 @@ which findings survive contact with the actual code and the actual schedule.
 
 ---
 
+## Round 3 — 2026-08-12 — Verification of Round 2
+
+**Question asked:** Round 2 audited the code. Does Round 2's own write-up
+survive the same treatment?
+
+**Method:** a single agent that **did not participate in Round 2**, given the
+round's write-up and told to treat it the way Round 2's Agent 3 was told to
+treat the README — as marketing until executed. Its prompt is recorded verbatim
+at [`docs/reviews/round-2-verification-prompt.md`](reviews/round-2-verification-prompt.md).
+
+**Headline:** five documentation claims that do not hold, one **critical live
+defect** in the policy engine, a smaller live defect in Round 2's own TLS fix,
+and one of Round 2's rejected findings overturned outright. Two further defects
+are recorded **open** rather than closed by default. Suite 131 → **160**. The
+code findings are fixed in `fc0b78d`, `49127b3` and `2273ae1`; the claims are
+corrected in place in the Round 2 section below, each marked as a Round 3
+correction rather than quietly rewritten.
+
+### Why the corrections are marked rather than edited away
+
+This repository's argument is that its author verifies claims instead of
+asserting them. A false claim in its documentation is therefore worse than an
+ordinary bug: it is the product failing at the one thing it exists to
+demonstrate. Silently correcting the text would produce a clean document and
+destroy the evidence that the check happened — which is the same move as a
+green suite that never had a failing test.
+
+### Findings ledger
+
+| ID | Severity | Finding | Where | Status |
+|---|---|---|---|---|
+| R3-01 | **Critical** | Policy engine trusted its *evaluation input*; `new Date(undefined)` approved $50.00 on a 400-day-old invoice with zero violations | `src/policy/refund.ts` | Fixed `2273ae1` |
+| R3-02 | Medium | Loopback lookup did not fold hostname case; `@LOCALHOST` demanded TLS from a Docker PG that offers none | `src/db/client.ts` | Fixed `fc0b78d` |
+| R3-03 | Medium | `eval_runs`/`eval_results` had no `workspace_id`, so deleting a workspace orphaned their rows instead of removing them — R2-R1's rejection overturned | `src/db/schema.ts` | Fixed `49127b3` |
+| R3-04 | High (claim) | "Clean-clone CI parity" run against a tree that did not contain the round's work | `docs/REVIEWS.md` | Corrected + re-run |
+| R3-05 | High (claim) | "Every fix is pinned by a mutation test" — a different 14 left 3 alive | `README.md`, `docs/REVIEWS.md`, `docs/FAILURES.md` | Corrected + pinned |
+| R3-06 | Medium (claim) | `.strict()` rationale describes a mechanism that cannot occur | `docs/REVIEWS.md`, `docs/FAILURES.md`, `src/policy/refund.ts` | Corrected |
+| R3-07 | Medium (claim) | Test split gave three categories for four files, folding a file the round rewrote | `docs/REVIEWS.md`, `README.md` | Corrected |
+| R3-08 | Medium (claim) | R2-R1 rejected on "those tables have zero rows" — `invoices` has 54 | `docs/REVIEWS.md` | Corrected, conclusion kept |
+| R3-09 | Medium (latent) | `evaluateEscalation` drops `churn_risk` on a NaN LTV | `src/policy/refund.ts` | **Open — needs a decision** |
+| R3-10 | Low | `getDb()`'s malformed-URL guard catches less than it claims | `src/db/client.ts` | **Open — dev papercut** |
+
+The claim findings are corrected at their sites in the Round 2 section below;
+R3-09 and R3-10 are `FAILURES.md` entries 13 and 14.
+
+### R3-01 — the half-fixed bug class · **Critical**
+
+Round 2 fixed `evaluateRefund`'s `policy` argument, correctly reasoning that
+`PolicyConfig` is a compile-time claim about a value arriving from `jsonb` at
+runtime. `RefundEvaluationInput` is the identical shape of claim — its `invoice`
+comes from a Drizzle row, and from Day 2 its fields carry model-proposed values
+— and nothing parsed it. Round 2 named this class and did not notice it applied
+twice.
+
+`new Date(undefined)` is an Invalid Date, which is a real `Date` instance, so it
+survived the `paidAt ?? null` normalisation and poisoned `ageDays`. Both
+`ageDays < 0` and `ageDays > windowDays` are false against NaN, so it skipped
+the future-dated guard **and** the window check together:
+
+```
+paidAt = new Date(undefined)   before: approve $50.00 on a 400-day-old invoice, violations=[]
+                                after: deny, violations=[invalid_invoice_data, invoice_not_paid]
+amountCents = NaN              before: approve $30.00 against a $20.00 invoice, violations=[]
+                                after: deny, violations=[invalid_invoice_data]
+```
+
+Under $100 those auto-approved with no human. Between $100 and $500 they reached
+the approval queue looking clean, with no violations listed — the same trap
+Round 2 documented in R2-01 and then left open one argument to the left.
+
+### What Round 2 got right
+
+Stated as plainly as the failures, because a verification round that only
+reports errors is as unbalanced as a review that only reports successes.
+
+- **R2-01 was real and correctly ranked.** The policy engine did fail open, it
+  was the worst defect in the repository, and the write-up of the wrong first
+  fix — a validator nothing was obliged to call — is the most useful paragraph
+  in this file.
+- **The TLS work survived mutation testing intact.** Six reversions on
+  `src/db/client.ts`, **six killed**. The one defect found there is a case-fold
+  edge Round 2's fix did not reach, not a hole in its tests.
+- **R2-R5 was genuinely disproved**, and the planted-hypothesis technique did
+  what it was meant to.
+- **R2-R1's conclusion holds for five of its seven items**, and holds for
+  `invoices` too once the premise is replaced with the evidence.
+
+### Verification evidence
+
+Measured this session, on `2273ae1` plus the documentation edits in this round
+— named that precisely because "which tree did the gate run against" is exactly
+what R3-04 was about:
+
+```
+typecheck exit=0    test exit=0    lint exit=0
+```
+
+- **Suite:** **160 passed (4 files)** — 89 `refund.test.ts`, 42
+  `registry.test.ts`, 9 `tools.test.ts`, 20 `client.test.ts`. Counted per file,
+  because the three-way split is what R3-07 was about.
+- **Trajectory:** 79 → 131 (Round 2) → 160. Both endpoints were measured per
+  file, so the decomposition is checked rather than inferred: Round 2's suite was
+  70 / 42 / 9 / 10 and this one is 89 / 42 / 9 / 20 — 19 policy tests and 10
+  db-client tests added, and **nothing** to registry or tools. Measuring that
+  split is what exposed R3-07 in the first place: `registry.test.ts` counted 42,
+  not the 51 the prose claimed, because 51 was silently `registry` plus `tools`.
+- **Clean-clone CI parity — genuinely, this time.** Fresh `git clone`, no
+  `.next/`, full `npm ci` (exit 0), then `typecheck` → `test` → `lint`, all exit
+  0, 4 files / 160 tests. The clone was confirmed to contain the work under
+  review: `invalid_invoice_data` present in `src/policy/refund.ts`, migrations
+  `0000`, `0001` and `0002` all present.
+- **Mutation testing, `src/policy/refund.ts`:** 14 reversions, **11 killed, 3
+  survived** — all three the `.strict()` calls. Now pinned: removing each in
+  turn fails **exactly one** named test (`rejects an unknown key inside the
+  refund block` / `inside the escalation block` / `at the top level`).
+- **Mutation testing, `src/db/client.ts`:** 6 reversions, **6 killed**.
+- **`.strict()` semantics:** probed directly against the installed Zod 4.4.3.
+  Transcript at R2-01 below.
+- **`invoices` row check:** 54 rows, checked against all five constraints the
+  R2-R1 reviewer proposed. Zero violations on each.
+
+### Not verified — coverage gaps stated plainly
+
+These are gaps in **this** round, and they are larger than Round 2's.
+
+- **`src/agent/registry.ts` was not examined at all.** The format allowlist's
+  behaviour at depth, and whether `assertConsistent` produces false positives or
+  false negatives, are unchecked. So is whether `tools.test.ts` and
+  `registry.test.ts` now agree after R2-05 — the two files that were previously
+  demanding opposite things.
+- **`scripts/verify-boot.ts` gate effectiveness is unchecked.** R2-17's fix is
+  committed; what is unverified is whether the gate now actually catches what it
+  is supposed to. It remains a gate whose usefulness is *asserted* rather than
+  demonstrated — which is what R2-17 found wrong with it in the first place.
+- Both gaps have the same cause: **two sub-agents assigned to them terminated on
+  a session limit before reporting.** Recorded as an absence rather than left to
+  look like coverage, which is the failure mode this file exists to prevent.
+- **Migration `0002` has never been parsed by Postgres.** It was generated and
+  read, not applied. `0001` and `0002` are both unapplied.
+- **The eval-table cascade is reasoned from the emitted DDL, not observed.**
+  Proving it needs the migration applied and a workspace actually deleted.
+- **`FAILURES.md` entry 13 was not executed.** It is reasoned from the code and
+  from JavaScript comparison semantics (`NaN >= x` and `undefined >= x` are both
+  `false`), not from a run. Said here because the defect is deliberately
+  unfixed, and a reproduction transcript that was never produced would be the
+  exact defect this round is correcting.
+- **No live Anthropic API call**, and **Neon is still untested** — both carried
+  forward unchanged from Round 2.
+
+### Follow-ups carried forward
+
+| Action | When | Why |
+|---|---|---|
+| Point the eval runner at a workspace with `expires_at IS NULL` | Day 6 | `eval_runs` now cascades from `workspaces`; the TTL sweep that reaps demo sandboxes would otherwise erase the regression baseline the CI gate compares against |
+| `npm run db:migrate` | Before Day 2 | `0001` **and** `0002` are generated and unapplied |
+| Decide the contract for an unknown `customerLifetimeValueCents` | Day 2 | `FAILURES.md` entry 13. Every option is a contract change; it needs an owner, not a default |
+| Examine `registry.ts`, the two test files' agreement, and `verify:boot` | Day 2 | The coverage gap above — the largest unreviewed surface in the repo |
+
+### Lessons
+
+1. **A gate run against the wrong tree is worse than a gate not run.** The
+   clean-clone check passed, and it passed on code that did not contain the
+   round's work. Nothing in the output said so. Any claim about a clone needs
+   the commit it was taken at recorded beside it.
+2. **A kill rate measures the mutants you chose.** Round 2 chose fourteen and
+   killed fourteen, then wrote "every fix is pinned." A different fourteen on
+   one file left three alive. When the same party picks the mutants and reports
+   the score, the number is evidence about the picker.
+3. **Fixing half a bug class and naming the other half is the dangerous case.**
+   R2-01's write-up contains every element needed to find R3-01. Having the
+   words is not having the check.
+4. **A correct conclusion resting on a false premise still has to be fixed.**
+   R2-R1 reached the right answer through a row count that was wrong for the one
+   table in its list that holds data.
+
+---
+
 ## Round 2 — 2026-08-11 — Foundation fitness
 
 **Question asked:** will Days 2–10 of `docs/PLAN.md` build on this foundation,
@@ -24,8 +201,15 @@ or will something need retrofitting?
 **Headline:** one critical defect (the policy engine failed open on a malformed
 policy — a $99,999.99 refund approved against a $500 ceiling with zero
 violations), 20 further findings fixed, 5 findings rejected or deferred with
-reasons recorded below. Suite went 79 → 131 tests. Every fix is pinned by a
-mutation test.
+reasons recorded below. Suite went 79 → 131 tests. Fourteen deliberate
+reversions of the fixed code were run, and all fourteen were killed.
+
+> **Corrected by Round 3.** This paragraph originally ended *"every fix is
+> pinned by a mutation test."* Fourteen reversions that all die prove those
+> fourteen lines are covered and say nothing about the lines nobody reverted.
+> Round 3 ran fourteen **different** reversions on `src/policy/refund.ts` and
+> three survived — every one of them a `.strict()` call. They are pinned now;
+> see Round 3 above.
 
 ### Why this round happened
 
@@ -88,6 +272,11 @@ reproductions are recorded per finding below. Three checks were applied on top:
 2. **Mutation testing.** Fourteen deliberate reversions of the fixed code, run
    against the suite on a scratch copy. All fourteen were caught. A fix whose
    reversion the suite tolerates is not covered, only accompanied.
+   *Round 3 correction:* this establishes that the fourteen reverted lines are
+   covered. It was then written up as though it established that **every** fix
+   was covered, which is a different and much larger claim. Choosing the
+   mutants and reporting the kill rate are the same act here, so the number
+   measures the chooser as much as the suite.
 3. **Independent verification of API claims.** No documentation claim about the
    Anthropic API was edited on a subagent's assertion — each was checked against
    current reference material first. Writing a subagent's stale recollection
@@ -123,8 +312,8 @@ Severity is impact **if it reached production**, not how hard it was to find.
 | R2-19 | Low | Sonnet 5 intro pricing not reflected in the cost table | `docs/PLAN.md` | Noted |
 | R2-20 | Low | No `engines` field; Node version unstated anywhere | `package.json` | Fixed |
 | R2-21 | Low | "15-table" prose enumerated 14 (omitted `sops`) | `README.md` | Fixed |
-| R2-R1 | — | Forward-looking schema columns for Days 3–8 | `src/db/schema.ts` | **Rejected** |
-| R2-R2 | — | Re-seed orphans eval-run provenance | `src/db/seed.ts` | **Deferred to Day 6** |
+| R2-R1 | — | Forward-looking schema columns for Days 3–8 | `src/db/schema.ts` | **Rejected** — R3: holds for 5 of 7; bad premise; `workspace_id` overturned |
+| R2-R2 | — | Re-seed orphans eval-run provenance | `src/db/seed.ts` | Deferred to Day 6 — **fixed in `49127b3`** |
 | R2-R3 | — | Recursive schemas / `prefixItems` pass boot validation | `src/agent/registry.ts` | **Deferred** |
 | R2-R4 | — | Validate policy at the boundary only | — | **Rejected, superseded** |
 | R2-R5 | — | `assertConsistent` position-blindness | — | **Disproved** |
@@ -162,9 +351,31 @@ this layer, decorative.
 at the boundary, for callers to invoke. Re-running the original probe showed
 `evaluateRefund` **still approving $99,999.99**, because a guarantee nothing is
 obliged to call is documentation. The parse moved inside both `evaluateRefund`
-and `evaluateEscalation`. `.strict()` is load-bearing: without it a misspelled
-key is discarded as unknown and the real key reads as absent — the identical
-silent failure wearing a different hat.
+and `evaluateEscalation`.
+
+`.strict()` is load-bearing, but not for the reason first written here. This
+section originally claimed that without it *"a misspelled key is discarded as
+unknown and the real key reads as absent — the identical silent failure."*
+**That mechanism cannot occur.** A misspelling leaves the correct key absent,
+and an absent required key is rejected either way. Measured against the
+installed Zod 4.4.3:
+
+```
+typo: maxRefundCent (missing final s)
+  .strict()        REJECTED (invalid_type: expected number, received undefined
+                             | unrecognized_keys: "maxRefundCent")
+  without strict   REJECTED (invalid_type: expected number, received undefined)
+all 4 correct keys PLUS one bogus extra key
+  .strict()        REJECTED (unrecognized_keys: "maxRefundDollars")
+  without strict   ACCEPTED                            <-- the real difference
+```
+
+What `.strict()` actually buys is narrower and still worth having: it rejects
+an **extra** key alongside an otherwise-complete, valid policy. That is the
+Day-4 SOP editor writing a limit this engine does not implement — without
+`.strict()` the key is dropped in silence and the operator believes a rule is
+enforced that no line of code reads. It is applied at all three levels because
+each object polices only its own keys.
 
 Verified after fixing, against the blob the seed actually writes:
 
@@ -275,17 +486,48 @@ minus the risk of designing storage for a feature whose shape is not settled.
 Speculative columns are also not free: they invite the reader to believe a
 feature exists.
 
+> **Corrected by Round 3 — the premise was false for one item in its own list.**
+> `invoices` holds **54 rows**, seeded, and this same document reports "54
+> invoices before and after" ten lines further down. The cost model was wrong
+> too: a CHECK constraint on a populated table is not a backfill problem, it is
+> a validation problem — the `ALTER TABLE` either passes against existing rows
+> or fails outright.
+>
+> The conclusion survives, on evidence rather than on the bad premise. All 54
+> rows were checked against every constraint the reviewer proposed —
+> `amount_cents < 0`, `refunded_cents < 0`, `refunded_cents > amount_cents`,
+> paid status with a null `paid_at`, and a future `paid_at`. **Zero violations
+> on all five.** So the constraint would apply cleanly whenever it is added,
+> and deferring it costs nothing. Right answer, wrong reason, and the wrong
+> reason was the one written down.
+>
+> Round 3 also overturned item 3 outright: `workspace_id` on the eval tables
+> **shipped** in `49127b3`. Of the seven items, the rejection holds for five.
+
 One exception was taken, and it proves the rule: **R2-02 was fixed**, because it
 is a correctness defect in an existing column — `jsonb` cannot store the
 documented payload — not a speculative addition. The discriminator is *"is this
 column wrong, or merely absent?"*
 
-**R2-R2 · Re-seed orphans eval-run provenance · Deferred to Day 6.** The DDL
-chain is real: `db:seed` deletes the demo workspace → `sop_versions` cascades →
-`eval_runs.sop_version_id` is `ON DELETE SET NULL`, and `eval_runs` has no
-`workspace_id`, so its rows survive pointing at nothing. It becomes a live
-defect the moment Day 6 records the first eval run. Recorded here rather than
-pre-solved, for the same reason as R2-R1.
+**R2-R2 · Re-seed orphans eval-run provenance · Deferred to Day 6, then fixed.**
+The DDL chain was real: `db:seed` deletes the demo workspace → `sop_versions`
+cascades → `eval_runs.sop_version_id` is `ON DELETE SET NULL`, and `eval_runs`
+had no `workspace_id`, so its rows survived pointing at nothing. It would have
+become a live defect the moment Day 6 recorded the first eval run.
+
+> **Superseded by Round 3.** Round 3 overturned the `workspace_id` half of
+> R2-R1, and `49127b3` added `workspace_id` to `eval_runs` and `eval_results`
+> with `ON DELETE cascade` from `workspaces` (migration `0002`). Re-seeding now
+> deletes those rows instead of orphaning them, so the sentence above no longer
+> describes the schema. It is kept because it is the reasoning that produced
+> the deferral, and a deferral whose stated cause has been deleted is not
+> auditable.
+>
+> The fix moves the problem rather than ending it: `eval_runs` now cascades
+> from `workspaces`, and the Day-8 TTL sweep that reaps demo sandboxes deletes
+> workspaces. Day 6 must therefore run evals against a workspace with
+> `expires_at IS NULL`, or the sweep erases the regression baseline the CI gate
+> compares against. Carried in Round 3's follow-ups table above.
 
 **R2-R3 · Recursive schemas and `prefixItems` pass boot validation · Deferred.**
 Confirmed genuinely unsupported by strict tool use. But no shipped tool uses
@@ -312,21 +554,52 @@ The review's credibility rests as much on this as on anything it found.
 
 ### Verification evidence
 
-Every gate, run fresh at the close of the round:
+Every gate, run fresh at the close of Round 2. Every figure in this section is
+Round 2's, measured then — current numbers are in Round 3 above:
 
 ```
 verify:boot exit=0     verify:seed exit=0     lint exit=0
 test exit=0            typecheck exit=0
 ```
 
-- **Suite:** 131 passed (4 files) — 70 policy, 51 registry, 10 db client.
-- **Mutation testing:** 14 reversions attempted, **14 killed**, 0 survived.
+- **Suite:** 131 passed (4 files) — 70 `refund.test.ts`, 42 `registry.test.ts`,
+  9 `tools.test.ts`, 10 `client.test.ts`.
+  *Round 3 correction:* this line originally read "70 policy, 51 registry, 10 db
+  client" — three categories for four files. "51 registry" folded
+  `registry.test.ts` and `tools.test.ts` together, and `tools.test.ts` is a file
+  this very round rewrote (R2-05). The totals are unchanged. Provenance of the
+  split, since that is the whole point: the 42 and the 9 were measured at
+  `2273ae1` and hold for `3c13f0e` because neither file was touched between the
+  two (`git diff --stat 3c13f0e..2273ae1 -- '*.test.ts'` lists only
+  `client.test.ts` and `refund.test.ts`). The 70 and the 10 are Round 2's own
+  figures, carried forward unverified; they are consistent with the total.
+- **Mutation testing:** 14 reversions attempted, **14 killed**, 0 survived — of
+  the fourteen chosen. *Round 3 correction:* see the headline note above. A
+  different fourteen on `src/policy/refund.ts` left three alive.
 - **"No test requires a database":** re-confirmed with `DATABASE_URL` unset
   *and* poisoned (`postgres://nope:nope@127.0.0.1:1/nope`) — 131 passing both
   times, and with `ANTHROPIC_API_KEY` unset.
-- **Clean-clone CI parity:** fresh `git clone` with no `.next/`, full `npm ci`,
-  then `typecheck && test && lint` — all pass. This is the only way to surface
-  the `next typegen` class of failure (`FAILURES.md` entry 3).
+- **Clean-clone CI parity: withdrawn — this gate did not cover this round.**
+  A fresh `git clone` was run, and it passed, but Round 2's work was entirely
+  **uncommitted** at the time, so the clone reproduced `603776e` — the
+  pre-review tree. That tree runs 79 tests and contains zero occurrences of
+  `parsePolicyConfig` — `git grep -c parsePolicyConfig 603776e; echo $?` prints
+  `1`, git's no-matches exit. The exit code is quoted rather than the empty
+  output because empty output is also what a bad rev or pathspec produces; the
+  same command for `evaluateRefund` at that rev exits `0` and prints a hit,
+  which is what makes the negative mean something.
+  The gate that exists to catch what a working tree hides was run against a tree
+  that did not contain the fixes, two bullets under "Suite: 131 passed," where
+  it reads as though the clone ran the 131. It ran 79 tests of code this round
+  had already superseded.
+
+  **Now genuinely true, at `2273ae1`.** Round 3 re-ran it after the work was
+  committed: fresh `git clone`, no `.next/`, full `npm ci` (exit 0), then
+  `typecheck` (exit 0) → `test` (exit 0, 4 files / **160 tests**) → `lint`
+  (exit 0). The clone was confirmed to contain the fixes — `invalid_invoice_data`
+  present in `src/policy/refund.ts`, migrations `0000`, `0001` and `0002` all
+  present. This is still the only way to surface the `next typegen` class of
+  failure (`FAILURES.md` entry 3).
 - **Migration `0001`:** applied inside `BEGIN … ROLLBACK` against the live
   container — 0 rows in `agent_runs`, converts to `text`, rolled back. The
   container remains `jsonb` until `npm run db:migrate` is run.
@@ -354,11 +627,11 @@ test exit=0            typecheck exit=0
 
 | Action | When | Why |
 |---|---|---|
-| `npm run db:migrate` | Before Day 2 | `serialized_messages` is still `jsonb` |
+| `npm run db:migrate` | Before Day 2 | `0001` **and** `0002` are unapplied: `serialized_messages` is still `jsonb`, and the eval tables still have no `workspace_id` |
 | Call `parsePolicyConfig` when the SOP editor **writes** | Day 4 | Reject a bad edit at authoring time, not at refund time |
 | Re-run the README quickstart including migrate/seed | Day 2 | The gap above |
 | Pricing table needs an effective-date field | Day 3 | Sonnet 5 intro rate expires 2026-08-31 |
-| Revisit R2-R2 (eval provenance) | Day 6 | Becomes live on the first eval run |
+| Revisit R2-R2 (eval provenance) | Closed | Fixed by `49127b3`; replaced by the `expires_at` follow-up in Round 3 |
 | Revisit R2-R3 (recursive schemas) | Day 2 | If any tool schema grows a `z.lazy` |
 | Composite FK on `sops.active_version_id` | Day 4 | SQL and traps recorded in the schema comment |
 
