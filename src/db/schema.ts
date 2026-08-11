@@ -540,6 +540,18 @@ export const auditLog = pgTable(
 /* Eval lab                                                                   */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * **Deliberately workspace-independent.** This is the developer's authored
+ * regression suite — one shared set of cases, not per-visitor data — so unlike
+ * every other table here it carries no `workspaceId`, and
+ * `eval_cases_slug_idx` is globally unique by design rather than by oversight.
+ * A case is checked in alongside the prompts it guards; a demo sandbox being
+ * TTL-cleaned must never take the suite with it.
+ *
+ * `eval_runs` and `eval_results` are the opposite: they are *executions* of
+ * this suite against one workspace's SOP version, so they are workspace-scoped
+ * and cascade with it.
+ */
 export const evalCases = pgTable(
   "eval_cases",
   {
@@ -565,6 +577,16 @@ export const evalRuns = pgTable(
   "eval_runs",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    /**
+     * Stays `set null`: a SOP version can be deleted independently of its
+     * workspace, and a run record with a null pointer is still worth keeping.
+     * The workspace-delete path is covered by `workspaceId`'s cascade above —
+     * without it, dropping a workspace left these rows alive and attributable
+     * to nothing.
+     */
     sopVersionId: uuid("sop_version_id").references(() => sopVersions.id, {
       onDelete: "set null",
     }),
@@ -583,13 +605,25 @@ export const evalRuns = pgTable(
       .defaultNow(),
     endedAt: timestamp("ended_at", { withTimezone: true }),
   },
-  (t) => [index("eval_runs_started_idx").on(t.startedAt)],
+  (t) => [
+    index("eval_runs_workspace_started_idx").on(t.workspaceId, t.startedAt),
+    /**
+     * Kept alongside the composite above, which cannot serve a workspace-less
+     * scan: the composite's leading column is `workspace_id`, so a global
+     * "runs since <date>" sweep (cross-workspace analytics, CI history) would
+     * fall back to a seq scan without this.
+     */
+    index("eval_runs_started_idx").on(t.startedAt),
+  ],
 );
 
 export const evalResults = pgTable(
   "eval_results",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
     evalRunId: uuid("eval_run_id")
       .notNull()
       .references(() => evalRuns.id, { onDelete: "cascade" }),
@@ -613,5 +647,13 @@ export const evalResults = pgTable(
   },
   (t) => [
     uniqueIndex("eval_results_run_case_idx").on(t.evalRunId, t.evalCaseId),
+    /**
+     * Plain `(workspaceId)` rather than a composite, deliberately: every read
+     * of this table goes through `evalRunId`, which already leads the unique
+     * index above, so there is no second column worth pairing. This exists to
+     * scope a query without joining `eval_runs`, and to back the workspace
+     * cascade with an index instead of a seq scan on every TTL cleanup.
+     */
+    index("eval_results_workspace_idx").on(t.workspaceId),
   ],
 );
