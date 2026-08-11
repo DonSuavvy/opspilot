@@ -212,6 +212,7 @@ There is no deployed demo yet — the link lands here on Day 8.
 ```
 docs/PLAN.md            authoritative build plan — 10-day schedule, per-day gates
 docs/FAILURES.md        dated log of what broke, how it was caught, what changed
+docs/REVIEW-PROMPT.md   the independent-review prompt, and why it's shaped so
 src/policy/             pure policy engine (refund limits, escalation rules)
 src/agent/registry.ts   Zod → strict JSON Schema, safety classes, boot validation
 src/agent/tools.ts      the 9 tools
