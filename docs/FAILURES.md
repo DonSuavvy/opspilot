@@ -496,7 +496,7 @@ database *cannot* do should be tested exactly like code.
 
 ## 13. The escalation engine has entry 9's bug, pointing the other way — 2026-08-12
 
-**Severity: medium (latent). Status: OPEN — deliberately not fixed.**
+**Severity: medium (latent). Status: FIXED — after an owner decision.**
 
 **Caught by:** fixing entry 9's other half. Once `evaluateRefund` was made to
 parse its own input, the same question was asked of `evaluateEscalation` and it
@@ -521,8 +521,8 @@ Here a deleted limit makes it *under*-escalate, so the failure is invisible: no
 violation, no error, one fewer row in a queue nobody is counting. Silent
 under-escalation is the harder of the two to notice in production.
 
-**Why it is still open.** Every fix is a contract change, and picking one by
-default is how a headline metric ends up meaning something nobody agreed to:
+**Why it was held open first.** Every fix is a contract change, and picking one
+by default is how a headline metric ends up meaning something nobody agreed to:
 
 - a new `EscalationReason` for unknown LTV changes the enum the eval scorers key
   off;
@@ -531,15 +531,32 @@ default is how a headline metric ends up meaning something nobody agreed to:
 - treating unknown LTV as a churn risk inflates escalation rate, which is a
   Mission Control KPI — the exact metric entry 5's bug inflated.
 
-Recorded as an open defect with a named owner decision rather than closed with
-whichever option was cheapest to type.
+It was recorded as an open defect with a named owner decision rather than closed
+with whichever option was cheapest to type. The owner chose the first.
 
-**Evidence status:** reasoned from the source and from JavaScript comparison
-semantics (`NaN >= 500000` and `undefined >= 500000` both evaluate to `false`,
-confirmed), **not** from an executed reproduction. This file's standard is
-reproduce-before-fixing; nothing is being fixed here, and inventing a transcript
-that was never produced would be the same overclaim the corrections above exist
-to record.
+**Fix:** a new `unknown_customer_value` reason. An unreadable lifetime value now
+escalates with a stated cause instead of vanishing, and never claims a churn risk
+that was not established — so the churn-risk rate stays a meaningful number. The
+rule is scoped to `dissatisfied`, because a satisfied customer is not a churn
+risk at any lifetime value: there an unknown LTV decides nothing, and escalating
+on it would inflate the very KPI the third option was rejected for.
+
+Reproduced before the fix and re-run after, threshold `churnRiskLtvCents` =
+250000:
+
+```
+                                        BEFORE                          AFTER
+dissatisfied, ltv $5,000    escalate=true  [churn_risk]         (unchanged)
+ltv = NaN, dissatisfied     escalate=false []                   escalate=true  [unknown_customer_value]
+ltv = undefined             escalate=false []                   escalate=true  [unknown_customer_value]
+ltv = NaN, refund denied    escalate=true  [refund_denied…]     escalate=true  [refund_denied…,unknown_customer_value]
+ltv = NaN but satisfied     escalate=false []                   (unchanged — must not inflate the rate)
+```
+
+Test-first: the two tests asserting the new behaviour failed before it existed,
+and disabling the guard afterwards fails exactly those two. The two guard tests
+against over-firing passed from the start, which is correct — they pin a
+behaviour that must survive the change rather than one being added.
 
 **Lesson:** when a bug class is found in one function, the next move is to grep
 for its siblings, not to fix the instance. Entry 9 named the class and shipped

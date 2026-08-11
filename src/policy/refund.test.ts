@@ -377,6 +377,80 @@ describe("evaluateEscalation", () => {
     expect(decision.reasons).toContain("churn_risk");
   });
 
+  /**
+   * The mirror of the refund engine's NaN class, in the opposite direction.
+   * `NaN >= churnRiskLtvCents` is false, so an unreadable lifetime value used
+   * to drop `churn_risk` in silence — a dissatisfied $5,000 customer simply
+   * did not escalate. Refunds over-approve on bad data; escalation
+   * under-escalates, which is the quieter and therefore worse failure.
+   *
+   * The reason is reported rather than the churn risk assumed: escalating with
+   * a stated "we could not read this customer's value" keeps the trace honest
+   * and leaves the churn-risk rate meaningful, since that rate is a headline
+   * Mission Control KPI.
+   */
+  it("escalates with a stated reason when a dissatisfied customer's LTV is NaN", () => {
+    const decision = evaluateEscalation({
+      suspectedInjection: false,
+      customerFound: true,
+      customerLifetimeValueCents: NaN,
+      refundOutcome: null,
+      customerDissatisfied: true,
+      policy: DEFAULT_POLICY,
+    });
+
+    expect(decision.escalate).toBe(true);
+    expect(decision.reasons).toContain("unknown_customer_value");
+    expect(decision.reasons).not.toContain("churn_risk");
+  });
+
+  it("escalates when a dissatisfied customer's LTV is missing entirely", () => {
+    const decision = evaluateEscalation({
+      suspectedInjection: false,
+      customerFound: true,
+      customerLifetimeValueCents: undefined as unknown as number,
+      refundOutcome: "deny",
+      policy: DEFAULT_POLICY,
+    });
+
+    expect(decision.reasons).toContain("unknown_customer_value");
+    expect(decision.reasons).not.toContain("churn_risk");
+  });
+
+  /**
+   * The rule is scoped to where an unreadable value actually changes the
+   * outcome. A satisfied customer is not a churn risk at any lifetime value,
+   * so an unknown one decides nothing and must not inflate the escalation rate.
+   */
+  it("does not escalate an unreadable LTV when the customer is not dissatisfied", () => {
+    const decision = evaluateEscalation({
+      suspectedInjection: false,
+      customerFound: true,
+      customerLifetimeValueCents: NaN,
+      refundOutcome: "approve",
+      policy: DEFAULT_POLICY,
+    });
+
+    expect(decision.reasons).not.toContain("unknown_customer_value");
+    expect(decision.escalate).toBe(false);
+  });
+
+  /** Regression: a readable LTV must never trip the unknown-value reason. */
+  it("does not report an unknown LTV for a perfectly readable one", () => {
+    for (const ltv of [0, 1000, 500000, Number.MAX_SAFE_INTEGER]) {
+      const decision = evaluateEscalation({
+        suspectedInjection: false,
+        customerFound: true,
+        customerLifetimeValueCents: ltv,
+        refundOutcome: null,
+        customerDissatisfied: true,
+        policy: DEFAULT_POLICY,
+      });
+
+      expect(decision.reasons).not.toContain("unknown_customer_value");
+    }
+  });
+
   it("does not treat a dissatisfied low-value customer as a churn risk", () => {
     const decision = evaluateEscalation({
       suspectedInjection: false,

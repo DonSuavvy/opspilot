@@ -55,7 +55,7 @@ green suite that never had a failing test.
 | R3-06 | Medium (claim) | `.strict()` rationale describes a mechanism that cannot occur | `docs/REVIEWS.md`, `docs/FAILURES.md`, `src/policy/refund.ts` | Corrected |
 | R3-07 | Medium (claim) | Test split gave three categories for four files, folding a file the round rewrote | `docs/REVIEWS.md`, `README.md` | Corrected |
 | R3-08 | Medium (claim) | R2-R1 rejected on "those tables have zero rows" — `invoices` has 54 | `docs/REVIEWS.md` | Corrected, conclusion kept |
-| R3-09 | Medium (latent) | `evaluateEscalation` drops `churn_risk` on a NaN LTV | `src/policy/refund.ts` | **Open — needs a decision** |
+| R3-09 | Medium (latent) | `evaluateEscalation` drops `churn_risk` on a NaN LTV | `src/policy/refund.ts` | Fixed — new `unknown_customer_value` reason |
 | R3-10 | Low | `getDb()`'s malformed-URL guard catches less than it claims | `src/db/client.ts` | **Open — dev papercut** |
 
 The claim findings are corrected at their sites in the Round 2 section below;

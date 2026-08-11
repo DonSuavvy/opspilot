@@ -67,6 +67,7 @@ export type RefundViolation =
 export type EscalationReason =
   | "suspected_injection"
   | "unknown_customer"
+  | "unknown_customer_value"
   | "churn_risk"
   | "refund_denied_by_policy";
 
@@ -415,7 +416,24 @@ export function evaluateEscalation(
   const dissatisfied =
     input.refundOutcome === "deny" || input.customerDissatisfied === true;
 
-  if (
+  /**
+   * The same NaN class `evaluateRefund` guards against, pointing the other way.
+   * `NaN >= churnRiskLtvCents` is `false`, so an unreadable lifetime value used
+   * to drop `churn_risk` in silence: a dissatisfied $5,000 customer simply did
+   * not escalate. Bad data makes refunds over-approve and escalation
+   * *under*-escalate, and the quiet failure is the more dangerous one.
+   *
+   * Reported as its own reason rather than folded into `churn_risk`. Assuming
+   * churn would inflate the churn-risk rate, a headline Mission Control KPI,
+   * and put a claim in the trace that was never established. Scoped to
+   * `dissatisfied`, because a satisfied customer is not a churn risk at any
+   * value — there, an unknown LTV decides nothing and must not escalate.
+   */
+  const ltvKnown = Number.isSafeInteger(input.customerLifetimeValueCents);
+
+  if (input.customerFound && dissatisfied && !ltvKnown) {
+    reasons.push("unknown_customer_value");
+  } else if (
     input.customerFound &&
     input.customerLifetimeValueCents >= rules.churnRiskLtvCents &&
     dissatisfied
