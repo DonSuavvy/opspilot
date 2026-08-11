@@ -16,7 +16,8 @@
     "db:studio": "drizzle-kit studio",
     "db:seed": "tsx src/db/seed.ts",
     "db:up": "docker compose up -d && sleep 3",
-    "db:down": "docker compose down -v"
+    "db:down": "docker compose down -v",
+    "verify:boot": "tsx scripts/verify-boot.ts"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",

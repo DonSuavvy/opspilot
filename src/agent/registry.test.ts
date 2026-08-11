@@ -1,0 +1,349 @@
+import { describe, expect, it } from "vitest";
+import { z } from "zod";
+
+import {
+  buildRegistry,
+  ToolRegistryError,
+  toStrictJsonSchema,
+  type ToolDefinition,
+} from "./registry";
+
+/** A minimal, always-valid tool definition. Tests corrupt one field at a time. */
+function tool(overrides: Partial<ToolDefinition> = {}): ToolDefinition {
+  return {
+    name: "get_customer",
+    description:
+      "Look up a Beacon Analytics customer by their external id. Returns plan, status and lifetime value.",
+    input: z.object({ customer_id: z.string() }),
+    safetyClass: "read",
+    idempotent: true,
+    handler: async () => ({ ok: true }),
+    ...overrides,
+  } as ToolDefinition;
+}
+
+/** The forced terminal tool. Every run must end by calling it. */
+function terminalTool(overrides: Partial<ToolDefinition> = {}): ToolDefinition {
+  return tool({
+    name: "resolve_ticket",
+    description:
+      "End the run with a structured outcome: action taken, amounts, reply draft and confidence.",
+    input: z.object({
+      action: z.enum(["refunded", "replied", "escalated"]),
+      reply: z.string(),
+    }),
+    safetyClass: "auto_write",
+    idempotent: true,
+    terminal: true,
+    ...overrides,
+  });
+}
+
+/** Recursively collect every JSON Schema keyword present at any depth. */
+function keywordsIn(node: unknown, found = new Set<string>()): Set<string> {
+  if (Array.isArray(node)) {
+    for (const item of node) keywordsIn(item, found);
+  } else if (node && typeof node === "object") {
+    for (const [key, value] of Object.entries(node)) {
+      found.add(key);
+      keywordsIn(value, found);
+    }
+  }
+  return found;
+}
+
+describe("toStrictJsonSchema", () => {
+  it("emits additionalProperties:false and a complete required list", () => {
+    const schema = toStrictJsonSchema(
+      z.object({ a: z.string(), b: z.number() }),
+    );
+
+    expect(schema.type).toBe("object");
+    expect(schema.additionalProperties).toBe(false);
+    expect(schema.required).toEqual(["a", "b"]);
+  });
+
+  it("omits optional keys from required but keeps them in properties", () => {
+    const schema = toStrictJsonSchema(
+      z.object({ a: z.string(), b: z.string().optional() }),
+    );
+
+    expect(schema.required).toEqual(["a"]);
+    expect(Object.keys(schema.properties)).toEqual(["a", "b"]);
+  });
+
+  it("drops the $schema key that Anthropic's input_schema does not take", () => {
+    const schema = toStrictJsonSchema(z.object({ a: z.string() }));
+    expect(schema).not.toHaveProperty("$schema");
+  });
+
+  /**
+   * Zod emits `exclusiveMinimum` and `maximum` for .int().positive(), and
+   * minLength/maxLength for .min()/.max(). Anthropic's strict tool use rejects
+   * numerical and string constraints. These must never reach the wire.
+   */
+  it("strips numerical constraints that strict mode rejects", () => {
+    const schema = toStrictJsonSchema(
+      z.object({ amount_cents: z.number().int().positive().max(100_000) }),
+    );
+
+    const keywords = keywordsIn(schema);
+    expect(keywords).not.toContain("minimum");
+    expect(keywords).not.toContain("maximum");
+    expect(keywords).not.toContain("exclusiveMinimum");
+    expect(keywords).not.toContain("exclusiveMaximum");
+    expect(keywords).not.toContain("multipleOf");
+  });
+
+  it("strips string constraints that strict mode rejects", () => {
+    const schema = toStrictJsonSchema(
+      z.object({ note: z.string().min(1).max(500) }),
+    );
+
+    const keywords = keywordsIn(schema);
+    expect(keywords).not.toContain("minLength");
+    expect(keywords).not.toContain("maxLength");
+    expect(keywords).not.toContain("pattern");
+  });
+
+  it("strips array constraints nested inside properties", () => {
+    const schema = toStrictJsonSchema(
+      z.object({ tags: z.array(z.string().min(2)).min(1).max(5) }),
+    );
+
+    const keywords = keywordsIn(schema);
+    expect(keywords).not.toContain("minItems");
+    expect(keywords).not.toContain("maxItems");
+    expect(keywords).not.toContain("minLength");
+  });
+
+  it("keeps the keywords strict mode does support", () => {
+    const schema = toStrictJsonSchema(
+      z.object({
+        reason: z.enum(["duplicate_charge", "other"]).describe("Why"),
+        when: z.iso.datetime(),
+      }),
+    );
+
+    const properties = schema.properties as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(properties.reason.enum).toEqual(["duplicate_charge", "other"]);
+    expect(properties.reason.description).toBe("Why");
+    expect(properties.when.format).toBe("date-time");
+  });
+
+  it("preserves nested objects as strict too", () => {
+    const schema = toStrictJsonSchema(
+      z.object({ meta: z.object({ source: z.string().min(1) }) }),
+    );
+
+    const meta = (schema.properties as Record<string, Record<string, unknown>>)
+      .meta;
+    expect(meta.additionalProperties).toBe(false);
+    expect(meta.required).toEqual(["source"]);
+  });
+});
+
+describe("buildRegistry — boot-time validation", () => {
+  it("accepts a well-formed registry", () => {
+    const registry = buildRegistry([tool(), terminalTool()]);
+
+    expect(registry.list()).toHaveLength(2);
+    expect(registry.get("get_customer")?.safetyClass).toBe("read");
+    expect(registry.terminalToolName).toBe("resolve_ticket");
+  });
+
+  it("rejects duplicate tool names", () => {
+    expect(() => buildRegistry([tool(), tool(), terminalTool()])).toThrow(
+      ToolRegistryError,
+    );
+  });
+
+  it.each([
+    ["empty", ""],
+    ["spaces", "get customer"],
+    ["dots", "get.customer"],
+    ["too long", "a".repeat(65)],
+  ])("rejects a tool name with %s", (_label, name) => {
+    expect(() => buildRegistry([tool({ name }), terminalTool()])).toThrow(
+      ToolRegistryError,
+    );
+  });
+
+  it("rejects an empty description", () => {
+    expect(() =>
+      buildRegistry([tool({ description: "" }), terminalTool()]),
+    ).toThrow(ToolRegistryError);
+  });
+
+  it("rejects a description too thin to steer tool choice", () => {
+    expect(() =>
+      buildRegistry([tool({ description: "gets stuff" }), terminalTool()]),
+    ).toThrow(ToolRegistryError);
+  });
+
+  it("rejects an unknown safety class", () => {
+    expect(() =>
+      buildRegistry([
+        tool({ safetyClass: "superuser" as never }),
+        terminalTool(),
+      ]),
+    ).toThrow(ToolRegistryError);
+  });
+
+  it("rejects a write-class tool with no idempotent flag", () => {
+    expect(() =>
+      buildRegistry([
+        tool({
+          name: "issue_refund",
+          safetyClass: "confirm_write",
+          idempotent: undefined as never,
+        }),
+        terminalTool(),
+      ]),
+    ).toThrow(ToolRegistryError);
+  });
+
+  it("rejects a missing handler", () => {
+    expect(() =>
+      buildRegistry([tool({ handler: undefined as never }), terminalTool()]),
+    ).toThrow(ToolRegistryError);
+  });
+
+  it("rejects a handler that is not callable", () => {
+    expect(() =>
+      buildRegistry([
+        tool({ handler: "not a function" as never }),
+        terminalTool(),
+      ]),
+    ).toThrow(ToolRegistryError);
+  });
+
+  it("rejects a non-object input schema", () => {
+    expect(() =>
+      buildRegistry([tool({ input: z.string() as never }), terminalTool()]),
+    ).toThrow(ToolRegistryError);
+  });
+
+  it("rejects a registry with no terminal tool", () => {
+    expect(() => buildRegistry([tool()])).toThrow(ToolRegistryError);
+  });
+
+  it("rejects more than one terminal tool", () => {
+    expect(() =>
+      buildRegistry([
+        terminalTool(),
+        terminalTool({ name: "resolve_ticket_v2" }),
+      ]),
+    ).toThrow(ToolRegistryError);
+  });
+
+  it("rejects an empty registry", () => {
+    expect(() => buildRegistry([])).toThrow(ToolRegistryError);
+  });
+
+  it("fails loudly: the error names the tool and every problem at once", () => {
+    let error: ToolRegistryError | undefined;
+    try {
+      buildRegistry([tool({ name: "bad name", description: "x" })]);
+    } catch (caught) {
+      error = caught as ToolRegistryError;
+    }
+
+    expect(error).toBeInstanceOf(ToolRegistryError);
+    // All three problems reported together, not one per boot attempt.
+    expect(error!.issues).toHaveLength(3);
+    expect(error!.message).toContain("bad name");
+    expect(error!.issues.join("\n")).toMatch(/name/i);
+    expect(error!.issues.join("\n")).toMatch(/description/i);
+    expect(error!.issues.join("\n")).toMatch(/terminal/i);
+  });
+});
+
+describe("registry.toAnthropicTools", () => {
+  it("emits strict:true with a strict-legal schema", () => {
+    const specs = buildRegistry([
+      tool({
+        name: "issue_refund",
+        description:
+          "Refund a paid invoice. Revalidated against the policy engine before any money moves.",
+        input: z.object({
+          invoice_id: z.string(),
+          amount_cents: z.number().int().positive(),
+        }),
+        safetyClass: "confirm_write",
+        idempotent: true,
+      }),
+      terminalTool(),
+    ]).toAnthropicTools();
+
+    const refund = specs.find((s) => s.name === "issue_refund")!;
+    expect(refund.strict).toBe(true);
+    expect(refund.input_schema.additionalProperties).toBe(false);
+    expect(refund.input_schema.required).toEqual([
+      "invoice_id",
+      "amount_cents",
+    ]);
+    expect(keywordsIn(refund.input_schema)).not.toContain("exclusiveMinimum");
+  });
+
+  it("carries no registry-internal fields onto the wire", () => {
+    const [spec] = buildRegistry([terminalTool()]).toAnthropicTools();
+
+    expect(Object.keys(spec).sort()).toEqual([
+      "description",
+      "input_schema",
+      "name",
+      "strict",
+    ]);
+  });
+
+  it("is deterministically ordered so the prompt cache prefix stays stable", () => {
+    const defs = [tool(), terminalTool()];
+    const forward = buildRegistry(defs).toAnthropicTools();
+    const reversed = buildRegistry([...defs].reverse()).toAnthropicTools();
+
+    expect(forward.map((s) => s.name)).toEqual(reversed.map((s) => s.name));
+  });
+});
+
+describe("defense in depth", () => {
+  /**
+   * The constraints stripped from the wire schema are still enforced by Zod
+   * when the handler parses the model's arguments. Stripping them makes the
+   * schema strict-legal; it does not make the tool permissive.
+   */
+  it("still rejects out-of-range input at parse time after stripping", () => {
+    const input = z.object({ amount_cents: z.number().int().positive() });
+    const registry = buildRegistry([
+      tool({ name: "issue_refund", input, safetyClass: "auto_write" }),
+      terminalTool(),
+    ]);
+
+    const spec = registry.toAnthropicTools()[0];
+    expect(keywordsIn(spec.input_schema)).not.toContain("exclusiveMinimum");
+
+    // The model could still send a negative amount; Zod is the backstop.
+    expect(registry.get("issue_refund")!.input.safeParse({ amount_cents: -5 })
+      .success).toBe(false);
+    expect(registry.get("issue_refund")!.input.safeParse({ amount_cents: 500 })
+      .success).toBe(true);
+  });
+
+  it("exposes safety class so confirm_write tools can be gated", () => {
+    const registry = buildRegistry([
+      tool({ name: "get_invoices" }),
+      tool({
+        name: "issue_refund",
+        safetyClass: "confirm_write",
+        idempotent: true,
+      }),
+      terminalTool(),
+    ]);
+
+    expect(registry.requiresApproval("issue_refund")).toBe(true);
+    expect(registry.requiresApproval("get_invoices")).toBe(false);
+  });
+});
