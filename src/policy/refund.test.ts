@@ -311,7 +311,7 @@ describe("evaluateEscalation", () => {
     expect(decision.reasons).toContain("unknown_customer");
   });
 
-  it("escalates a high-value customer as a churn risk", () => {
+  it("escalates a high-value customer whose refund was denied", () => {
     const decision = evaluateEscalation({
       suspectedInjection: false,
       customerFound: true,
@@ -322,6 +322,70 @@ describe("evaluateEscalation", () => {
 
     expect(decision.escalate).toBe(true);
     expect(decision.reasons).toContain("churn_risk");
+  });
+
+  /**
+   * Regression. A churn risk is a *dissatisfied* high-value customer. A
+   * refundOutcome of null means no refund was even requested — a big customer
+   * asking a how-to question is not a churn risk, and escalating them would
+   * inflate the escalation rate, which is a headline Mission Control KPI.
+   */
+  it("does not treat a high-value customer with no refund request as a churn risk", () => {
+    const decision = evaluateEscalation({
+      suspectedInjection: false,
+      customerFound: true,
+      customerLifetimeValueCents: 500000,
+      refundOutcome: null,
+      policy: DEFAULT_POLICY,
+    });
+
+    expect(decision.reasons).not.toContain("churn_risk");
+    expect(decision.escalate).toBe(false);
+  });
+
+  it("does not treat a pending-approval refund as churn on its own", () => {
+    const decision = evaluateEscalation({
+      suspectedInjection: false,
+      customerFound: true,
+      customerLifetimeValueCents: 500000,
+      refundOutcome: "requires_approval",
+      policy: DEFAULT_POLICY,
+    });
+
+    expect(decision.reasons).not.toContain("churn_risk");
+  });
+
+  /**
+   * Dissatisfaction that isn't a refund denial — the seeded churn fixture is a
+   * past_due Scale customer threatening to leave, with no refund requested at
+   * all. The model reads that from the ticket; the policy engine takes it as
+   * an input rather than trying to infer it.
+   */
+  it("escalates a dissatisfied high-value customer even with no refund involved", () => {
+    const decision = evaluateEscalation({
+      suspectedInjection: false,
+      customerFound: true,
+      customerLifetimeValueCents: 500000,
+      refundOutcome: null,
+      customerDissatisfied: true,
+      policy: DEFAULT_POLICY,
+    });
+
+    expect(decision.escalate).toBe(true);
+    expect(decision.reasons).toContain("churn_risk");
+  });
+
+  it("does not treat a dissatisfied low-value customer as a churn risk", () => {
+    const decision = evaluateEscalation({
+      suspectedInjection: false,
+      customerFound: true,
+      customerLifetimeValueCents: 1000,
+      refundOutcome: null,
+      customerDissatisfied: true,
+      policy: DEFAULT_POLICY,
+    });
+
+    expect(decision.reasons).not.toContain("churn_risk");
   });
 
   it("escalates whenever the policy engine denied a refund", () => {

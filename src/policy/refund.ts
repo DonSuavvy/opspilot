@@ -197,6 +197,13 @@ export interface EscalationEvaluationInput {
   customerLifetimeValueCents: number;
   /** The refund decision for this ticket, or null when none was requested. */
   refundOutcome: RefundOutcome | null;
+  /**
+   * Whether the customer expressed dissatisfaction — cancellation threats,
+   * repeated complaints, escalating tone. The model reads this from the ticket
+   * body; the policy engine takes it as an input rather than trying to infer
+   * sentiment itself. Absent means "no signal", not "satisfied".
+   */
+  customerDissatisfied?: boolean;
   policy: PolicyConfig;
 }
 
@@ -220,12 +227,21 @@ export function evaluateEscalation(
   if (input.refundOutcome === "deny" && rules.escalateOnPolicyDenial) {
     reasons.push("refund_denied_by_policy");
   }
-  // A churn risk is a *dissatisfied* high-value customer. A high-value
-  // customer whose refund sailed through is a happy customer.
+  /**
+   * A churn risk is a *dissatisfied* high-value customer, so dissatisfaction
+   * must be positively established. `refundOutcome === null` means no refund
+   * was requested at all — a big customer asking a how-to question is not a
+   * churn risk, and treating them as one inflates the escalation rate, which
+   * is a headline Mission Control KPI. `requires_approval` is a refund still
+   * in flight, not a refusal, so it doesn't count either.
+   */
+  const dissatisfied =
+    input.refundOutcome === "deny" || input.customerDissatisfied === true;
+
   if (
     input.customerFound &&
     input.customerLifetimeValueCents >= rules.churnRiskLtvCents &&
-    input.refundOutcome !== "approve"
+    dissatisfied
   ) {
     reasons.push("churn_risk");
   }
