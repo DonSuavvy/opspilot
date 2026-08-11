@@ -69,4 +69,47 @@ try {
   }
 }
 
+/**
+ * Block 2's broken tool has a perfectly valid *schema*, so it is rejected by
+ * definition-level checks and never reaches the sanitizer. That left the part
+ * of boot validation with the actual history of bugs (FAILURES.md entries 1 and
+ * 10) unexercised by the gate that exists to demonstrate it.
+ */
+console.log("\n\x1b[1m3. A schema that cannot be expressed is rejected\x1b[0m");
+
+const terminal: ToolDefinition = {
+  name: "resolve_ticket",
+  description:
+    "End the run with a structured outcome, so the eval scorers have something to key off.",
+  input: z.object({ action: z.enum(["answered", "escalated"]) }),
+  safetyClass: "auto_write",
+  idempotent: true,
+  terminal: true,
+  handler: async () => ({}),
+};
+
+const openMapTool = {
+  // z.record() is an open-ended map. Strict tool use requires every object to
+  // be closed, so this cannot be expressed at all — and forcing it closed would
+  // ship a field that silently matches nothing.
+  name: "search_metadata",
+  description:
+    "A probe tool whose input carries an open-ended record of arbitrary keys.",
+  input: z.object({ meta: z.record(z.string(), z.number()) }),
+  safetyClass: "read",
+  idempotent: true,
+  handler: async () => ({}),
+} as unknown as ToolDefinition;
+
+try {
+  buildRegistry([openMapTool, terminal]);
+  fail("registry accepted an inexpressible schema — the sanitizer is not wired into boot");
+} catch (error) {
+  if (!(error instanceof ToolRegistryError)) throw error;
+  ok("rejected, rather than silently shipping a field that matches nothing:");
+  for (const issue of error.issues) {
+    console.log(`      \x1b[90m·\x1b[0m ${issue}`);
+  }
+}
+
 console.log("\n\x1b[32m\x1b[1mBoot validation gate: PASS\x1b[0m\n");

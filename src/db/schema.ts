@@ -305,13 +305,31 @@ export const sops = pgTable(
     slug: text("slug").notNull(),
     title: text("title").notNull(),
     /**
-     * Intentionally has no FK constraint, unlike every other relationship
-     * column in this schema. `sops` and `sop_versions` are mutually
-     * referential (sop_versions.sop_id → sops.id, and this pointing back), so
-     * a real FK needs a deferred constraint added after both tables exist.
-     * The invariant — that this points at a sop_version belonging to the same
-     * sop_id and workspace_id — is enforced in application code, not the
-     * database. Revisit when Day 4's SOP editor starts writing here.
+     * Has no FK constraint today, unlike every other relationship column in
+     * this schema — but *not* because one is impossible. An earlier version of
+     * this comment claimed a deferred constraint was required; that is wrong,
+     * and was disproved against this project's own Postgres.
+     *
+     * The mutual reference (sop_versions.sop_id → sops.id, and this pointing
+     * back) is not an insert-time cycle, because this column is nullable:
+     * insert the sop with NULL, insert the version, then UPDATE the pointer.
+     * A *composite* FK additionally enforces the real invariant — that the
+     * target version belongs to this same sop — which a single-column FK
+     * cannot express:
+     *
+     *   CREATE UNIQUE INDEX ON sop_versions (id, sop_id);
+     *   ALTER TABLE sops ADD CONSTRAINT sops_active_version_fk
+     *     FOREIGN KEY (active_version_id, id) REFERENCES sop_versions (id, sop_id)
+     *     ON DELETE SET NULL (active_version_id);
+     *
+     * Verified in a rolled-back transaction: created without deferral, the
+     * three-step insert order succeeds, and a pointer at another sop's version
+     * is rejected. Two traps if you add it — the PG15+ column-list form of
+     * `SET NULL` is required (plain `SET NULL` also nulls `sops.id` and fails
+     * the not-null constraint), and `seed.ts` sets this before inserting the
+     * version, so it needs the three-step reorder. Left off until Day 4's SOP
+     * editor is the thing writing here, since a drifted pointer breaks prompt
+     * assembly loudly rather than silently.
      */
     activeVersionId: uuid("active_version_id"),
     createdAt: timestamp("created_at", { withTimezone: true })
@@ -379,8 +397,19 @@ export const agentRuns = pgTable(
      * tool pauses the run. /api/agent/resume reconstructs the loop from this
      * across a separate serverless invocation. This field is the reason the
      * loop is hand-rolled rather than delegated to an SDK tool runner.
+     *
+     * **`text`, not `jsonb`, deliberately.** Postgres `jsonb` rejects a NUL
+     * escape outright (`unsupported Unicode escape sequence`), and
+     * `JSON.stringify` emits exactly that for a NUL anywhere in the array — a
+     * ticket body pasted from a binary file is enough. The usual fix, sanitise
+     * before writing, is unavailable *here*: replaying a paused turn requires
+     * passing thinking blocks back byte-identical, so editing the payload is
+     * precisely what the resume contract forbids. This column is a replay
+     * buffer, never queried by content; `text` round-trips it exactly.
+     * (`run_spans.input/output` and `audit_log.before/after` stay jsonb —
+     * those are display and audit data, so stripping NULs there is fine.)
      */
-    serializedMessages: jsonb("serialized_messages"),
+    serializedMessages: text("serialized_messages"),
     iterations: integer("iterations").notNull().default(0),
     inputTokens: integer("input_tokens").notNull().default(0),
     outputTokens: integer("output_tokens").notNull().default(0),

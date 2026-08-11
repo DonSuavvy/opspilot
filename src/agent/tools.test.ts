@@ -5,15 +5,44 @@ import { NotImplementedError, TOOLS } from "./tools";
 
 const registry = buildRegistry(TOOLS);
 
-/** Every JSON Schema keyword present at any depth of the emitted specs. */
+/** Maps of name → schema. Their keys are author identifiers, not keywords. */
+const SCHEMA_MAP_KEYS = new Set([
+  "properties",
+  "$defs",
+  "definitions",
+  "patternProperties",
+  "dependentSchemas",
+]);
+
+/** Keys whose value is literal data rather than a schema. */
+const LITERAL_KEYS = new Set(["default", "const", "examples", "enum"]);
+
+/**
+ * Every JSON Schema keyword present at any depth — in *keyword position*.
+ *
+ * This walker has to mirror `sanitize`, because a position-blind version is
+ * the same bug the sanitizer was fixed for (FAILURES.md entry 1), just moved
+ * into the regression net. Collecting field names as though they were keywords
+ * made this test fail the moment a tool declared an ordinary field called
+ * `pattern` — while registry.test.ts asserts that exact field must survive.
+ * Two files demanding opposite things is worse than either being wrong alone.
+ */
 function keywordsIn(node: unknown, found = new Set<string>()): Set<string> {
   if (Array.isArray(node)) {
     for (const item of node) keywordsIn(item, found);
-  } else if (node && typeof node === "object") {
-    for (const [key, value] of Object.entries(node)) {
-      found.add(key);
-      keywordsIn(value, found);
+    return found;
+  }
+  if (!node || typeof node !== "object") return found;
+
+  for (const [key, value] of Object.entries(node)) {
+    found.add(key);
+    if (LITERAL_KEYS.has(key)) continue;
+    if (SCHEMA_MAP_KEYS.has(key) && value && typeof value === "object") {
+      // Recurse into the sub-schemas, never over the field names.
+      for (const sub of Object.values(value)) keywordsIn(sub, found);
+      continue;
     }
+    keywordsIn(value, found);
   }
   return found;
 }

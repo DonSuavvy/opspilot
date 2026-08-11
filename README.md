@@ -42,13 +42,13 @@ not the reply text.
 
 | | |
 |---|---|
-| **Data model** | 15-table Drizzle schema + migration — workspaces, customers, subscriptions, invoices, tickets, KB articles, SOP versions, agent runs, run spans, approvals, audit log, eval cases/runs/results |
-| **Policy engine** | Pure, dependency-free refund + escalation rules. 32 tests, written first |
-| **Tool registry** | 9 tools with Zod schemas → strict JSON Schema, three-class safety model, boot-time validation. 39 tests, written first |
+| **Data model** | 15-table Drizzle schema + migrations — workspaces, customers, subscriptions, invoices, tickets, KB articles, SOPs + SOP versions, agent runs, run spans, approvals, audit log, eval cases/runs/results — plus a lazy client that picks TLS from the parsed host. 10 tests |
+| **Policy engine** | Pure refund + escalation rules, with the stored policy blob parsed rather than trusted. 70 tests |
+| **Tool registry** | 9 tools with Zod schemas → strict JSON Schema, three-class safety model, boot-time validation. 51 tests |
 | **Seed** | Deterministic Beacon Analytics dataset — 30 customers, 54 invoices, 20 KB articles, 8 tickets |
 | **Infra** | Next.js 16, Tailwind v4, shadcn/ui on Radix, Vitest, GitHub Actions CI, Docker Postgres |
 
-**71 tests passing.** No test requires a database.
+**131 tests passing.** No test requires a database.
 
 ### Coming (see [`docs/PLAN.md`](docs/PLAN.md))
 
@@ -104,6 +104,12 @@ mid-iteration and reconstituting it in a different process. `approvals.tool_use_
 is persisted for the same reason: resuming requires emitting a `tool_result`
 whose id matches the original `tool_use` block, or the API rejects the turn.
 
+> **Built today:** the columns that make this shape possible, and the reasoning
+> about what they have to hold — `agent_runs.serialized_messages` is `text`
+> rather than `jsonb`, because `jsonb` rejects the NUL escape that
+> `JSON.stringify` emits, and sanitising the payload is exactly what the replay
+> contract forbids. **Day 2:** the loop. **Day 5:** the resume round trip.
+
 ### The refund limit is enforced twice, on purpose
 
 Once in the **SOP markdown** compiled into the system prompt, so the model knows
@@ -153,9 +159,16 @@ than one per redeploy.
 
 ## How this repo is checked — and what it caught
 
-**[`docs/FAILURES.md`](docs/FAILURES.md) is the most useful file here.** Eight
-dated entries, every one a real defect in this repository, with how it was
-caught and what changed.
+**[`docs/FAILURES.md`](docs/FAILURES.md) is the most useful file here.** A dated
+log of every problem this repository has had — mostly defects, plus the process
+gaps and API traps that were caught before they could become defects — with how
+each was found and what changed.
+
+**[`docs/REVIEWS.md`](docs/REVIEWS.md) is its counterpart.** FAILURES answers
+*what broke*; REVIEWS answers *how do you know you looked* — the method behind
+each review pass, its coverage, its cost, the findings it **rejected** and why,
+and what it could not verify. The review prompts themselves are recorded there
+too, because a review is only as good as what it was told to disbelieve.
 
 The project's engineering principle is *never trust the model* — the refund
 limit is enforced in the SOP **and** revalidated in code, because a model's
@@ -184,8 +197,30 @@ What that pass found, on code that already had 71 passing tests and a green gate
 | **An unevidenced process claim** | Commits claimed tests were written first. `git log` showed tests and implementation in the same commit — **unverifiable, not false.** Failing tests are now committed separately, so the RED step is checkable. |
 | **Present-tense overclaims** | Prose described a policy-revalidating handler and a public demo. Neither exists yet. Both re-scoped. |
 
-Every one is fixed, test-first, with the failing test committed first. 79 tests,
-up from 71.
+The sanitizer fix was test-first, with the failing test committed separately
+(`21aa814`) so the RED step is checkable in `git log`. The rest were
+documentation, seed-data and process changes with no test to write.
+
+A second review pass, run the same way, found more — including one that
+mattered more than anything in the first round:
+
+| | |
+|---|---|
+| **The policy engine failed open** | `PolicyConfig` was a TypeScript interface over a `jsonb` blob that nothing parsed. Every rule is a `>` comparison, and `x > undefined` is `false` — so a missing or misspelled key didn't error, it silently deleted that limit. A `refund: {}` blob approved **$99,999.99 on a 400-day-old invoice against a $500 ceiling, with zero violations**. The layer whose entire job is not trusting the model was itself trusting an unvalidated blob. |
+| **A safety net nothing tested** | `assertConsistent()` — the boot check added by the fix above — could be deleted outright and the suite stayed green. The test that looked like coverage asserted a property the fixed sanitizer already guaranteed on its own: the same "asserting on the wrong cell" pattern as the nullable-enum bug, recurring inside its own fix. |
+| **Two files demanding opposite things** | The regression net in `tools.test.ts` walked the schema *position-blind* — the very bug the sanitizer had been fixed for. A tool field legitimately named `pattern` would fail it, while `registry.test.ts` asserted that same field must survive. |
+| **TLS chosen by substring** | `getDb()` picked TLS with `url.includes("localhost")` over the whole connection string, so a password or database name containing `localhost` silently disabled encryption against a remote host. It failed open, in the direction that loses confidentiality. |
+| **Boundary bugs the comments already promised** | A future-dated `paidAt` gave a negative age, which read as inside every refund window. `settled` tested `!== null` while the age test used truthiness — they disagreed on `undefined`, so an invoice with no payment date was approved. |
+| **A comment confidently wrong about Postgres** | `sops.active_version_id` claimed a real foreign key "needs a deferred constraint". It doesn't — the column is nullable, so there's no insert-time cycle, and a *composite* FK also enforces the belongs-to-this-SOP invariant. Disproved in a rolled-back transaction against this project's own database. |
+
+Each was reproduced independently before being touched, and several reviewer
+findings were rejected on the evidence — including one hypothesis the reviewer
+was explicitly asked to test and correctly disproved. One of my own tests
+initially passed for the wrong reason and had to be rebuilt. The fixes went
+RED → GREEN with the failing output recorded, and each is pinned by a mutation
+test: fourteen deliberate reversions to the fixed code, all fourteen caught by
+the suite. **131 tests, up from 79 at the start of this round** (71 before the
+first one).
 
 The point isn't that the reviews found things. It's that **shipping a green gate
 is where verification starts, not where it stops** — and that the failures are
@@ -212,6 +247,8 @@ There is no deployed demo yet — the link lands here on Day 8.
 ```
 docs/PLAN.md            authoritative build plan — 10-day schedule, per-day gates
 docs/FAILURES.md        dated log of what broke, how it was caught, what changed
+docs/REVIEWS.md         how each review was run: coverage, findings, rejections
+docs/reviews/           the review prompts themselves, verbatim
 src/policy/             pure policy engine (refund limits, escalation rules)
 src/agent/registry.ts   Zod → strict JSON Schema, safety classes, boot validation
 src/agent/tools.ts      the 9 tools

@@ -224,6 +224,64 @@ describe("toStrictJsonSchema", () => {
     expect(meta.additionalProperties).toBe(false);
     expect(meta.required).toEqual(["source"]);
   });
+
+  /**
+   * Anthropic's strict tool use accepts exactly ten string formats. Zod emits
+   * many more — `z.base64()` alone adds `format: "base64"` *and* the
+   * unsupported `contentEncoding` keyword. Neither is in the blocklist, so
+   * both sail through boot validation and are rejected on the wire instead:
+   * exactly the 2am failure boot validation exists to prevent.
+   */
+  it("keeps the string formats strict mode actually supports", () => {
+    const schema = toStrictJsonSchema(
+      z.object({ when: z.iso.datetime(), who: z.email(), id: z.uuid() }),
+    );
+
+    const properties = schema.properties as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(properties.when.format).toBe("date-time");
+    expect(properties.who.format).toBe("email");
+    expect(properties.id.format).toBe("uuid");
+  });
+
+  it("strips a string format outside Anthropic's supported set", () => {
+    const schema = toStrictJsonSchema(z.object({ blob: z.base64() }));
+
+    const blob = (schema.properties as Record<string, Record<string, unknown>>)
+      .blob;
+    expect(blob.format).toBeUndefined();
+    expect(blob.contentEncoding).toBeUndefined();
+    expect(blob.type).toBe("string");
+  });
+
+  /**
+   * `assertConsistent` is the safety net FAILURES.md entry 1 added, and its
+   * claim is that "one assertion catches this whole bug class". Nothing proved
+   * it: the test that looks like coverage asserts a property the fixed
+   * sanitizer already guarantees on its own, so the check could be deleted
+   * outright and the suite stayed green. These feed it an inconsistency the
+   * sanitizer cannot produce, via `.meta()` raw-schema injection.
+   */
+  it("fails when required names an absent property", () => {
+    const schema = z
+      .object({ a: z.string() })
+      .meta({ required: ["a", "ghost"] } as never);
+
+    expect(() => toStrictJsonSchema(schema)).toThrow(ToolRegistryError);
+    expect(() => toStrictJsonSchema(schema)).toThrow(/ghost/);
+  });
+
+  it("catches an orphaned required nested inside properties", () => {
+    const schema = z.object({
+      outer: z
+        .object({ kept: z.string() })
+        .meta({ required: ["kept", "phantom"] } as never),
+    });
+
+    expect(() => toStrictJsonSchema(schema)).toThrow(/phantom/);
+  });
 });
 
 describe("buildRegistry — boot-time validation", () => {

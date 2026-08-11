@@ -4,6 +4,7 @@ import {
   DEFAULT_POLICY,
   evaluateEscalation,
   evaluateRefund,
+  parsePolicyConfig,
   type PolicyConfig,
   type RefundEvaluationInput,
 } from "./refund";
@@ -399,5 +400,337 @@ describe("evaluateEscalation", () => {
 
     expect(decision.escalate).toBe(true);
     expect(decision.reasons).toContain("refund_denied_by_policy");
+  });
+
+  /**
+   * The four escalation toggles are configuration, and configuration that is
+   * never exercised is indistinguishable from configuration that is ignored.
+   */
+  it("honours escalateOnUnknownCustomer: false", () => {
+    const decision = evaluateEscalation({
+      suspectedInjection: false,
+      customerFound: false,
+      customerLifetimeValueCents: 0,
+      refundOutcome: null,
+      policy: {
+        ...DEFAULT_POLICY,
+        escalation: {
+          ...DEFAULT_POLICY.escalation,
+          escalateOnUnknownCustomer: false,
+        },
+      },
+    });
+
+    expect(decision.reasons).not.toContain("unknown_customer");
+  });
+
+  it("honours escalateOnPolicyDenial: false", () => {
+    const decision = evaluateEscalation({
+      suspectedInjection: false,
+      customerFound: true,
+      customerLifetimeValueCents: 100,
+      refundOutcome: "deny",
+      policy: {
+        ...DEFAULT_POLICY,
+        escalation: {
+          ...DEFAULT_POLICY.escalation,
+          escalateOnPolicyDenial: false,
+        },
+      },
+    });
+
+    expect(decision.reasons).not.toContain("refund_denied_by_policy");
+  });
+
+  it("honours escalateOnSuspectedInjection: false", () => {
+    const decision = evaluateEscalation({
+      suspectedInjection: true,
+      customerFound: true,
+      customerLifetimeValueCents: 100,
+      refundOutcome: null,
+      policy: {
+        ...DEFAULT_POLICY,
+        escalation: {
+          ...DEFAULT_POLICY.escalation,
+          escalateOnSuspectedInjection: false,
+        },
+      },
+    });
+
+    expect(decision.reasons).not.toContain("suspected_injection");
+  });
+
+  it("treats the churn LTV threshold as inclusive", () => {
+    const at = evaluateEscalation({
+      suspectedInjection: false,
+      customerFound: true,
+      customerLifetimeValueCents: DEFAULT_POLICY.escalation.churnRiskLtvCents,
+      refundOutcome: null,
+      customerDissatisfied: true,
+      policy: DEFAULT_POLICY,
+    });
+    const below = evaluateEscalation({
+      suspectedInjection: false,
+      customerFound: true,
+      customerLifetimeValueCents:
+        DEFAULT_POLICY.escalation.churnRiskLtvCents - 1,
+      refundOutcome: null,
+      customerDissatisfied: true,
+      policy: DEFAULT_POLICY,
+    });
+
+    expect(at.reasons).toContain("churn_risk");
+    expect(below.reasons).not.toContain("churn_risk");
+  });
+
+  it("does not treat an unknown customer as a churn risk", () => {
+    const decision = evaluateEscalation({
+      suspectedInjection: false,
+      customerFound: false,
+      customerLifetimeValueCents: 500000,
+      refundOutcome: "deny",
+      policy: DEFAULT_POLICY,
+    });
+
+    expect(decision.reasons).not.toContain("churn_risk");
+  });
+
+  /**
+   * `customerDissatisfied` is set by the model from ticket tone. A model that
+   * emits the string "false" must not be read as dissatisfied — the strict
+   * `=== true` is what prevents that, and only a truthy non-boolean pins it.
+   */
+  it("requires a real boolean for customerDissatisfied, not a truthy value", () => {
+    const decision = evaluateEscalation({
+      suspectedInjection: false,
+      customerFound: true,
+      customerLifetimeValueCents: 500000,
+      refundOutcome: null,
+      customerDissatisfied: "false" as never,
+      policy: DEFAULT_POLICY,
+    });
+
+    expect(decision.reasons).not.toContain("churn_risk");
+  });
+});
+
+describe("evaluateRefund — boundaries the engine's own comments promise", () => {
+  /**
+   * `ageDays > windowDays` bounds one side only. A future-dated paidAt yields a
+   * negative age, which is trivially "inside" every window — so a clock-skewed
+   * or mis-mapped column silently buys an unlimited refund window.
+   */
+  it("does not treat a future-dated payment as inside the window", () => {
+    const decision = evaluateRefund(
+      input({ invoice: { paidAt: daysAgo(-400) } }),
+    );
+
+    expect(decision.outcome).toBe("deny");
+  });
+
+  /**
+   * `settled` tests `paidAt !== null` while `ageDays` tests truthiness. They
+   * disagree on `undefined`, which a Drizzle row or a JSON round-trip can
+   * produce: settled passes, the window check is skipped, and an invoice with
+   * no payment date at all is approved.
+   */
+  it("treats an undefined paidAt exactly like null", () => {
+    const undef = evaluateRefund(
+      input({ invoice: { paidAt: undefined as never } }),
+    );
+    const nul = evaluateRefund(input({ invoice: { paidAt: null } }));
+
+    expect(undef.outcome).toBe("deny");
+    expect(undef.violations).toContain("invoice_not_paid");
+    expect(undef).toEqual(nul);
+  });
+
+  /** "Money is never a float" — above 2^53 integers stop behaving like integers. */
+  it("rejects an amount above the safe-integer range", () => {
+    const decision = evaluateRefund(
+      input({
+        requestedCents: 1e21,
+        invoice: { amountCents: Number.MAX_SAFE_INTEGER },
+        policy: {
+          refund: {
+            ...DEFAULT_POLICY.refund,
+            maxRefundCents: Number.MAX_SAFE_INTEGER,
+            maxAutoApproveCents: Number.MAX_SAFE_INTEGER,
+          },
+        },
+      }),
+    );
+
+    expect(decision.outcome).toBe("deny");
+    expect(decision.violations).toContain("non_integer_amount");
+  });
+
+  /** The SOP quotes these to customers, so the exact cents are user-visible. */
+  it.each([
+    [10_000, "approve"],
+    [10_001, "requires_approval"],
+    [50_000, "requires_approval"],
+    [50_001, "deny"],
+  ])("pins the money thresholds: %i cents -> %s", (cents, outcome) => {
+    const decision = evaluateRefund(
+      input({ requestedCents: cents, invoice: { amountCents: 1_000_000 } }),
+    );
+
+    expect(decision.outcome).toBe(outcome);
+  });
+
+  /** ":169 — an amount over the hard cap must not ALSO read as merely needing approval." */
+  it("denies over the ceiling without also reporting the approval threshold", () => {
+    const decision = evaluateRefund(
+      input({ requestedCents: 60_000, invoice: { amountCents: 1_000_000 } }),
+    );
+
+    expect(decision.violations).toContain("exceeds_max_refund");
+    expect(decision.violations).not.toContain("exceeds_auto_approve_threshold");
+  });
+
+  /** ":112 — Zero on denial; the requested amount otherwise." */
+  it.each([
+    ["non-positive", { requestedCents: -1 }],
+    ["non-integer", { requestedCents: 49.5 }],
+    ["outside window", { invoice: { paidAt: daysAgo(90) } }],
+    ["over the ceiling", { requestedCents: 60_000 }],
+  ])("approves zero cents on the %s denial path", (_label, overrides) => {
+    const decision = evaluateRefund(input(overrides as never));
+
+    expect(decision.outcome).toBe("deny");
+    expect(decision.approvedCents).toBe(0);
+  });
+});
+
+/**
+ * `policy` arrives from `sop_versions.policy_config`, a jsonb blob the Day-4 SOP
+ * editor writes. It is typed but never validated, and every rule is a `>`
+ * comparison — and `x > undefined` is `false`. A missing or misspelled key
+ * therefore does not error: it silently deletes that limit. This is the code
+ * half of "never trust the model" failing open.
+ */
+describe("parsePolicyConfig", () => {
+  it("accepts the default policy unchanged", () => {
+    expect(parsePolicyConfig(DEFAULT_POLICY)).toEqual(DEFAULT_POLICY);
+  });
+
+  it("accepts a policy that arrived as JSON", () => {
+    const roundTripped = JSON.parse(JSON.stringify(DEFAULT_POLICY)) as unknown;
+    expect(parsePolicyConfig(roundTripped)).toEqual(DEFAULT_POLICY);
+  });
+
+  it.each([
+    ["refund block empty", { refund: {}, escalation: DEFAULT_POLICY.escalation }],
+    ["refund block missing", { escalation: DEFAULT_POLICY.escalation }],
+    ["escalation block missing", { refund: DEFAULT_POLICY.refund }],
+    ["null", null],
+    ["a string", "windowDays: 30"],
+  ])("rejects a malformed policy (%s)", (_label, raw) => {
+    expect(() => parsePolicyConfig(raw)).toThrow();
+  });
+
+  it("rejects a misspelled key rather than silently dropping the limit", () => {
+    const typo = {
+      refund: { ...DEFAULT_POLICY.refund, maxRefundCent: 50_000 },
+      escalation: DEFAULT_POLICY.escalation,
+    };
+    delete (typo.refund as Record<string, unknown>).maxRefundCents;
+
+    expect(() => parsePolicyConfig(typo)).toThrow();
+  });
+
+  it.each([
+    ["non-integer cents", { maxRefundCents: 50_000.5 }],
+    ["negative window", { windowDays: -1 }],
+    ["NaN limit", { maxAutoApproveCents: Number.NaN }],
+    ["non-boolean bypass", { duplicateChargeBypassesWindow: "yes" }],
+  ])("rejects %s", (_label, patch) => {
+    expect(() =>
+      parsePolicyConfig({
+        refund: { ...DEFAULT_POLICY.refund, ...patch },
+        escalation: DEFAULT_POLICY.escalation,
+      }),
+    ).toThrow();
+  });
+
+  /** A ceiling below the auto-approve threshold makes the threshold unreachable. */
+  it("rejects an auto-approve threshold above the hard ceiling", () => {
+    expect(() =>
+      parsePolicyConfig({
+        refund: {
+          ...DEFAULT_POLICY.refund,
+          maxAutoApproveCents: 60_000,
+          maxRefundCents: 50_000,
+        },
+        escalation: DEFAULT_POLICY.escalation,
+      }),
+    ).toThrow();
+  });
+});
+
+/**
+ * A validator nothing is obliged to call is documentation, not enforcement —
+ * the exact "guarantee claimed but not enforced in code" pattern this engine
+ * exists to prevent. The refund limit is stated in the SOP *and* revalidated
+ * here; the policy the revalidation reads gets the same treatment, at the
+ * boundary when an SOP version is written and again at the point of decision.
+ * Refusing to decide is the only safe answer to an unreadable policy.
+ */
+describe("the engine refuses to run on an unparseable policy", () => {
+  const malformed = [
+    ["refund block empty", { refund: {}, escalation: DEFAULT_POLICY.escalation }],
+    ["refund block missing", { escalation: DEFAULT_POLICY.escalation }],
+    ["ceiling misspelled", {
+      refund: {
+        windowDays: 30,
+        maxAutoApproveCents: 10_000,
+        maxRefundCent: 50_000,
+        duplicateChargeBypassesWindow: true,
+      },
+      escalation: DEFAULT_POLICY.escalation,
+    }],
+  ] as const;
+
+  it.each(malformed)(
+    "evaluateRefund throws rather than approving (%s)",
+    (_label, policy) => {
+      // Built directly rather than via input(), whose shallow merge with
+      // DEFAULT_POLICY would put back the very block under test.
+      expect(() =>
+        evaluateRefund({
+          invoice: {
+            id: "inv_1",
+            status: "paid",
+            amountCents: 4900,
+            refundedCents: 0,
+            paidAt: daysAgo(5),
+          },
+          requestedCents: 4900,
+          reason: "service_issue",
+          now: NOW,
+          policy: policy as never,
+        }),
+      ).toThrow();
+    },
+  );
+
+  it.each(malformed)(
+    "evaluateEscalation throws rather than under-escalating (%s)",
+    (_label, policy) => {
+      expect(() =>
+        evaluateEscalation({
+          suspectedInjection: true,
+          customerFound: true,
+          customerLifetimeValueCents: 500_000,
+          refundOutcome: "deny",
+          policy: policy as never,
+        }),
+      ).toThrow();
+    },
+  );
+
+  it("still evaluates a well-formed policy normally", () => {
+    expect(evaluateRefund(input({})).outcome).toBe("approve");
   });
 });

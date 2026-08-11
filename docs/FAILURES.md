@@ -4,9 +4,15 @@ A dated log of what broke, how it was caught, and what changed.
 
 This file exists because the interesting question about any codebase is not
 whether it works — it's what happened on the way to working, and whether anyone
-was looking. Every entry below is a real defect in this repository. Most were
-caught before they could matter. One was caught only because the code was
-reviewed by someone other than the person who wrote it.
+was looking.
+
+Every entry below is a real problem this repository had. Most are defects; two
+are not, and are labelled as such — entry 4 is an API trap caught during
+implementation, and entry 7 is a process-evidence gap whose own verdict was
+"unverifiable, not false." Calling those defects would be the same kind of
+overclaim the rest of this file exists to record. Most were caught before they
+could matter. Several were caught only because the code was reviewed by someone
+other than the person who wrote it.
 
 ## How this repo is checked
 
@@ -273,3 +279,149 @@ table was scrupulously accurate; only the prose section overclaimed. Same for a
 **Lesson:** the honest-sounding sections are the ones to re-read. An accurate
 status table sitting above inaccurate prose is worse than either alone, because
 the accurate part earns trust the inaccurate part then spends.
+
+---
+
+## 9. The policy engine failed open on a malformed policy — 2026-08-11
+
+**Severity: critical.** The single worst defect found in this repository.
+
+**Caught by:** a second independent review round, on code that had already been
+through one adversarial pass and had 79 passing tests.
+
+`evaluateRefund` takes `policy: PolicyConfig`. That type is erased at build
+time, and the value it describes arrives at runtime from
+`sop_versions.policy_config` — a `jsonb` blob written by the SOP editor, which
+is the product's headline feature. Nothing parsed it.
+
+Every rule in the engine is a `>` comparison, and **`x > undefined` is
+`false`**. So a missing key did not throw. It silently removed that limit:
+
+```
+invoice: 400 days old, requesting $99,999.99 | hard cap: $500.00
+A. well-formed DEFAULT_POLICY     outcome=deny      approved=$0.00       violations=[outside_refund_window,exceeds_max_refund]
+B. refund:{} (all keys missing)   outcome=approve   approved=$99999.99   violations=[]
+F. windowDays missing only        outcome=deny      approved=$0.00       violations=[exceeds_max_refund]
+```
+
+Case B is a $99,999.99 refund on a year-old invoice, approved with **zero
+violations** and no human in the loop. Case F shows the deletion is per-key, so
+a single typo is enough. A typo'd ceiling was worse than useless: it didn't deny
+the refund, it routed it to the approval queue as a *legitimate* pending
+request.
+
+**Why it is the worst one:** this module is the code half of "never trust the
+model." It exists so that a model's proposal is revalidated by something that
+cannot be talked out of it. It was revalidating against a blob it trusted
+completely.
+
+**Fix:** `policyConfigSchema` — a Zod schema parsed **at the point of decision,
+not only at the boundary**. The first attempt validated only in a
+`parsePolicyConfig` helper that callers were expected to call; re-running the
+original probe showed `evaluateRefund` still approving $99,999.99, because a
+guarantee nothing is obliged to invoke is documentation, not enforcement. That
+is the same "claimed but not enforced" pattern this very file catalogues, so the
+parse moved inside both `evaluateRefund` and `evaluateEscalation`. `.strict()`
+is what catches the misspelling — without it a typo'd key is dropped as unknown
+and the real key reads as missing, which is the identical silent failure.
+
+**Lesson:** a TypeScript interface is a claim about a value, not a check on it.
+Wherever a typed value crosses a runtime boundary — a database, a request body,
+a file — the type is a comment until something parses it. And "I added a
+validator" is not the same as "the thing is validated."
+
+---
+
+## 10. The safety net from entry 1 had no test that could fail — 2026-08-11
+
+**Caught by:** mutation testing during the second review, not by reading.
+
+Entry 1's fix added `assertConsistent()` and claimed "one assertion catches this
+whole bug class." Deleting the call entirely left the suite green:
+
+```
+  SURVIVED  remove assertConsistent() call entirely   <-- TEST HOLE
+  SURVIVED  assertConsistent: never report orphans    <-- TEST HOLE
+```
+
+The test that *looked* like coverage — "never lets required reference a property
+that does not exist" — asserted a property the fixed sanitizer already
+guarantees on its own, so it passed with or without the check. That is exactly
+the "asserting on the wrong cell" pattern from entry 5, recurring **inside the
+fix for entry 1**.
+
+**Fix:** tests that feed `assertConsistent` an inconsistency the sanitizer
+cannot produce, via Zod's `.meta()` raw-schema injection. Both mutations are now
+killed. The whole suite was then mutation-tested: fourteen deliberate reversions
+of every fix in this round, fourteen caught.
+
+**Lesson:** a test that passes is not evidence of coverage. The only way to know
+an assertion is load-bearing is to break the thing it guards and watch it fail.
+A regression test written in the same sitting as its fix is especially suspect,
+because it was written by someone who already knew the answer.
+
+---
+
+## 11. Three smaller ones from the same pass — 2026-08-11
+
+**The regression net contradicted the fix it was protecting.** `keywordsIn()` in
+`tools.test.ts` collected every key at every depth — *position-blind*, the exact
+bug entry 1 was about. A tool field legitimately named `pattern` failed it,
+while `registry.test.ts:145` asserts that same field must survive. Two test
+files demanding opposite things is worse than either being wrong alone, because
+the first one to fail sends you to the wrong file. Reproduced by adding a
+`pattern` field to `search_kb`: `search_kb leaked "pattern" into its wire
+schema` — the sanitizer was right, the test was wrong.
+
+**TLS was selected by substring.** `getDb()` used
+`url.includes("localhost")` over the *whole* connection string, so a password,
+username or database name containing `localhost` silently disabled encryption
+against a remote host. It failed open, in the one direction that loses
+confidentiality rather than availability. Now decided from the parsed hostname,
+which also makes a malformed `DATABASE_URL` fail at `getDb()` rather than on the
+first query.
+
+**Two boundary bugs the engine's own comments already promised.** A future-dated
+`paidAt` produced a negative age, which read as inside every refund window —
+unlimited refunds from clock skew or a mis-mapped column. And `settled` tested
+`paidAt !== null` while the age calculation used truthiness; they disagree on
+`undefined`, which a Drizzle row or a JSON round-trip can produce, so an invoice
+with no payment date at all came back **approved**. A nullable field now gets
+exactly one null test.
+
+**Lesson:** the nullable-enum class from entry 5 is not one bug, it's a habit.
+Two comparisons against the same nullable field, written minutes apart with
+different idioms, will eventually disagree.
+
+---
+
+## 12. A comment that was confidently wrong about Postgres — 2026-08-11
+
+**Caught by:** a reviewer that refused to take the comment at face value and
+tested the claim against the running database.
+
+`sops.active_version_id` carried a comment explaining that a real foreign key
+was impossible without a deferred constraint, because `sops` and `sop_versions`
+are mutually referential. Both halves were wrong. The column is nullable, so
+there is no insert-time cycle, and a *composite* FK enforces more than the
+single-column one could — including that the target version belongs to this same
+SOP. Verified in a rolled-back transaction on this project's own PG17:
+
+```
+ALTER TABLE
+OK: three-step insert order works with a NON-deferred FK
+ERROR: insert or update on table "sops" violates foreign key constraint "sops_active_version_fk"
+```
+
+**Impact status: not a live bug.** No FK was missing that should have been there
+— the constraint is still deliberately deferred to Day 4. What was wrong was the
+*stated reason*.
+
+**Fix:** the comment now carries the working SQL, the two traps that come with it
+(the PG15+ column-list form of `ON DELETE SET NULL`, and the seed's insert
+order), and an honest reason for waiting.
+
+**Lesson:** for a repository read by engineers, a confidently wrong explanation
+costs more than a missing feature. The feature is a to-do; the explanation is
+evidence about whether the author knows the system. Comments asserting what a
+database *cannot* do should be tested exactly like code.

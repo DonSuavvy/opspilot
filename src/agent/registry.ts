@@ -58,7 +58,32 @@ export const UNSUPPORTED_KEYWORDS: readonly string[] = [
   "minContains",
   "maxContains",
   "$schema",
+  // Zod attaches contentEncoding alongside format for z.base64() and friends.
+  // It is not a supported keyword at all, at any value.
+  "contentEncoding",
+  "contentMediaType",
 ];
+
+/**
+ * The only string formats Anthropic's strict tool use accepts. `format` itself
+ * is legal, so it cannot go in the blocklist — but Zod emits many values
+ * outside this set (`base64`, `cidrv4`, `nanoid`, `emoji`, …) and an
+ * unsupported one is rejected on the wire. Dropping the keyword narrows what
+ * the model is told; the Zod schema still enforces the format at parse time,
+ * exactly as with the numeric and string constraints above.
+ */
+const SUPPORTED_FORMATS: ReadonlySet<string> = new Set([
+  "date-time",
+  "time",
+  "date",
+  "duration",
+  "email",
+  "hostname",
+  "uri",
+  "ipv4",
+  "ipv6",
+  "uuid",
+]);
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyZodObject = z.ZodObject<any>;
@@ -152,6 +177,13 @@ function sanitize(node: unknown, issues: string[], path: string): unknown {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(node)) {
     if (UNSUPPORTED_KEYWORDS.includes(key)) continue;
+
+    // `format` is legal, but only for ten specific values. Position matters
+    // here too: this is the keyword, not a property named "format".
+    if (key === "format" && typeof value === "string") {
+      if (SUPPORTED_FORMATS.has(value)) out[key] = value;
+      continue;
+    }
 
     if (LITERAL_KEYS.has(key)) {
       // Literal data — a default of {pattern: "abc"} must survive intact.

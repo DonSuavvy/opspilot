@@ -133,8 +133,11 @@ Each of these cost real time. Don't rediscover them.
   silently not cache. Either pad the constitution past 4096 or display "below
   cache threshold" honestly — never claim a hit that didn't happen.
 - **`stop_reason: "refusal"` must be handled before reading `content`.** Opus 5
-  can decline via safety classifiers; `stop_details` is populated *only* on a
-  refusal and is null otherwise.
+  can decline via safety classifiers. `stop_details` is populated *only* on a
+  refusal and is null for every other stop reason — but **branch on
+  `stop_reason`, never on `stop_details`**: it can be null *on* a refusal too,
+  and `explanation` is not guaranteed. `if (stop_details)` is the wrong test and
+  will miss refusals.
 - **The seed's invoice ages are load-bearing.** `INV-2002` is paid 22 days ago
   precisely so it is inside a 30-day window and outside a 14-day one. If that
   stops being true, demo arc step 2 silently demonstrates nothing.
