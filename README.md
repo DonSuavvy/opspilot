@@ -151,27 +151,45 @@ than one per redeploy.
 
 ---
 
-## Two bugs worth reading about
+## How this repo is checked — and what it caught
 
-Both were found *after* the day's checks looked green, and both were fixed
-test-first. The repo will carry a running `docs/FAILURES.md`; these are the
-first entries.
+**[`docs/FAILURES.md`](docs/FAILURES.md) is the most useful file here.** Eight
+dated entries, every one a real defect in this repository, with how it was
+caught and what changed.
 
-**Zod's JSON Schema output is not strict-legal.** `z.number().int().positive()`
-emits `exclusiveMinimum` *and* `maximum`; `.min()/.max()` on strings emits
-`minLength`/`maxLength`. Anthropic's `strict: true` rejects all numerical and
-string constraints. Found by probing the serialiser rather than trusting it. The
-registry now strips those keywords at every depth so the wire schema is legal,
-while the Zod schema keeps enforcing them at parse time — narrowing what the
-*model* is told, never what the *code* accepts.
+The project's engineering principle is *never trust the model* — the refund
+limit is enforced in the SOP **and** revalidated in code, because a model's
+proposal is an input, not a decision.
 
-**A nullable enum compared with `!==` silently inverted a rule.** Escalation
-flagged churn risk when `refundOutcome !== "approve"` — but that field is
-nullable, and `null` means *no refund was requested*. Every high-value customer
-asking a routine question was being escalated. No test caught it because the
-high-value + `null` combination was never exercised. Escalation rate is a
-headline metric here, so the false positive would have inflated the exact number
-the dashboard exists to report.
+The same principle is applied one level up: **don't trust the code either, and
+don't trust your own review of it.** After Day 1's gate passed, the work was
+handed to independent reviewers that hadn't written it, with deliberately
+skeptical prompts — one auditing whether the README's claims survived contact
+with reality, one hunting for defects with instructions to be genuinely critical
+rather than reassuring. Every finding was then **reproduced before being
+fixed**, because a reviewer's claim is a hypothesis too.
+
+Those reviewers were AI agents. For a project about operating agents in
+production, using agents to audit agent code — and verifying their output rather
+than taking it on faith — is the practice being demonstrated, not a shortcut
+around it.
+
+What that pass found, on code that already had 71 passing tests and a green gate:
+
+| | |
+|---|---|
+| **A critical latent bug** | The strict-schema sanitizer matched JSON Schema keywords by name with no awareness of position. A tool field named `pattern` was deleted from `properties` but left in `required` — a schema demanding a field it forbids. **Boot validation couldn't see it**, because the sanitizer returned a quietly wrong schema instead of throwing. |
+| **A broken quickstart** | The README told readers to `cp .env.example .env.local` and migrate. `DATABASE_URL` in that file was empty, so the next command failed. Found by *running* the README on a clean clone, not reading it. |
+| **A claim true by accident** | The demo turns on exactly one invoice flipping when the refund window narrows. Three filler invoices sat at *precisely* 30.0009 days — outside the window only because time elapses between seeding and evaluation. True, by a 74ms margin, rather than by construction. |
+| **An unevidenced process claim** | Commits claimed tests were written first. `git log` showed tests and implementation in the same commit — **unverifiable, not false.** Failing tests are now committed separately, so the RED step is checkable. |
+| **Present-tense overclaims** | Prose described a policy-revalidating handler and a public demo. Neither exists yet. Both re-scoped. |
+
+Every one is fixed, test-first, with the failing test committed first. 79 tests,
+up from 71.
+
+The point isn't that the reviews found things. It's that **shipping a green gate
+is where verification starts, not where it stops** — and that the failures are
+written down rather than quietly patched.
 
 ---
 
@@ -193,6 +211,7 @@ There is no deployed demo yet — the link lands here on Day 8.
 
 ```
 docs/PLAN.md            authoritative build plan — 10-day schedule, per-day gates
+docs/FAILURES.md        dated log of what broke, how it was caught, what changed
 src/policy/             pure policy engine (refund limits, escalation rules)
 src/agent/registry.ts   Zod → strict JSON Schema, safety classes, boot validation
 src/agent/tools.ts      the 9 tools
