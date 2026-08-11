@@ -17,7 +17,8 @@
     "db:seed": "tsx src/db/seed.ts",
     "db:up": "docker compose up -d && sleep 3",
     "db:down": "docker compose down -v",
-    "verify:boot": "tsx scripts/verify-boot.ts"
+    "verify:boot": "tsx scripts/verify-boot.ts",
+    "verify:seed": "tsx scripts/verify-seed.ts"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",
