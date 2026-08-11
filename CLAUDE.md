@@ -111,6 +111,16 @@ Each of these cost real time. Don't rediscover them.
 - **`getDb()` is lazy on purpose.** A module-scope pool would make every module
   that transitively imports the schema throw at *import* time when
   `DATABASE_URL` is unset, taking down vitest, tsc and CI for unrelated reasons.
+- **`typecheck` runs `next typegen` first, and must keep doing so.** Next 16
+  generates the global `LayoutProps`/`PageProps` types into `.next/types`,
+  which tsconfig includes but git ignores. Locally they already exist, so
+  `tsc --noEmit` passes; on a clean checkout it fails with
+  `TS2304: Cannot find name 'LayoutProps'`. Verify CI changes against a real
+  clean clone, since a local run cannot surface this:
+  ```bash
+  rm -rf /tmp/opspilot-ci && git clone -q . /tmp/opspilot-ci && cd /tmp/opspilot-ci \
+    && npm ci && npm run typecheck && npm run test && npm run lint
+  ```
 - **Prompt-cache minimums are model-dependent**: 512 tokens on Opus 5, 1024 on
   Sonnet 5, **4096 on Haiku 4.5**. Demo mode runs Haiku, so a short prefix will
   silently not cache. Either pad the constitution past 4096 or display "below
