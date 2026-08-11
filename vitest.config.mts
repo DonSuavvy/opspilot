@@ -1,8 +1,10 @@
 import { defineConfig } from "vitest/config";
-import tsconfigPaths from "vite-tsconfig-paths";
 
 export default defineConfig({
-  plugins: [tsconfigPaths()],
+  resolve: {
+    // Native replacement for vite-tsconfig-paths; resolves the "@/*" alias.
+    tsconfigPaths: true,
+  },
   test: {
     // Day 1 has no component tests; jsdom would be pure overhead.
     environment: "node",
