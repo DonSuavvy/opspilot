@@ -57,6 +57,7 @@ green suite that never had a failing test.
 | R3-08 | Medium (claim) | R2-R1 rejected on "those tables have zero rows" — `invoices` has 54 | `docs/REVIEWS.md` | Corrected, conclusion kept |
 | R3-09 | Medium (latent) | `evaluateEscalation` drops `churn_risk` on a NaN LTV | `src/policy/refund.ts` | Fixed — new `unknown_customer_value` reason |
 | R3-10 | Low | `getDb()`'s malformed-URL guard catches less than it claims | `src/db/client.ts` | **Open — dev papercut** |
+| R3-11 | Medium | `verify:boot` caught 1 of 7 sanitizer reversions, in the gate whose whole purpose is catching them | `scripts/verify-boot.ts` | Fixed `c114096` — now 7 of 7 |
 
 The claim findings are corrected at their sites in the Round 2 section below;
 R3-09 and R3-10 are `FAILURES.md` entries 13 and 14.
@@ -85,6 +86,52 @@ amountCents = NaN              before: approve $30.00 against a $20.00 invoice, 
 Under $100 those auto-approved with no human. Between $100 and $500 they reached
 the approval queue looking clean, with no violations listed — the same trap
 Round 2 documented in R2-01 and then left open one argument to the left.
+
+### R3-11 — the boot gate caught one breakage in seven
+
+Closing this round's two stated gaps produced one finding and a lot of
+reassurance. The reassurance first, because it is the larger result.
+
+**`src/agent/registry.ts` holds up.** Sixteen adversarial Zod schemas were
+converted and the *surviving* wire schema walked for any key that is not
+known-legal — inverted deliberately, since asserting the blocklist ran only
+proves the blocklist ran. Fourteen produced fully legal output, including
+constraints nested in arrays, inside union branches, inside `$defs`, four levels
+deep, and fields legitimately named `pattern` / `maximum` / `format` / `required`.
+`z.date()` is rejected by Zod before it reaches the sanitizer. The two that
+carried an illegal keyword were `z.tuple()` (`prefixItems`) and `z.lazy()`
+(`$ref` cycle) — **exactly the two R2-R3 deferred**, so that deferral is
+accurate, and no shipped tool uses either.
+
+**`assertConsistent` is sound in both directions.** No false positive across four
+attempts — a field named `type`, an `allOf` intersection splitting `required`
+from `properties`, an empty object, and a field named `required`. It catches an
+injected orphan at five depths: root, nested object, array items, a union
+branch, and inside `$defs`. It correctly does *not* fire on a fake orphan planted
+inside a literal `default`.
+
+**R2-05 is genuinely resolved.** Adding fields named `pattern`, `maximum` and
+`minLength` to `search_kb` leaves both `tools.test.ts` and `registry.test.ts`
+green, and the fields reach the wire in `properties` and `required` alike. The
+two files no longer demand opposite things.
+
+**The finding.** `verify:boot` was mutation-tested against its own subject:
+seven ways of breaking the sanitizer, checking the gate's exit code each time.
+It caught one — the open-ended-object case block 3 was written for. Reverting
+the fix for `FAILURES.md` entry 1 *or* entry 10 left it green, which is precisely
+what block 3's comment claims it prevents.
+
+The suite caught all seven, so this was never a coverage hole. It was a gate that
+did not demonstrate what it claimed — the same defect class as the documentation
+claims this round corrected, found in the script whose entire job is producing
+gate evidence. Fixed in `c114096`; the reversion table is in that commit message.
+
+Two of the seven mutations initially reported a misleading result, because the
+harness used a `//` that comments out only the remainder of one line and so
+removed a single entry rather than emptying the collection. Caught by checking
+what each mutation actually did to the file rather than trusting its label —
+worth recording, because the first version of that table would have claimed a
+hole in `npm test` that does not exist.
 
 ### What Round 2 got right
 
@@ -151,18 +198,19 @@ typecheck exit=0    test exit=0    lint exit=0    verify:boot exit=0    verify:s
 
 These are gaps in **this** round, and they are larger than Round 2's.
 
-- **`src/agent/registry.ts` was not examined at all.** The format allowlist's
-  behaviour at depth, and whether `assertConsistent` produces false positives or
-  false negatives, are unchecked. So is whether `tools.test.ts` and
-  `registry.test.ts` now agree after R2-05 — the two files that were previously
-  demanding opposite things.
-- **`scripts/verify-boot.ts` gate effectiveness is unchecked.** R2-17's fix is
-  committed; what is unverified is whether the gate now actually catches what it
-  is supposed to. It remains a gate whose usefulness is *asserted* rather than
-  demonstrated — which is what R2-17 found wrong with it in the first place.
-- Both gaps have the same cause: **two sub-agents assigned to them terminated on
-  a session limit before reporting.** Recorded as an absence rather than left to
-  look like coverage, which is the failure mode this file exists to prevent.
+These were the two largest gaps, both caused by sub-agents terminating on a
+session limit before reporting. **Both have since been closed** — see R3-11
+below. They are left described here rather than deleted, because a round that
+edits away its own stated gaps once it fills them destroys the evidence that it
+ever had them.
+
+- ~~`src/agent/registry.ts` was not examined at all.~~ **Closed.** The format
+  allowlist, `assertConsistent`'s false-positive and false-negative behaviour,
+  and the `tools.test.ts` / `registry.test.ts` agreement were all probed. Results
+  in R3-11.
+- ~~`scripts/verify-boot.ts` gate effectiveness is unchecked.~~ **Closed, and it
+  was not effective.** The gate caught 1 of 7 sanitizer reversions. Fixed in
+  `c114096`; it now catches 7 of 7.
 - **Neither migration is applied.** Both were validated — Postgres parsed and
   accepted them inside a rolled-back transaction, and reported `ON DELETE
   CASCADE` on both new foreign keys from `pg_constraint` — so "the DDL is valid"
