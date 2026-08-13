@@ -78,6 +78,7 @@ function ctx(data: OpsData): ToolContext {
   return {
     workspaceId: "ws_demo",
     runId: "run_1",
+    ticketId: "tkt_1",
     now: new Date("2026-08-13T00:00:00Z"),
     data,
   };
@@ -117,12 +118,24 @@ describe("read handlers", () => {
     expect(out).not.toHaveProperty("customer.externalId");
   });
 
-  it("get_subscription returns the plan and period end", async () => {
+  /**
+   * The period end is serialized for the same reason `paidAt` is: the model
+   * sees JSON, and a `Date` that has been through `JSON.stringify` is only
+   * accidentally readable. Asserted explicitly because mutation testing caught
+   * this one unpinned — the invoice handler's `paidAt` had a test and this did
+   * not, so dropping the conversion here changed nothing that any test noticed.
+   */
+  it("get_subscription returns the plan and serializes the period end", async () => {
     const data = fakeData();
-    const out = await call("get_subscription", { customer_id: "cus_0007" }, data);
+    const out = (await call(
+      "get_subscription",
+      { customer_id: "cus_0007" },
+      data,
+    )) as { subscription: { currentPeriodEnd: string } };
 
     expect(data.getSubscription).toHaveBeenCalledWith("cus_0007");
     expect(out).toMatchObject({ found: true, subscription: { plan: "scale", seats: 12 } });
+    expect(out.subscription.currentPeriodEnd).toBe("2026-09-01T00:00:00.000Z");
   });
 
   it("get_subscription reports a miss as data rather than throwing", async () => {
@@ -223,8 +236,13 @@ describe("auto-write handlers", () => {
    * output, so the handler must persist the *whole* structured outcome rather
    * than a status flag. A scorer that cannot see `refund_amount_cents` cannot
    * tell an approved refund from a denied one.
+   *
+   * Note what is *not* in its schema: a ticket id. The run already knows which
+   * ticket it is about, so the terminal tool takes it from the context rather
+   * than from model output — the model cannot close a ticket it was not
+   * dispatched for.
    */
-  it("resolve_ticket persists the full structured outcome", async () => {
+  it("resolve_ticket persists the full structured outcome against the run's ticket", async () => {
     const data = fakeData();
     const outcome = {
       action: "refunded",
@@ -233,7 +251,7 @@ describe("auto-write handlers", () => {
       confidence: "high",
     };
 
-    const out = await call("resolve_ticket", { ticket_id: "tkt_1", ...outcome }, data);
+    const out = await call("resolve_ticket", outcome, data);
 
     expect(data.resolveTicket).toHaveBeenCalledWith("tkt_1", outcome);
     expect(out).toMatchObject({ status: "resolved" });

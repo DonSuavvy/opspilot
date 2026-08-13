@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import { ESCALATION_REASONS } from "../policy/refund";
-import { buildRegistry, UNSUPPORTED_KEYWORDS } from "./registry";
+import {
+  buildRegistry,
+  UNSUPPORTED_KEYWORDS,
+  type ToolContext,
+} from "./registry";
 import { NotImplementedError, TOOLS } from "./tools";
 
 const registry = buildRegistry(TOOLS);
@@ -142,7 +146,11 @@ describe("production tool set", () => {
       registry.get("issue_refund")!.handler({}, {
         workspaceId: "w",
         runId: "r",
+        ticketId: "t",
         now: new Date(),
+        // Never reached: the stub throws before touching the repository, and
+        // the loop pauses before the handler at all.
+        data: {} as ToolContext["data"],
       }),
     ).rejects.toBeInstanceOf(NotImplementedError);
   });

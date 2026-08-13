@@ -20,6 +20,8 @@
  */
 import { z } from "zod";
 
+import type { OpsData } from "./data";
+
 export type SafetyClass = "read" | "auto_write" | "confirm_write";
 
 const SAFETY_CLASSES: readonly SafetyClass[] = [
@@ -107,8 +109,24 @@ export interface AnthropicToolSpec {
 export interface ToolContext {
   workspaceId: string;
   runId: string;
+  /**
+   * The ticket this run was dispatched for.
+   *
+   * `resolve_ticket` has no ticket id in its schema, deliberately: the run
+   * already knows which ticket it is about, so the terminal tool reads it from
+   * here rather than from model output. A ticket id the model chooses is a
+   * ticket id the model can get wrong.
+   */
+  ticketId: string;
   /** Injected so tool handlers stay as deterministic as the policy engine. */
   now: Date;
+  /**
+   * The data seam. Already scoped to `workspaceId` when it was built, which is
+   * why no method on it takes one — see src/agent/data.ts. Handlers reach the
+   * database only through here, so a unit test needs a fake rather than
+   * Postgres.
+   */
+  data: OpsData;
 }
 
 export interface ToolDefinition<T extends AnyZodObject = AnyZodObject> {

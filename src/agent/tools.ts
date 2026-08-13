@@ -3,12 +3,16 @@
  *
  * Schemas, safety classes and idempotency flags are Day 1 — they are what the
  * registry validates at boot and what gets compiled into the cached prompt
- * prefix. The handler bodies land on Day 2 with the agent loop, because they
- * need database access and the policy engine wired in.
+ * prefix. The seven reachable handler bodies land on Day 2 with the agent
+ * loop; the confirm-write pair stays stubbed, because the loop pauses before
+ * calling them and their bodies run on resume (Day 5).
  *
  * Descriptions are deliberately prescriptive about *when* to call a tool, not
  * just what it does. Trigger conditions in the description are the single
  * biggest lever on tool-selection quality.
+ *
+ * Handlers reach the database only through `ctx.data`, which is already scoped
+ * to a workspace — see src/agent/data.ts.
  */
 import { z } from "zod";
 
@@ -30,8 +34,9 @@ const MODEL_OBSERVED_ESCALATION_REASONS = [
 export class NotImplementedError extends Error {
   constructor(toolName: string) {
     super(
-      `Tool "${toolName}" has no handler yet. Handlers land on Day 2 with the ` +
-        `agent loop (see docs/PLAN.md). The schema and safety class are live.`,
+      `Tool "${toolName}" has no handler yet. The confirm-write pair runs on ` +
+        `resume, which is Day 5's gate (see docs/PLAN.md) — the loop pauses ` +
+        `before calling them. The schema and safety class are live.`,
     );
     this.name = "NotImplementedError";
   }
@@ -41,9 +46,39 @@ const pending = (name: string) => async (): Promise<never> => {
   throw new NotImplementedError(name);
 };
 
+/**
+ * The model reads JSON, so every timestamp crosses the boundary as an ISO
+ * string. An unlabelled epoch number is worse than useless when the refund
+ * window is measured in days from `paidAt`.
+ */
+const iso = (d: Date | null): string | null =>
+  d === null ? null : d.toISOString();
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyZodObject = z.ZodObject<any>;
+
+/**
+ * Binds each handler to its own schema.
+ *
+ * A heterogeneous `ToolDefinition[]` has to erase the per-tool generic, so
+ * without this every handler would receive `Record<string, unknown>` and have
+ * to re-validate by hand — the exact duplication the registry exists to
+ * prevent. Inferring `T` from the `input` property here gives each handler its
+ * real argument type at the one place it is written.
+ *
+ * The widening cast is discharged at the only place handlers are invoked:
+ * `runAgentLoop` parses arguments with *this same schema* and passes
+ * `parsed.data`, so the runtime value really is `z.infer<T>`.
+ */
+function defineTool<T extends AnyZodObject>(
+  definition: ToolDefinition<T>,
+): ToolDefinition {
+  return definition as unknown as ToolDefinition;
+}
+
 export const TOOLS: ToolDefinition[] = [
   /* ----------------------------- read (auto) ----------------------------- */
-  {
+  defineTool({
     name: "get_customer",
     description:
       "Look up a Beacon Analytics customer by external id or email address. Call this first " +
@@ -56,9 +91,21 @@ export const TOOLS: ToolDefinition[] = [
     }),
     safetyClass: "read",
     idempotent: true,
-    handler: pending("get_customer"),
-  },
-  {
+    /**
+     * A miss is reported as data, not thrown. The policy engine has an
+     * `unknown_customer` escalation reason and the SOP tells the agent to use
+     * it — which it can only do if it gets a readable answer. An `is_error`
+     * result reads to the model as "this tool is broken", and it tries
+     * something else instead of escalating.
+     */
+    handler: async ({ query }, ctx) => {
+      const customer = await ctx.data.findCustomer(query);
+      return customer === null
+        ? { found: false, query }
+        : { found: true, customer };
+    },
+  }),
+  defineTool({
     name: "get_subscription",
     description:
       "Fetch the current subscription for a customer: plan, status, seat count, monthly price " +
@@ -68,9 +115,19 @@ export const TOOLS: ToolDefinition[] = [
     }),
     safetyClass: "read",
     idempotent: true,
-    handler: pending("get_subscription"),
-  },
-  {
+    handler: async ({ customer_id }, ctx) => {
+      const subscription = await ctx.data.getSubscription(customer_id);
+      if (subscription === null) return { found: false, customer_id };
+      return {
+        found: true,
+        subscription: {
+          ...subscription,
+          currentPeriodEnd: iso(subscription.currentPeriodEnd),
+        },
+      };
+    },
+  }),
+  defineTool({
     name: "get_invoices",
     description:
       "List a customer's invoices, newest first, with status, amount and paid date. Call this " +
@@ -85,9 +142,14 @@ export const TOOLS: ToolDefinition[] = [
     }),
     safetyClass: "read",
     idempotent: true,
-    handler: pending("get_invoices"),
-  },
-  {
+    handler: async ({ customer_id, limit }, ctx) => {
+      const invoices = await ctx.data.listInvoices(customer_id, limit);
+      return {
+        invoices: invoices.map((i) => ({ ...i, paidAt: iso(i.paidAt) })),
+      };
+    },
+  }),
+  defineTool({
     name: "search_kb",
     description:
       "Full-text search the Beacon Analytics knowledge base. Call this for any how-to or " +
@@ -100,11 +162,20 @@ export const TOOLS: ToolDefinition[] = [
     }),
     safetyClass: "read",
     idempotent: true,
-    handler: pending("search_kb"),
-  },
+    /**
+     * `found: 0` rather than an error. An empty corpus hit reported as a
+     * failure makes the model retry with different search terms instead of
+     * concluding the KB has nothing — which is how a confident wrong answer
+     * gets written in place of an escalation.
+     */
+    handler: async ({ query }, ctx) => {
+      const articles = await ctx.data.searchKb(query);
+      return { found: articles.length, articles };
+    },
+  }),
 
   /* -------------------- auto-write (reversible, logged) ------------------- */
-  {
+  defineTool({
     name: "draft_reply",
     description:
       "Save a draft reply to the customer. Call this once you know what the resolution is. " +
@@ -117,9 +188,10 @@ export const TOOLS: ToolDefinition[] = [
     }),
     safetyClass: "auto_write",
     idempotent: true,
-    handler: pending("draft_reply"),
-  },
-  {
+    handler: async ({ ticket_id, body }, ctx) =>
+      ctx.data.saveDraft(ticket_id, body),
+  }),
+  defineTool({
     name: "escalate",
     description:
       "Hand the ticket to a human with a written rationale. Call this when policy denies what " +
@@ -137,11 +209,12 @@ export const TOOLS: ToolDefinition[] = [
     }),
     safetyClass: "auto_write",
     idempotent: true,
-    handler: pending("escalate"),
-  },
+    handler: async ({ ticket_id, reason, summary }, ctx) =>
+      ctx.data.escalateTicket(ticket_id, reason, summary),
+  }),
 
   /* ------------------ confirm-write (pauses for approval) ----------------- */
-  {
+  defineTool({
     name: "issue_refund",
     description:
       "Refund money against a paid invoice. Call this only after get_invoices confirms the " +
@@ -173,8 +246,8 @@ export const TOOLS: ToolDefinition[] = [
     safetyClass: "confirm_write",
     idempotent: true,
     handler: pending("issue_refund"),
-  },
-  {
+  }),
+  defineTool({
     name: "update_subscription",
     description:
       "Change a customer's plan or seat count. Call this for upgrades, downgrades and " +
@@ -191,10 +264,10 @@ export const TOOLS: ToolDefinition[] = [
     safetyClass: "confirm_write",
     idempotent: true,
     handler: pending("update_subscription"),
-  },
+  }),
 
   /* ------------------------------ terminal ------------------------------- */
-  {
+  defineTool({
     name: "resolve_ticket",
     description:
       "End the run with a structured outcome. You MUST call this exactly once as your final " +
@@ -222,6 +295,17 @@ export const TOOLS: ToolDefinition[] = [
     safetyClass: "auto_write",
     idempotent: true,
     terminal: true,
-    handler: pending("resolve_ticket"),
-  },
+    /**
+     * Note the ticket id comes from `ctx`, not from the input schema — which
+     * has no such field on purpose. The run already knows which ticket it was
+     * dispatched for, and a ticket id the model chooses is a ticket id the
+     * model can get wrong.
+     *
+     * The whole structured outcome is persisted, not a status flag: the
+     * deterministic eval scorers read it, and one that cannot see
+     * `refund_amount_cents` cannot tell an approved refund from a denied one.
+     */
+    handler: async (outcome, ctx) =>
+      ctx.data.resolveTicket(ctx.ticketId, outcome),
+  }),
 ];

@@ -9,7 +9,11 @@ import {
   type MessageCreator,
   type SpanEvent,
 } from "./loop";
-import { buildRegistry, type ToolDefinition } from "./registry";
+import {
+  buildRegistry,
+  type ToolContext,
+  type ToolDefinition,
+} from "./registry";
 
 import { z } from "zod";
 
@@ -176,7 +180,11 @@ function loopInput(
     toolContext: {
       workspaceId: "ws_1",
       runId: "run_1",
+      ticketId: "tkt_1",
       now: new Date("2026-08-13T00:00:00Z"),
+      // The loop never touches the repository — it only forwards the context
+      // to handlers, and this file's handlers are fakes that ignore it.
+      data: {} as ToolContext["data"],
     },
     budget: { config: budget(), spentTodayNanos: 0 },
     estimatedCallNanos: TURN_NANOS,
