@@ -46,11 +46,14 @@ not the reply text.
 | **Policy engine** | Pure refund + escalation rules, with both the stored policy blob *and* the evaluation input parsed rather than trusted — and the limits bounded absolutely, not just against each other. 104 tests |
 | **Tool registry** | 9 tools with Zod schemas → strict JSON Schema, three-class safety model, boot-time validation that refuses unknown tools rather than waving them through. 49 tests, plus 11 pinning the nine tools' wire schemas and holding their vocabulary in step with the policy engine |
 | **Seed** | Deterministic Beacon Analytics dataset — 30 customers, 54 invoices, 20 KB articles, 8 tickets — with every id scoped to its workspace, so Day 8 can seed a sandbox per visitor. 7 tests |
+| **Provider + spend guard** | Adapter over Amazon Bedrock and the first-party API — logical model names, per-provider rate cards carrying their own provenance, and a pre-flight budget cap + kill switch. 44 tests |
+| **Cost accounting** | Integer nano-dollar pricing; unverified rate cards produce figures flagged as estimates rather than reported as measured. 31 tests |
 | **Infra** | Next.js 16, Tailwind v4, shadcn/ui on Radix, Vitest, GitHub Actions CI, Docker Postgres |
 
-**191 tests passing** — 104 + 49 + 11 + 20 + 7, across five files. No test
-requires a database, and as of Round 4 none of them *touches* one either:
-importing the seed used to execute it.
+**266 tests passing** — 104 policy + 49 registry + 31 cost + 23 budget + 21
+provider + 11 tools + 20 client + 7 seed, across eight files. No test requires a
+database, and as of Round 4 none of them *touches* one either: importing the
+seed used to execute it.
 
 > Measured locally. This branch has not been pushed, so CI has never run
 > against this tree — the counts above are from `npm run test` on this machine,
