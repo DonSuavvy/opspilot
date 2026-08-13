@@ -261,7 +261,28 @@ export interface RefundEvaluationInput {
 
 export interface RefundDecision {
   outcome: RefundOutcome;
-  /** Zero on denial; the requested amount otherwise. */
+  /**
+   * The amount this decision *authorises*, not the amount that moved.
+   *
+   * Zero on `deny`; the requested amount on both `approve` and
+   * `requires_approval`. Round 4 questioned the second case — on
+   * `requires_approval` no money is authorised yet, so returning the full
+   * requested amount can read as "approved".
+   *
+   * Kept as-is, deliberately. On `requires_approval` this is the amount being
+   * *put to a human*, which is exactly what the approval queue needs to
+   * display, and `outcome` is the field that says whether anything is settled.
+   * A reader who takes this as "money that moved" without checking `outcome`
+   * has misread it in the `approve` case too.
+   *
+   * The reason not to change it now is stronger than the reason to: there is
+   * no consumer. All nine tool handlers still throw `NotImplementedError`, so
+   * altering the value would be rewriting a contract against zero call sites
+   * and pre-committing Day 2's cost accounting and Day 5's approval queue to a
+   * shape neither has been written against. Revisit when the approval queue
+   * gives it a real reader — the decision belongs with the code that consumes
+   * it, and `outcome` is load-bearing either way.
+   */
   approvedCents: number;
   violations: RefundViolation[];
   /**

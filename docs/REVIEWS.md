@@ -16,6 +16,251 @@ which findings survive contact with the actual code and the actual schedule.
 
 ---
 
+## Round 4 — 2026-08-13 — Configuration, claims, and multi-tenancy
+
+**Question asked:** the previous rounds checked that the code does what it says
+under the inputs it expects. What can a *well-formed* edit make it do?
+
+**Headline:** the policy engine's limits were bounded only against each other,
+so a policy that passed every check Round 2 added authorised a $999,999.99
+refund with zero violations — and the prompt-injection guard was a boolean an
+operator could switch off. Both fixed. A control described in the present tense
+across three files did not exist. Every seed id was global rather than
+per-workspace, which blocks Day 8's sandboxes. Suite **164 → 191**.
+
+**Method:** an independent pass whose findings were handed over as a work list,
+then each one reproduced before being fixed — twice against the running
+database rather than by reading code. Two findings did not survive that
+reproduction unchanged, and are recorded below as such.
+
+### Findings ledger
+
+| ID | Severity | Finding | Where | Status |
+|---|---|---|---|---|
+| R4-01 | **Critical** | Refund limits bounded only relatively; a valid policy approved $999,999.99 with `violations: []` | `src/policy/refund.ts` | Fixed `9e703a7` + `e545d75` |
+| R4-02 | **High** | `escalateOnSuspectedInjection` was operator-settable; injection + unknown customer + denial returned `{escalate: false, reasons: []}` | `src/policy/refund.ts` | Fixed `e545d75` |
+| R4-03 | High (claim) | The injection pre-scan does not exist, but three files describe it in the present tense — one of them a **gate assertion** | `src/db/schema.ts`, `src/policy/refund.ts`, `scripts/verify-seed.ts` | Fixed `133d56b` |
+| R4-04 | **High** | Seed ids derived from the key alone, so a second workspace collides on `customers_pkey` — blocks Day 8 sandboxes | `src/db/seed.ts` | Fixed `5a84265` + `0bc9c26` |
+| R4-05 | **High** | Importing `src/db/seed.ts` *executed* it — a vitest run wrote to Postgres | `src/db/seed.ts` | Fixed `0bc9c26` |
+| R4-06 | Medium | `assertConsistent` used `in`, so `required: ["toString"]` evaded the orphan check | `src/agent/registry.ts` | Fixed `664e526` + `f83db5c` |
+| R4-07 | Medium | `requiresApproval` failed open on unknown tool names | `src/agent/registry.ts` | Fixed `c2d9bb7` + `4665a55` |
+| R4-08 | Medium (test gap) | `requiresApproval` could be widened to `!== "read"` with the suite green | `src/agent/registry.test.ts` | Pinned `c2d9bb7` |
+| R4-09 | Medium | `escalate`'s enum could not express `unknown_customer` or `unknown_customer_value`, and renamed a third reason in transit | `src/agent/tools.ts` | Fixed `703828f` + `de4ba9e` |
+| R4-10 | Medium (latent) | No `CHECK` on any `cost_usd`, and the obvious one would not have worked — `numeric` accepts `'NaN'` and sorts it above every value | `src/db/schema.ts` | Fixed `05b9735` — migration **generated, not applied** |
+| R4-11 | — | `approvedCents` returns the requested amount on `requires_approval` | `src/policy/refund.ts` | **Deliberate non-change** — see below |
+| R4-12 | — | `ToolContext` carries no approval record | `src/agent/registry.ts` | **Carried forward to Day 5** |
+| R4-13 | — | Branch unpushed; CI has never run this tree | — | **Awaiting Sebastian's decision** |
+
+### R4-01 / R4-02 — a valid policy that authorises anything · **Critical**
+
+Round 2 hardened `policyConfigSchema` against *malformed* input: missing keys,
+typos, extra keys, NaN. Every one of those tests still passes against a policy
+that authorises a million-dollar refund, because that policy is not malformed.
+**Well-formed and safe are different properties, and only the first had tests.**
+
+The only bound was relative — `maxAutoApproveCents <= maxRefundCents` — which
+is a consistency check. It says the two numbers agree with each other, not that
+either is sane, and it is satisfied at any magnitude.
+
+The ceilings are derived from the data rather than chosen. The largest invoice
+Beacon Analytics issues is one Scale month, **$299** (`max(amount_cents)` is
+29900 across all 54 rows), so a $5,000 hard ceiling is ~17× the largest
+legitimate refund and constrains no real case. It also sits strictly below the
+**$10,000** the adversarial ticket demands — demo arc step 4 must not be
+defeatable by editing a number in the SOP editor.
+
+`escalateOnSuspectedInjection` is now `z.literal(true)`. Pinned rather than
+deleted: the key is already persisted in `sop_versions.policy_config` for every
+existing version and the object is `.strict()`, so removing it would make every
+stored policy unparseable and take the engine down on read. The other two
+escalation toggles stay settable — this is a bound on the security control, not
+a freeze of the block.
+
+One pre-existing test asserted the opposite ("honours
+`escalateOnSuspectedInjection: false`") and was **inverted rather than worked
+around**, because it encoded precisely the capability being removed.
+
+### R4-03 — a gate asserting a control that does not exist
+
+`verify-seed.ts` printed `✓ one ticket flagged by the injection pre-scan`. There
+is no pre-scan. The only producer of `suspectedInjection: true` is one
+hand-written line in the seed, and the column defaults to `false`.
+
+This is FAILURES entry 8's exact bug class, which is why the fix did not stop at
+the two files the finding named. Grepping for the *claim* rather than trusting
+the file list turned up a third site in `src/policy/refund.ts` that the finding
+never mentioned — and fixing two of three would have left it live.
+
+Two sites were deliberately **left alone**: `README.md` sits under a heading
+that already reads "The 3-minute demo (target)", and `docs/PLAN.md` is a build
+plan, forward-looking by construction.
+
+### R4-04 / R4-05 — the seed could only ever seed once
+
+Confirmed against the running database rather than inferred:
+
+```
+derived seedId("workspace:demo") = 03153a0e-1643-442f-b9c4-7186c15ffea3
+select id from workspaces        = 03153a0e-1643-442f-b9c4-7186c15ffea3
+```
+
+Correct for exactly one workspace and fatal for two. Day 8 seeds a sandbox per
+visitor — which is also the permanent fix for the seed's ~8-day shelf life, the
+decay that made `verify:seed` red at the start of this session.
+
+The slug is **length-prefixed**, not concatenated or delimited: `slug + key`
+maps `("ab", "c")` and `("a", "bc")` to one digest, and a fixed delimiter only
+moves the problem to slugs containing it. Day 8's slugs are generated per
+visitor, so the alphabet is not something this module gets to assume. Both wrong
+fixes are pinned by their own mutation tests.
+
+R4-05 was **found while running the RED**, not by the review. `seed()` was
+invoked at module scope, so importing the seed executed it:
+
+```
+stdout | src/db/seed.test.ts
+◇ injected env (4) from .env.local
+Seeding Beacon Analytics...
+```
+
+`npm test` wrote to Postgres, in a suite CLAUDE.md requires to work without a
+database — and would have on any CI machine with `DATABASE_URL` set. The CLI
+now lives in `scripts/seed.ts` and the module is inert on import.
+
+Verified by seeding a second workspace against the live database, the case that
+previously died on `customers_pkey`:
+
+```
+customer rows across both workspaces = 60
+distinct customer ids                = 60
+RESULT: PASS — no id is shared between the two workspaces
+```
+
+### R4-10 — the obvious constraint would not have worked
+
+Postgres `numeric` accepts the literal `'NaN'` and orders it **above** every
+other numeric value, so `CHECK (cost_usd >= 0)` admits it. Verified, not
+reasoned about:
+
+```
+'NaN'::numeric >= 0              -> true
+CHECK (c >= 0)                   -> INSERT 'NaN' SUCCEEDS
+CHECK (c >= 0 AND c <= 1000000)  -> INSERT 'NaN' rejected
+```
+
+The upper bound is the half that does the work. One NaN turns every `SUM` over
+the column into NaN, so *cost per resolved ticket* — the KPI Mission Control is
+built around — would show nothing rather than something wrong.
+
+**The first generated migration was wrong and was thrown away.** A plain
+`${MAX_COST_USD}` inside drizzle's `sql` template becomes a bind parameter, and
+drizzle-kit emitted `CHECK (... <= $1)` — invalid in DDL, and it would have
+failed on apply. Typecheck, lint and the full suite were green with that
+version on disk; reading the generated SQL is what caught it.
+
+Migration `0003_certain_mach_iv` is validated in a rolled-back transaction and
+**not applied**, consistent with 0001 and 0002. The local database still reports
+zero `cost_usd` constraints.
+
+### Rejected and deferred — with reasoning
+
+**R4-11 — `approvedCents` on `requires_approval`. Not changed.** The finding
+reads as a defect, but `RefundDecision`'s own docstring already says *"Zero on
+denial; the requested amount otherwise"* — the behaviour matches the documented
+contract, so either the doc or the finding is wrong, not the code. On
+`requires_approval` this is the amount being *put to a human*, which is what the
+approval queue needs to display, and `outcome` is the field that says whether
+anything is settled.
+
+The decisive point is that **there is no consumer**: all nine handlers still
+throw `NotImplementedError`. Changing the value would rewrite a contract against
+zero call sites and pre-commit Day 2's cost accounting and Day 5's approval
+queue to a shape neither has been written against. The docstring is sharpened to
+say "authorises, not moved"; the decision belongs with the code that consumes
+it.
+
+**R4-12 — no approval record on `ToolContext`. Carried forward to Day 5.** This
+is not a fix but a missing design, and its shape is Day 5's pause/resume
+contract. Inventing it now from a one-line hint would be guessing at an
+interface the approval queue has to live with.
+
+**R4-13 — the unpushed branch. Sebastian's call, not mine.** `origin/main` is
+`8692e29`, a 79-test tree; CI has never executed against any of this work. That
+is a real gap and it is recorded as *awaiting a decision* rather than *open*,
+because the action is a judgement about when to publish, not a defect to fix.
+Every count in this document and in the README was measured locally.
+
+### Verification evidence
+
+All from this session, on `ecb5dc6`..`HEAD`:
+
+```
+npm run test         191 passed (191), 5 files
+                     104 refund / 49 registry / 11 tools / 20 client / 7 seed
+npm run typecheck    exit 0
+npm run lint         exit 0
+npm run verify:boot  Boot validation gate: PASS
+npm run verify:seed  Seed verification: PASS  (after a re-seed — see below)
+```
+
+`verify:seed` was **red on arrival**: `no invoice sits within a day of a window
+boundary (got 1: INV-2006)`. That is the documented ~8-day seed decay, not a code
+defect, and re-seeding cleared it. It is also the concrete cost of R4-04 going
+unfixed, since per-visitor sandboxes are what retire the shared seed.
+
+### Mutation testing
+
+Every new assertion was pinned by reverting the code it guards. The harness
+**aborts if a mutation leaves the file byte-identical**, and prints the
+`git diff --numstat` for each — two earlier passes in this repo reported clean
+sweeps from harnesses that had silently no-op'd.
+
+| Mutation | Result |
+|---|---|
+| drop the `windowDays` ceiling | killed (1) |
+| drop the auto-approve ceiling | killed (1) |
+| drop the hard refund ceiling | killed (1) |
+| `z.literal(true)` → `z.boolean()` | killed (3) |
+| hash the key alone (the original R4-04 bug) | killed (3) |
+| scope by bare concatenation | killed (1) |
+| scope with a delimiter, no length prefix | killed (1) |
+| `Object.hasOwn` → `in` | killed (5) |
+| `=== "confirm_write"` → `!== "read"` | killed (1) |
+
+That last row is R4-08: the same mutation the review reported surviving at 164
+tests.
+
+### Not verified — coverage gaps stated plainly
+
+- **CI has not run this tree** (R4-13). No clean-clone check was performed this
+  session; the last one is Round 3's, four commits back.
+- **Migration 0003 has never been applied**, only validated in a rolled-back
+  transaction. Applying it to a database with existing rows could fail on data
+  the constraint rejects; there are no such rows today because nothing writes
+  `cost_usd` yet.
+- **The $5,000 and $1,000 ceilings are judgement calls.** They are derived from
+  the seeded maximum and the adversarial ticket's amount, both of which are
+  fixtures. A real deployment would set them from a real refund distribution.
+- **No test covers `seedWorkspace` end to end** — only its id derivation. The
+  two-workspace proof was a throwaway probe, not a checked-in gate.
+
+### Lessons
+
+1. **A consistency check is not a bound.** `a <= b` says two numbers agree, not
+   that either is sane. Round 2's hardening was correct and complete against
+   malformed input, and malformed was never the dangerous case.
+2. **A security control with an off switch has no off switch.** If a guarantee
+   is load-bearing enough to demo, it should not be reachable from a text field.
+3. **Grep for the claim, not the file list.** A finding names the sites its
+   author happened to see. R4-03's third site was found in ten seconds and would
+   otherwise have survived the fix for its two siblings.
+4. **Run the RED for real.** R4-05 was invisible to every reviewer and appeared
+   the moment a test file imported the module.
+5. **Read the generated SQL.** R4-10's first migration was syntactically
+   invalid while typecheck, lint and the suite were all green.
+
+---
+
 ## Round 3 — 2026-08-12 — Verification of Round 2
 
 **Question asked:** Round 2 audited the code. Does Round 2's own write-up

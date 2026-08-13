@@ -44,12 +44,17 @@ not the reply text.
 |---|---|
 | **Data model** | 15-table Drizzle schema + migrations — workspaces, customers, subscriptions, invoices, tickets, KB articles, SOPs + SOP versions, agent runs, run spans, approvals, audit log, eval cases/runs/results — plus a lazy client that picks TLS from the parsed host. 20 tests |
 | **Policy engine** | Pure refund + escalation rules, with both the stored policy blob *and* the evaluation input parsed rather than trusted — and the limits bounded absolutely, not just against each other. 104 tests |
-| **Tool registry** | 9 tools with Zod schemas → strict JSON Schema, three-class safety model, boot-time validation. 42 tests, plus 9 pinning the nine tools' wire schemas |
+| **Tool registry** | 9 tools with Zod schemas → strict JSON Schema, three-class safety model, boot-time validation that refuses unknown tools rather than waving them through. 49 tests, plus 11 pinning the nine tools' wire schemas and holding their vocabulary in step with the policy engine |
 | **Seed** | Deterministic Beacon Analytics dataset — 30 customers, 54 invoices, 20 KB articles, 8 tickets — with every id scoped to its workspace, so Day 8 can seed a sandbox per visitor. 7 tests |
 | **Infra** | Next.js 16, Tailwind v4, shadcn/ui on Radix, Vitest, GitHub Actions CI, Docker Postgres |
 
-**182 tests passing** — 104 + 42 + 9 + 20 + 7, across five files. No test
-requires a database.
+**191 tests passing** — 104 + 49 + 11 + 20 + 7, across five files. No test
+requires a database, and as of Round 4 none of them *touches* one either:
+importing the seed used to execute it.
+
+> Measured locally. This branch has not been pushed, so CI has never run
+> against this tree — the counts above are from `npm run test` on this machine,
+> not from a green check on a remote.
 
 ### Coming (see [`docs/PLAN.md`](docs/PLAN.md))
 
@@ -246,10 +251,31 @@ scorers key off; it is now closed with the option that was chosen rather than th
 one that was cheapest to type. The second is still open and written down: a
 comment claiming its guard catches more than it does.
 
+### A fourth pass asked what a *valid* edit could do
+
+The first three rounds checked that the code does what it says under the inputs
+it expects. Round 4 asked what a well-formed configuration change could make it
+do — and the answer was most of the things the project exists to prevent.
+
+| | |
+|---|---|
+| **A valid policy that authorised anything** | The refund limits were bounded only against *each other* — `maxAutoApproveCents <= maxRefundCents`. Set both to 99999999 and every check the previous rounds added still passes: no missing keys, no typos, no NaN, no extra keys. `evaluateRefund` then approved **$999,999.99 with `violations: []`**. A consistency check says two numbers agree; it never said either was sane. |
+| **A security control with an off switch** | `escalateOnSuspectedInjection` was an ordinary boolean in the editable policy, so "escalate on prompt injection" was a preference. With the other two toggles off, a ticket with injection flagged, an unknown customer, *and* a refund denied by policy returned `{escalate: false, reasons: []}`. It is now pinned to `true` — the demo's step-4 claim must not be defeatable from a text field. |
+| **A gate asserting a control that doesn't exist** | `verify:seed` printed `✓ one ticket flagged by the injection pre-scan`. There is no pre-scan; the flag is one hand-written line in the seed. Three files described it in the present tense — and only two were named by the review. Grepping for the *claim* rather than the file list found the third. |
+| **A seed that could only ever seed once** | Every primary key was derived from its key alone, so `seedId("workspace:demo")` equalled the live workspace id and a second sandbox would die on `customers_pkey` — blocking the per-visitor sandboxes that are themselves the fix for the seed's ~8-day shelf life. Now scoped per workspace, and verified by seeding two side by side: 60 customer rows, 60 distinct ids. |
+| **`npm test` wrote to the database** | Found by *running* the failing test, not by reading code: `seed()` was invoked at module scope, so importing the seed executed it. The unit-test run injected `.env.local` and started seeding Postgres — in a suite whose stated rule is that no test requires a database. Correct as a script, unsafe as a module, and invisible until something imported it. |
+| **The obvious constraint wouldn't have worked** | Postgres `numeric` accepts `'NaN'` and sorts it *above* every value, so `CHECK (cost_usd >= 0)` admits it — one NaN turns every `SUM` into NaN and blanks the cost-per-ticket KPI. The upper bound is the half that does the work. Then the first generated migration emitted `<= $1`, a bind parameter, invalid in DDL — while typecheck, lint and all 191 tests were green. Caught by reading the generated SQL. |
+
+**191 tests, up from 164.** Two findings were deliberately *not* acted on and the
+reasoning is written down: `approvedCents` matches its own documented contract
+and has no consumer yet, so changing it would rewrite an interface against zero
+call sites; and the missing approval record on `ToolContext` is Day 5's
+pause/resume design, not a fix to guess at now.
+
 The point isn't that the reviews found things. It's that **shipping a green gate
 is where verification starts, not where it stops** — and that the failures are
 written down rather than quietly patched, including the ones in the write-ups of
-earlier reviews.
+earlier reviews, and including the ones found while fixing something else.
 
 ---
 

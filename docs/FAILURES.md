@@ -602,3 +602,207 @@ will not check their connection string when a query fails.
 **Lesson:** `new URL()` is a parser, not a validator. It accepts any
 `scheme:opaque` string, so "it parsed" means "it was URL-shaped," not "it is the
 kind of URL you wanted."
+
+---
+
+## 15. A perfectly valid policy that authorised $999,999.99 — 2026-08-13
+
+**Severity: critical.** Reachable from the SOP editor, by an operator doing
+nothing wrong.
+
+**Caught by:** the Round 4 review pass.
+
+Entry 9 fixed this engine failing open on a *malformed* policy. This is the same
+column of the same table, one cell over: a policy that is entirely well-formed.
+
+The only bound on the refund limits was relative — `maxAutoApproveCents <=
+maxRefundCents`. Set both to `99_999_999` and it is satisfied, every required
+key is present, every type is right, nothing is misspelled, no extra keys, no
+NaN. Every test entry 9 added still passes. `evaluateRefund` then approves
+$999,999.99 with `violations: []`.
+
+**A consistency check is not a bound.** `a <= b` says the two numbers agree with
+each other, not that either one is sane, and it holds at any magnitude.
+
+The second half was worse, because it needed no unusual number at all:
+
+```
+escalation: { escalateOnSuspectedInjection: false, ... }
+```
+
+`escalateOnSuspectedInjection` was an ordinary `z.boolean()`. So "escalate when
+the ticket looks like a prompt injection" was a preference, switchable from a
+text field with no code change, no review, and no failing test. Combined with
+the other two toggles, a ticket with injection flagged, an unknown customer, and
+a refund denied by policy returned:
+
+```
+{ escalate: false, reasons: [] }
+```
+
+Three independent reasons to involve a human, and the engine reported none of
+them.
+
+**Fix.** Three absolute ceilings, derived from the data rather than picked: the
+largest invoice Beacon Analytics issues is one Scale month, **$299**
+(`max(amount_cents)` = 29900 across all 54 rows), so the $5,000 hard ceiling is
+~17× the largest legitimate refund and constrains no real case — while sitting
+strictly below the **$10,000** the adversarial ticket demands. Demo arc step 4
+must not be defeatable by editing a number.
+
+`escalateOnSuspectedInjection` becomes `z.literal(true)` — pinned, not deleted,
+because the key is already persisted in every stored `policy_config` and the
+object is `.strict()`, so removing it would make every existing row unparseable
+and take the engine down on read.
+
+One existing test asserted the exact capability being removed. It was
+**inverted, not deleted or worked around** — a test that encodes a behaviour you
+have decided is wrong is evidence about the old design, and quietly dropping it
+loses the record that it was ever believed.
+
+**Lesson:** hardening against malformed input and hardening against *harmful*
+input are different jobs. The second one is the one an attacker — or a tired
+operator — actually reaches.
+
+---
+
+## 16. Importing the seed ran the seed — 2026-08-13
+
+**Caught by:** running a failing test. Not by any of four review passes.
+
+Round 4 flagged that seed ids had no workspace component. Writing the RED test
+for that — a pure test, of a pure function — produced this:
+
+```
+stdout | src/db/seed.test.ts
+◇ injected env (4) from .env.local
+Seeding Beacon Analytics...
+```
+
+`seed()` was invoked at module scope, so `import { … } from "./seed"` *executed*
+it. A unit test run read `.env.local` and started writing to Postgres.
+
+CLAUDE.md states the rule this breaks: **`npm test` must never require a
+database.** It had been true only because no test had ever imported that module.
+On any CI machine with `DATABASE_URL` set, the first test that did would have
+silently rewritten a database mid-suite.
+
+**What made it invisible:** nothing was wrong with the file in isolation. It ran
+correctly as a script, which is all anyone had ever asked it to do. The defect
+existed only in a use case that had not happened yet — which is exactly the kind
+a review reading for correctness will not find, because the code is correct for
+what it currently does.
+
+**Fix:** `src/db/seed.ts` is a library exporting `seedWorkspace(db, {slug,
+expiresAt, now})`; everything with a side effect — dotenv, the pool, printing,
+the exit code — moved to `scripts/seed.ts`, matching the existing
+`scripts/verify-*.ts` convention.
+
+The underlying finding was real too, and confirmed against the live database
+before being fixed:
+
+```
+derived seedId("workspace:demo") = 03153a0e-1643-442f-b9c4-7186c15ffea3
+select id from workspaces        = 03153a0e-1643-442f-b9c4-7186c15ffea3
+```
+
+Every workspace derived identical primary keys, so the second sandbox to be
+seeded would die on `customers_pkey` — blocking Day 8's per-visitor sandboxes,
+which are themselves the permanent fix for the seed's ~8-day shelf life.
+
+The slug is **length-prefixed** into the digest rather than concatenated:
+`slug + key` maps `("ab", "c")` and `("a", "bc")` to one hash, and a delimiter
+only moves the problem to slugs that contain it. Both wrong fixes are pinned by
+mutation tests, because both are what a reasonable person writes first.
+
+**Lesson:** "it works when you run it" and "it is safe to import" are different
+properties. A module that does work at import time has an API surface nobody
+declared.
+
+---
+
+## 17. The obvious constraint would not have caught the thing it was for — 2026-08-13
+
+**Caught by:** Round 4, and then by refusing to write the constraint from
+memory.
+
+No `CHECK` existed on any of the four `cost_usd` columns. The natural one to add
+is `CHECK (cost_usd >= 0)`. It does not work:
+
+```
+'NaN'::numeric >= 0               -> true
+CHECK (c >= 0)                    -> INSERT 'NaN' SUCCEEDS
+CHECK (c >= 0 AND c <= 1000000)   -> INSERT 'NaN' rejected
+```
+
+Postgres `numeric` accepts the literal `'NaN'` and orders it **above** every
+other numeric value. The lower bound admits it; the **upper** bound is the half
+that does the work.
+
+One NaN turns every `SUM` over the column into NaN — so *cost per resolved
+ticket*, the managed-services KPI Mission Control is built around, would display
+nothing rather than something visibly wrong. The silent direction again.
+
+**Then the fix itself was wrong, and the tests could not tell.** The first
+generated migration read:
+
+```sql
+ALTER TABLE "agent_runs" ADD CONSTRAINT "agent_runs_cost_usd_sane"
+  CHECK ("agent_runs"."cost_usd" >= 0 AND "agent_runs"."cost_usd" <= $1);
+```
+
+A plain `${MAX_COST_USD}` inside drizzle's `sql` template becomes a **bind
+parameter**, and drizzle-kit wrote it into the migration verbatim. `$1` is
+invalid in DDL; it would have failed the moment anyone applied it. `npm run
+typecheck`, `npm run lint` and all 191 tests were green with that file on disk.
+It was caught by reading the generated SQL — the artifact, not the source.
+
+**Fix:** `sql.raw`, and the migration validated in a rolled-back transaction
+against the real database, proving both directions:
+
+```
+INSERT cost_usd='NaN'    -> ERROR: violates check constraint "agent_runs_cost_usd_sane"
+INSERT cost_usd='0.0612' -> PASS: a real cost of 0.061200 is accepted
+```
+
+Generated and validated; **not applied**, consistent with migrations 0001 and
+0002.
+
+**Lesson:** two of them. A type's comparison semantics are part of its
+behaviour — `>= 0` means something different for `numeric` than for `integer`.
+And a code generator's *output* is the deliverable; a green suite says nothing
+about a file no test reads.
+
+---
+
+## 18. A prototype chain in the safety net — 2026-08-13
+
+**Caught by:** Round 4.
+
+Entry 1 added `assertConsistent`, whose claim was that "one assertion catches
+this whole bug class". It asked:
+
+```ts
+(name) => !(name in properties)
+```
+
+`in` walks the prototype chain. `"toString" in {}` is `true`. So a schema whose
+`required` names `toString`, `constructor`, `valueOf`, `hasOwnProperty` or
+`__proto__` — with no such property — passed the check whose entire purpose is
+catching exactly that.
+
+**The same family as entry 1, one level up.** There, a field named `pattern` was
+destroyed because a *keyword* blocklist was applied to *author identifiers*.
+Here, an orphaned field was missed because a JavaScript operator that knows
+about inherited members was applied to author identifiers. Both times the bug is
+treating a name chosen by a tool author as though it meant something to the
+language.
+
+`Object.hasOwn` is the operator that means what the check meant. The same idiom
+was also present in a *test* asserting no required entry is orphaned — a test
+carrying the bug it checks for — and was corrected too.
+
+**Lesson:** entry 1's lesson was "a transform that can produce something
+unusable should report, not return." Its own safety net then shipped with a
+member of the same bug family. Writing the fix does not immunise you against the
+category; the category is a habit of thought, and it recurs.
