@@ -20,10 +20,12 @@ import { ANTHROPIC_RATES } from "./cost";
  *
  * Two things it owns, and they are the two that differ per provider:
  *
- * 1. **Model identity.** Bedrock takes `global.anthropic.claude-haiku-4-5` —
- *    a cross-region inference profile, which is why it resolves in
- *    ap-southeast-1 at all. The first-party API takes the bare
- *    `claude-haiku-4-5`. Same model, two names.
+ * 1. **Model identity.** Bedrock takes
+ *    `global.anthropic.claude-haiku-4-5-20251001-v1:0` — a cross-region
+ *    inference profile, which is why it resolves in ap-southeast-1 at all.
+ *    The first-party API takes the bare `claude-haiku-4-5`. Every Bedrock id
+ *    here was verified live against covara on 2026-08-13; four plausible
+ *    guesses 400'd first, so none of them are inferred.
  * 2. **The rate card, with provenance.** Bedrock is partner-operated and
  *    priced separately, and its current Claude rates could not be verified —
  *    the AWS pricing page surfaced only a retired model, at 2x the
@@ -36,9 +38,9 @@ const MODELS: LogicalModel[] = ["haiku", "sonnet", "opus"];
 
 describe("model identity is per-provider", () => {
   it.each([
-    ["haiku", "global.anthropic.claude-haiku-4-5"],
-    ["sonnet", "global.anthropic.claude-sonnet-5"],
-    ["opus", "global.anthropic.claude-opus-5"],
+    ["haiku", "global.anthropic.claude-haiku-4-5-20251001-v1:0"],
+    ["sonnet", "global.anthropic.claude-sonnet-4-6"],
+    ["opus", "global.anthropic.claude-opus-4-6-v1"],
   ] as const)("bedrock maps %s to its inference profile", (model, id) => {
     expect(bedrockProvider.modelId(model)).toBe(id);
   });
@@ -52,11 +54,21 @@ describe("model identity is per-provider", () => {
   });
 
   /**
+   * covara serves Sonnet and Opus only at 4.6 — `claude-sonnet-5` and
+   * `claude-opus-5` both return 400 "invalid model identifier". Pinned so the
+   * gap is visible in a test rather than discovered on Loom day, and so
+   * "upgrading" the mapping to 5 fails here instead of at runtime.
+   */
+  it("pins sonnet and opus at 4.6, the newest covara actually serves", () => {
+    expect(bedrockProvider.modelId("sonnet")).toContain("sonnet-4-6");
+    expect(bedrockProvider.modelId("opus")).toContain("opus-4-6");
+  });
+
+  /**
    * The `global.` prefix is not decoration — it selects a cross-region
    * inference profile, and it is why these models resolve from
    * ap-southeast-1, where the regional Bedrock catalogue does not list them.
-   * Dropping it is a plausible "tidy-up" that would break the account this
-   * project actually runs on.
+   * `anthropic.`, `apac.anthropic.` and the bare id were all tried and 400'd.
    */
   it("keeps the global. prefix on every bedrock id", () => {
     for (const m of MODELS) {

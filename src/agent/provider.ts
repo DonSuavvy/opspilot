@@ -11,8 +11,9 @@
  *
  * Exactly two things differ per provider, and this module owns both.
  *
- * **Model identity.** Bedrock wants `global.anthropic.claude-haiku-4-5`; the
- * first-party API wants `claude-haiku-4-5`. Same model, two names. Everything
+ * **Model identity.** Bedrock wants
+ * `global.anthropic.claude-haiku-4-5-20251001-v1:0`; the first-party API wants
+ * `claude-haiku-4-5`. Same model, two names. Everything
  * else in the codebase refers to models by the logical name — `haiku` — so a
  * provider swap never reaches the call sites.
  *
@@ -20,7 +21,7 @@
  * current Claude rates are *unverified* (see BEDROCK_RATES), so costs computed
  * from them are flagged as estimates instead of being reported as measured.
  */
-import { AnthropicBedrockMantle } from "@anthropic-ai/bedrock-sdk";
+import { AnthropicBedrock } from "@anthropic-ai/bedrock-sdk";
 import Anthropic from "@anthropic-ai/sdk";
 
 import {
@@ -102,17 +103,31 @@ function requireMapping<T>(
 }
 
 /**
- * The `global.` prefix selects a **cross-region inference profile**. It is why
- * these models resolve from `ap-southeast-1`, where the regional Bedrock
- * catalogue does not list them — verified live against covara on 2026-07-20
- * (Haiku 4.5 and Sonnet 4.6, sequential and 5-way concurrent, no throttle).
- * Removing the prefix looks like tidying and breaks the only account this
- * project can currently run against.
+ * Bedrock model ids, every one **verified live against covara on 2026-08-13**
+ * rather than derived from a naming convention. Four separate guesses failed
+ * first, which is why these are pinned by test:
+ *
+ * - The `global.` prefix selects a cross-region inference profile. It is why
+ *   these resolve from `ap-southeast-1` at all, where the regional catalogue
+ *   does not list them. `anthropic.`, `apac.anthropic.` and the bare id all
+ *   return 400 "The provided model identifier is invalid".
+ * - The suffixes are not decoration and are not uniform. Haiku needs a date
+ *   *and* a version (`-20251001-v1:0`), Opus needs a bare `-v1`, and Sonnet
+ *   needs neither. There is no rule here to infer — these are the strings the
+ *   account accepts.
+ *
+ * **Generation gap, and it is load-bearing for PLAN.md.** covara serves Haiku
+ * 4.5, but Sonnet and Opus only at **4.6** — `claude-sonnet-5` and
+ * `claude-opus-5` both 400 as invalid identifiers. The public demo runs Haiku,
+ * so the demo arc is unaffected; but PLAN.md's "quality mode / Loom" and the
+ * Day-10 bake-off name Sonnet 5 and Opus 5, and on this account they would be
+ * 4.6. Pricing happens to be unchanged across that gap ($3/$15 and $5/$25), so
+ * only the model strategy needs correcting, not the rate cards.
  */
 const BEDROCK_ID: Readonly<Record<LogicalModel, string>> = {
-  haiku: "global.anthropic.claude-haiku-4-5",
-  sonnet: "global.anthropic.claude-sonnet-5",
-  opus: "global.anthropic.claude-opus-5",
+  haiku: "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+  sonnet: "global.anthropic.claude-sonnet-4-6",
+  opus: "global.anthropic.claude-opus-4-6-v1",
 };
 
 export const bedrockProvider: Provider = {
@@ -181,23 +196,46 @@ export function providerFromEnv(
  * testable while client construction — which reads credentials and opens
  * connections — is an explicit, separate act.
  *
- * The Mantle client is the Messages-API Bedrock endpoint, not the legacy
- * `InvokeModel` path, so the request shape matches the first-party SDK and the
- * agent loop is written once. Note `awsSecretAccessKey`: the legacy
- * `AnthropicBedrock` class spells the same field `awsSecretKey`, and mixing
- * them throws "must be provided together", which reads like a *missing*
- * variable rather than a misspelled one.
+ * **`AnthropicBedrock`, not `AnthropicBedrockMantle`.** Mantle is the newer
+ * Messages-API Bedrock endpoint and is the documented default for new code,
+ * but it is not available to this account: every model id tried against it
+ * returned 404 `not_found_error`, including ones the legacy endpoint accepts.
+ * The legacy `InvokeModel` path works, and it is also what Causa already runs
+ * against the same account. Verified 2026-08-13; worth re-testing if AWS
+ * enables Mantle here, since it would let the loop drop a code path.
+ *
+ * Note `awsSecretKey`. The Mantle client spells the same field
+ * `awsSecretAccessKey`, and mixing them throws "must be provided together" —
+ * which reads like a *missing* variable rather than a misspelled one, and cost
+ * a debugging cycle on the way here.
  */
 export function createClient(
   provider: Provider,
   env: Record<string, string | undefined>,
-): Anthropic | AnthropicBedrockMantle {
+): Anthropic | AnthropicBedrock {
   if (provider.id === "bedrock") {
-    return new AnthropicBedrockMantle({
-      awsAccessKey: env.AWS_ANTHROPIC_ACCESS_KEY_ID,
-      awsSecretAccessKey: env.AWS_ANTHROPIC_SECRET_ACCESS_KEY,
+    // Re-checked here rather than assumed from `providerFromEnv`. The SDK
+    // overloads accept either both keys or neither, so `string | undefined`
+    // does not typecheck — and the narrowing that satisfies the compiler is
+    // the same guarantee the runtime wants, which is a good sign it belongs.
+    const accessKey = env.AWS_ANTHROPIC_ACCESS_KEY_ID;
+    const secretKey = env.AWS_ANTHROPIC_SECRET_ACCESS_KEY;
+    if (!accessKey || !secretKey) {
+      throw new Error(
+        "provider: bedrock client needs both AWS_ANTHROPIC_ACCESS_KEY_ID and " +
+          "AWS_ANTHROPIC_SECRET_ACCESS_KEY",
+      );
+    }
+    return new AnthropicBedrock({
+      awsAccessKey: accessKey,
+      awsSecretKey: secretKey,
       awsRegion: env.AWS_ANTHROPIC_REGION,
     });
   }
-  return new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+
+  const apiKey = env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    throw new Error("provider: anthropic client needs ANTHROPIC_API_KEY");
+  }
+  return new Anthropic({ apiKey });
 }
