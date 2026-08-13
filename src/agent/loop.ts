@@ -155,6 +155,19 @@ export interface AgentLoopInput {
   maxIterations?: number;
   maxTokens?: number;
   cacheTtl?: CacheTtl;
+  /**
+   * Whether to ask the provider for constrained decoding.
+   *
+   * Defaults to **off**, from measurement rather than preference: Bedrock
+   * rejects the nine-tool set with `400 Compiled grammar size (329.9MB)
+   * exceeds maximum allowed size (300MB)`, and that is the only provider this
+   * project actually runs on. `scripts/probe-grammar.ts` has the breakdown.
+   *
+   * Nothing is weakened by leaving it off. The wire schema constrains the
+   * model; Zod constrains reality. Every tool call is parsed with the tool's
+   * own schema below, before its handler sees it.
+   */
+  strictTools?: boolean;
   /** Injected like `now` everywhere else here — never `Date.now()`. */
   clock: () => Date;
   emit: (span: SpanEvent) => void | Promise<void>;
@@ -261,7 +274,9 @@ export async function runAgentLoop(
 
   const maxIterations = input.maxIterations ?? DEFAULT_MAX_ITERATIONS;
   const maxTokens = input.maxTokens ?? DEFAULT_MAX_TOKENS;
-  const tools = registry.toAnthropicTools();
+  const tools = registry.toAnthropicTools({
+    strict: input.strictTools ?? false,
+  });
   const rateVerified = rates.verifiedOn !== null;
 
   const messages: MessageParam[] = [...input.messages];
