@@ -64,12 +64,26 @@ export type RefundViolation =
   | "exceeds_max_refund"
   | "exceeds_auto_approve_threshold";
 
-export type EscalationReason =
-  | "suspected_injection"
-  | "unknown_customer"
-  | "unknown_customer_value"
-  | "churn_risk"
-  | "refund_denied_by_policy";
+/**
+ * Every reason `evaluateEscalation` can return.
+ *
+ * A runtime array rather than a bare union because the `escalate` tool's enum
+ * has to be able to express all of them, and a type alone cannot be checked —
+ * which is exactly how the two drifted apart. `unknown_customer` and
+ * `unknown_customer_value` were reachable here while the tool offered neither,
+ * so the agent could not report a conclusion the engine had already reached.
+ * `src/agent/tools.ts` now builds its enum from this list, and a test asserts
+ * the superset relation so the next reason added cannot silently diverge.
+ */
+export const ESCALATION_REASONS = [
+  "suspected_injection",
+  "unknown_customer",
+  "unknown_customer_value",
+  "churn_risk",
+  "refund_denied_by_policy",
+] as const;
+
+export type EscalationReason = (typeof ESCALATION_REASONS)[number];
 
 /**
  * The machine-readable policy. Persisted as `sop_versions.policy_config`
