@@ -103,7 +103,11 @@ export interface AnthropicToolSpec {
   name: string;
   description: string;
   input_schema: StrictJsonSchema;
-  strict: true;
+  /**
+   * Present only when the caller asked for constrained decoding. See
+   * `ToolRegistry.toAnthropicTools` for why that is a provider decision.
+   */
+  strict?: true;
 }
 
 export interface ToolContext {
@@ -308,8 +312,24 @@ export function toStrictJsonSchema(schema: AnyZodObject): StrictJsonSchema {
 export interface ToolRegistry {
   list(): ToolDefinition[];
   get(name: string): ToolDefinition | undefined;
-  /** Deterministically ordered — the tools block is the head of the cache prefix. */
-  toAnthropicTools(): AnthropicToolSpec[];
+  /**
+   * Deterministically ordered — the tools block is the head of the cache prefix.
+   *
+   * **`strict` is the caller's decision, because it is a provider capability.**
+   * The nine-tool set is rejected by Bedrock with `400 Compiled grammar size
+   * (329.9MB) exceeds maximum allowed size (300MB)` — from 3.2KB of schema.
+   * Probed against the live account (`scripts/probe-grammar.ts`): every tool
+   * alone compiles, any eight compile, nine do not, and all nine compile with
+   * `strict` removed. The cost is in the grammar and it accumulates across the
+   * set, so no single schema can be simplified to fix it.
+   *
+   * What the registry still guarantees is unchanged: the emitted schema is
+   * strict-*legal* either way — closed objects, explicit `required`, no
+   * unsupported keywords. Opting out changes only what the model is told.
+   * `runAgentLoop` parses every call with the tool's own Zod schema before the
+   * handler sees it, which is where the real guarantee always lived.
+   */
+  toAnthropicTools(options?: { strict?: boolean }): AnthropicToolSpec[];
   requiresApproval(name: string): boolean;
   terminalToolName: string;
 }
@@ -400,17 +420,24 @@ export function buildRegistry(definitions: ToolDefinition[]): ToolRegistry {
   const sorted = [...definitions].sort((a, b) => a.name.localeCompare(b.name));
   const terminal = definitions.find((d) => d.terminal === true)!;
 
-  const specs: AnthropicToolSpec[] = sorted.map((d) => ({
+  // Compiled once: the schemas are identical either way, so only the presence
+  // of `strict` differs and there is no reason to re-walk the Zod trees.
+  const schemas = sorted.map((d) => ({
     name: d.name,
     description: d.description,
     input_schema: toStrictJsonSchema(d.input),
+  }));
+
+  const strictSpecs: AnthropicToolSpec[] = schemas.map((s) => ({
+    ...s,
     strict: true,
   }));
 
   return {
     list: () => [...definitions],
     get: (name) => byName.get(name),
-    toAnthropicTools: () => specs,
+    toAnthropicTools: (options) =>
+      options?.strict === false ? schemas : strictSpecs,
     requiresApproval: (name) => {
       // Optional chaining made this fail *open*: `undefined === "confirm_write"`
       // is false, so a name the registry never heard of was reported as needing

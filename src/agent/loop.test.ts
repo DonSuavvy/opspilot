@@ -685,3 +685,42 @@ describe("runAgentLoop — trace and cost", () => {
     expect(spans[0]!.startedAt.getTime()).toBe(1_000_007);
   });
 });
+
+
+/* -------------------------------------------------------------------------- */
+/* Strict decoding                                                            */
+/* -------------------------------------------------------------------------- */
+
+describe("runAgentLoop — strict decoding", () => {
+  /**
+   * Measured, not assumed: the nine-tool registry is rejected by Bedrock with
+   * `400 Compiled grammar size (329.9MB) exceeds maximum allowed size (300MB)`.
+   * The loop therefore has to be able to send the tool block without asking for
+   * constrained decoding, and it defaults that way because the only provider
+   * this project actually runs on cannot do it.
+   *
+   * This costs nothing that matters. The test directly below shows why: the
+   * loop still parses every tool call with the tool own Zod schema, so the
+   * wire schema constrains the model and Zod constrains reality — exactly as
+   * it did when strict was on.
+   */
+  it("does not ask for strict decoding by default", async () => {
+    const { input, client } = loopInput([resolveTurn()]);
+
+    await runAgentLoop(input);
+
+    for (const spec of client.calls[0]!.tools as { strict?: unknown }[]) {
+      expect(spec).not.toHaveProperty("strict");
+    }
+  });
+
+  it("asks for it when the caller says the provider can take it", async () => {
+    const { input, client } = loopInput([resolveTurn()], { strictTools: true });
+
+    await runAgentLoop(input);
+
+    for (const spec of client.calls[0]!.tools as { strict?: unknown }[]) {
+      expect(spec).toHaveProperty("strict", true);
+    }
+  });
+});
