@@ -517,22 +517,35 @@ describe("evaluateEscalation", () => {
     expect(decision.reasons).not.toContain("refund_denied_by_policy");
   });
 
-  it("honours escalateOnSuspectedInjection: false", () => {
-    const decision = evaluateEscalation({
-      suspectedInjection: true,
-      customerFound: true,
-      customerLifetimeValueCents: 100,
-      refundOutcome: null,
-      policy: {
-        ...DEFAULT_POLICY,
-        escalation: {
-          ...DEFAULT_POLICY.escalation,
-          escalateOnSuspectedInjection: false,
+  /**
+   * Deliberately inverted in Round 4. This test used to assert the opposite —
+   * that `escalateOnSuspectedInjection: false` was honoured — which is exactly
+   * the capability being removed, so the old assertion had to go rather than
+   * be worked around.
+   *
+   * Every other control in this block is a business preference an operator may
+   * legitimately tune. The injection guard is not: it is the only one whose
+   * "off" position is a security downgrade, and it backs demo arc step 4, the
+   * claim that a prompt-injection ticket fires zero tools and escalates. A
+   * toggle that can falsify that claim from a text field is not a policy
+   * setting, it is a bug with a UI.
+   */
+  it("does not honour escalateOnSuspectedInjection: false — the guard is not settable", () => {
+    expect(() =>
+      evaluateEscalation({
+        suspectedInjection: true,
+        customerFound: true,
+        customerLifetimeValueCents: 100,
+        refundOutcome: null,
+        policy: {
+          ...DEFAULT_POLICY,
+          escalation: {
+            ...DEFAULT_POLICY.escalation,
+            escalateOnSuspectedInjection: false,
+          },
         },
-      },
-    });
-
-    expect(decision.reasons).not.toContain("suspected_injection");
+      }),
+    ).toThrow();
   });
 
   it("treats the churn LTV threshold as inclusive", () => {
@@ -1086,5 +1099,196 @@ describe("evaluateRefund — the evaluation input is data, not a type", () => {
     // The balance rules read amountCents, so they must not fire on garbage.
     expect(decision.violations).not.toContain("amount_exceeds_invoice_balance");
     expect(decision.violations).not.toContain("invoice_already_refunded");
+  });
+});
+
+/**
+ * Round 4, finding 1. The schema bounded the two refund limits only *relative
+ * to each other* — `maxAutoApproveCents <= maxRefundCents` — and bounded
+ * neither absolutely. That pair is satisfiable at any magnitude, so a policy
+ * setting both to 99_999_999 passed every check the engine had and
+ * `evaluateRefund` approved $999,999.99 with `violations: []`.
+ *
+ * The relative bound is a *consistency* check: it says the two numbers make
+ * sense together, not that either is sane. Round 2 hardened this schema against
+ * malformed input — missing keys, typos, extra keys, NaN — and every one of
+ * those tests still passes against a policy that authorises a million-dollar
+ * refund, because the blob is perfectly well-formed. Well-formed and safe are
+ * different properties, and only the first had a test.
+ *
+ * The ceilings are derived from the seeded data, not chosen for roundness:
+ *
+ * - The largest invoice Beacon Analytics issues is one Scale month, **$299**
+ *   (`select max(amount_cents) from invoices` = 29900 across all 54 rows), so a
+ *   $5,000 hard ceiling is ~17x the largest refund that can ever be legitimate.
+ *   It constrains no real case while making the runaway one unrepresentable.
+ * - $5,000 is also strictly below the **$10,000** the adversarial ticket
+ *   demands. That is the point: demo arc step 4 must not be defeatable by
+ *   editing the SOP, so no policy an operator can save may name that amount.
+ * - The auto-approve ceiling, $1,000, bounds what the agent may spend with no
+ *   human in the loop at all — the number that matters most if the model is
+ *   wrong, since nothing else is watching.
+ * - A refund window longer than a year is not a window.
+ *
+ * The bounds are asserted as literals rather than imported from the module.
+ * A test that reads the implementation's own constant passes for any value of
+ * it, including one an edit quietly widened; stating the number here means
+ * changing a safety ceiling has to break a test and be done on purpose.
+ */
+describe("policyConfigSchema bounds the limits absolutely, not just against each other", () => {
+  function refundPolicy(patch: Record<string, unknown>): unknown {
+    return {
+      refund: { ...DEFAULT_POLICY.refund, ...patch },
+      escalation: DEFAULT_POLICY.escalation,
+    };
+  }
+
+  it.each([
+    ["hard ceiling above $5,000", { maxRefundCents: 500_001 }],
+    [
+      "auto-approve threshold above $1,000",
+      { maxAutoApproveCents: 100_001, maxRefundCents: 500_000 },
+    ],
+    ["refund window longer than a year", { windowDays: 366 }],
+  ])("rejects a %s", (_label, patch) => {
+    expect(() => parsePolicyConfig(refundPolicy(patch))).toThrow();
+  });
+
+  it.each([
+    ["hard ceiling exactly at $5,000", { maxRefundCents: 500_000 }],
+    [
+      "auto-approve threshold exactly at $1,000",
+      { maxAutoApproveCents: 100_000, maxRefundCents: 500_000 },
+    ],
+    ["refund window of exactly a year", { windowDays: 365 }],
+  ])("accepts a %s — the bounds are inclusive", (_label, patch) => {
+    expect(() => parsePolicyConfig(refundPolicy(patch))).not.toThrow();
+  });
+
+  /** The reviewer's reproduction, end to end. */
+  it("has no saveable policy that approves a $999,999.99 refund", () => {
+    expect(() =>
+      evaluateRefund(
+        input({
+          requestedCents: 99_999_999,
+          invoice: { amountCents: 99_999_999 },
+          policy: {
+            refund: {
+              windowDays: 30,
+              maxAutoApproveCents: 99_999_999,
+              maxRefundCents: 99_999_999,
+              duplicateChargeBypassesWindow: true,
+            },
+          },
+        }),
+      ),
+    ).toThrow();
+  });
+
+  /**
+   * The complement, and the one that would survive someone deciding the throw
+   * above is too strict: even under the most permissive policy the schema still
+   * accepts, the runaway amount is denied on the merits rather than by parse.
+   */
+  it("denies a $999,999.99 refund under the most permissive legal policy", () => {
+    const decision = evaluateRefund(
+      input({
+        requestedCents: 99_999_999,
+        invoice: { amountCents: 99_999_999 },
+        policy: {
+          refund: {
+            windowDays: 365,
+            maxAutoApproveCents: 100_000,
+            maxRefundCents: 500_000,
+            duplicateChargeBypassesWindow: true,
+          },
+        },
+      }),
+    );
+
+    expect(decision.outcome).toBe("deny");
+    expect(decision.approvedCents).toBe(0);
+    expect(decision.violations).toContain("exceeds_max_refund");
+  });
+});
+
+/**
+ * Round 4, finding 1, second half. `escalateOnSuspectedInjection` sat in the
+ * policy blob as an ordinary `z.boolean()`, which made "escalate on prompt
+ * injection" a preference the Day-4 SOP editor could switch off in a text
+ * field — no code change, no review, no test failure.
+ *
+ * Combined with the other two escalation toggles it produced the reviewer's
+ * second reproduction: a ticket with injection flagged, an unknown customer,
+ * and a refund denied by policy returned `{escalate: false, reasons: []}`.
+ * Three independent reasons to involve a human, and the engine reported none.
+ *
+ * `z.literal(true)` rather than deleting the key: the field is already
+ * persisted in `sop_versions.policy_config` for every existing version, and
+ * `.strict()` rejects unrecognised keys — so removing it would make every
+ * stored policy unparseable and take the engine down on read. Pinning the value
+ * keeps old rows readable, keeps the guarantee visible where an operator edits
+ * the policy, and turns an attempt to disable it into a loud parse failure
+ * instead of a quiet one.
+ */
+describe("the injection guard is not an operator setting", () => {
+  it("rejects a policy that disables escalation on suspected injection", () => {
+    expect(() =>
+      parsePolicyConfig({
+        refund: DEFAULT_POLICY.refund,
+        escalation: {
+          ...DEFAULT_POLICY.escalation,
+          escalateOnSuspectedInjection: false,
+        },
+      }),
+    ).toThrow();
+  });
+
+  /** The reviewer's second reproduction, verbatim. */
+  it("has no saveable policy that silences a flagged injection", () => {
+    expect(() =>
+      evaluateEscalation({
+        suspectedInjection: true,
+        customerFound: false,
+        customerLifetimeValueCents: 0,
+        refundOutcome: "deny",
+        policy: {
+          refund: DEFAULT_POLICY.refund,
+          escalation: {
+            churnRiskLtvCents: 250_000,
+            escalateOnSuspectedInjection: false,
+            escalateOnUnknownCustomer: false,
+            escalateOnPolicyDenial: false,
+          },
+        },
+      }),
+    ).toThrow();
+  });
+
+  /**
+   * The other two toggles stay settable on purpose — this is a bound on the
+   * injection guard specifically, not a blanket freeze of the escalation block.
+   * Without this, pinning all three would pass the tests above and quietly
+   * remove two legitimate controls.
+   */
+  it("still lets an operator disable the other escalation controls", () => {
+    const decision = evaluateEscalation({
+      suspectedInjection: false,
+      customerFound: false,
+      customerLifetimeValueCents: 0,
+      refundOutcome: "deny",
+      policy: {
+        refund: DEFAULT_POLICY.refund,
+        escalation: {
+          churnRiskLtvCents: 250_000,
+          escalateOnSuspectedInjection: true,
+          escalateOnUnknownCustomer: false,
+          escalateOnPolicyDenial: false,
+        },
+      },
+    });
+
+    expect(decision.escalate).toBe(false);
+    expect(decision.reasons).toEqual([]);
   });
 });
