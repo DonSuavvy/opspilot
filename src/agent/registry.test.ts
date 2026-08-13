@@ -518,4 +518,60 @@ describe("defense in depth", () => {
     expect(registry.requiresApproval("issue_refund")).toBe(true);
     expect(registry.requiresApproval("get_invoices")).toBe(false);
   });
+
+  /**
+   * Round 4. The test above covers `confirm_write` and `read` and nothing
+   * else, so `requiresApproval` could be widened from
+   * `safetyClass === "confirm_write"` to `safetyClass !== "read"` and the whole
+   * suite stayed green. That mutation is not academic: it routes every
+   * `auto_write` tool — `draft_reply`, `escalate`, `resolve_ticket` — into the
+   * approval queue, which stalls every run behind a human on the terminal tool
+   * and quietly converts the demo into a manual process.
+   *
+   * Three classes, two tested. The missing cell is the one in the middle.
+   */
+  it("does not gate auto_write tools — reversible and logged is not confirm", () => {
+    const registry = buildRegistry([
+      tool({ name: "get_invoices" }),
+      tool({ name: "draft_reply", safetyClass: "auto_write", idempotent: true }),
+      tool({ name: "escalate", safetyClass: "auto_write", idempotent: true }),
+      tool({
+        name: "issue_refund",
+        safetyClass: "confirm_write",
+        idempotent: true,
+      }),
+      terminalTool(),
+    ]);
+
+    expect(registry.requiresApproval("draft_reply")).toBe(false);
+    expect(registry.requiresApproval("escalate")).toBe(false);
+    // The terminal tool is auto_write too; gating it deadlocks every run.
+    expect(registry.requiresApproval(registry.terminalToolName)).toBe(false);
+    expect(registry.requiresApproval("issue_refund")).toBe(true);
+  });
+
+  /**
+   * Round 4. `byName.get(name)?.safetyClass === "confirm_write"` is `false` for
+   * a name the registry has never heard of, so an unknown tool was reported as
+   * *not* needing approval — a security control failing open on exactly the
+   * input it cannot vouch for.
+   *
+   * Reachable from Day 2: the agent loop reads tool names out of model output,
+   * and a hallucinated or renamed name lands here. Throwing rather than
+   * returning `true` because an unknown name is a bug in the caller, not a
+   * risky-but-real tool call: the loop must reject it as an unknown tool, and
+   * silently routing it into the approval queue would put a human in front of a
+   * tool that does not exist. Same reasoning as `parsePolicyConfig` — refusing
+   * to answer beats answering about nothing.
+   */
+  it("throws on an unknown tool rather than reporting it needs no approval", () => {
+    const registry = buildRegistry([tool({ name: "get_invoices" }), terminalTool()]);
+
+    expect(() => registry.requiresApproval("definitely_not_a_tool")).toThrow(
+      ToolRegistryError,
+    );
+    expect(() => registry.requiresApproval("definitely_not_a_tool")).toThrow(
+      /definitely_not_a_tool/,
+    );
+  });
 });
