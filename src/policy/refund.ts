@@ -90,7 +90,12 @@ export interface PolicyConfig {
   escalation: {
     /** Lifetime value at or above which a dissatisfied customer is a churn risk. */
     churnRiskLtvCents: number;
-    escalateOnSuspectedInjection: boolean;
+    /**
+     * Always `true`, and typed as the literal so the compiler refuses
+     * `false` at every call site rather than leaving it to runtime parsing.
+     * See `policyConfigSchema` for why the key is pinned rather than removed.
+     */
+    escalateOnSuspectedInjection: true;
     escalateOnUnknownCustomer: boolean;
     escalateOnPolicyDenial: boolean;
   };
@@ -98,6 +103,40 @@ export interface PolicyConfig {
 
 /** Whole cents. Rejects floats, NaN, Infinity, and anything past 2^53. */
 const cents = z.number().int().nonnegative().safe();
+
+/**
+ * Absolute ceilings on what a policy may authorise, independent of what any
+ * other field says.
+ *
+ * The relative bound below (`maxAutoApproveCents <= maxRefundCents`) is a
+ * consistency check — it says the two numbers agree with each other, not that
+ * either is sane. Both are satisfied at any magnitude, so before these
+ * constants existed a policy setting both to 99_999_999 parsed cleanly and the
+ * engine approved $999,999.99 with zero violations. "Never trust the model"
+ * had no number behind it on this axis: the code enforced whatever was typed.
+ *
+ * Derived from the data rather than chosen for roundness. The largest invoice
+ * Beacon Analytics issues is a single Scale month, $299 — `max(amount_cents)`
+ * is 29900 across all 54 seeded rows — so:
+ *
+ * - `MAX_REFUND_CEILING_CENTS` at $5,000 is ~17x the largest refund that can
+ *   ever be legitimate, constraining no real case, and sits strictly below the
+ *   $10,000 the adversarial ticket demands. Demo arc step 4 asserts that an
+ *   injection attempt fires zero tools; that claim must not be defeatable by
+ *   editing a number in the SOP editor.
+ * - `MAX_AUTO_APPROVE_CEILING_CENTS` at $1,000 bounds what the agent may spend
+ *   with no human in the loop — the figure that matters most when the model is
+ *   wrong, because nothing else is watching.
+ * - `MAX_REFUND_WINDOW_DAYS` at a year: a refund window longer than that is
+ *   not a window, and an unbounded one silently deletes the rule that makes
+ *   demo arc step 2 mean anything.
+ *
+ * These are ceilings on what is *configurable*, not operating values. The
+ * shipped defaults sit far below them.
+ */
+export const MAX_REFUND_WINDOW_DAYS = 365;
+export const MAX_AUTO_APPROVE_CEILING_CENTS = 100_000; // $1,000
+export const MAX_REFUND_CEILING_CENTS = 500_000; // $5,000
 
 /**
  * The runtime half of `PolicyConfig`.
@@ -123,9 +162,14 @@ export const policyConfigSchema = z
   .object({
     refund: z
       .object({
-        windowDays: z.number().int().nonnegative().safe(),
-        maxAutoApproveCents: cents,
-        maxRefundCents: cents,
+        windowDays: z
+          .number()
+          .int()
+          .nonnegative()
+          .safe()
+          .max(MAX_REFUND_WINDOW_DAYS),
+        maxAutoApproveCents: cents.max(MAX_AUTO_APPROVE_CEILING_CENTS),
+        maxRefundCents: cents.max(MAX_REFUND_CEILING_CENTS),
         duplicateChargeBypassesWindow: z.boolean(),
       })
       .strict()
@@ -137,7 +181,21 @@ export const policyConfigSchema = z
     escalation: z
       .object({
         churnRiskLtvCents: cents,
-        escalateOnSuspectedInjection: z.boolean(),
+        /**
+         * Pinned, not settable. Every other control here is a business
+         * preference; this one's "off" position is a security downgrade, and
+         * it backs the claim that a prompt-injection ticket escalates with
+         * zero tools fired.
+         *
+         * `z.literal(true)` rather than deleting the key: the field is already
+         * persisted in `sop_versions.policy_config` for every existing version
+         * and the object is `.strict()`, so removing it would make every
+         * stored policy unparseable and take the engine down on read. Pinning
+         * keeps old rows readable, keeps the guarantee visible where the
+         * policy is edited, and turns an attempt to disable it into a loud
+         * parse failure rather than a silent one.
+         */
+        escalateOnSuspectedInjection: z.literal(true),
         escalateOnUnknownCustomer: z.boolean(),
         escalateOnPolicyDenial: z.boolean(),
       })

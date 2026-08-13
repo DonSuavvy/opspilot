@@ -541,7 +541,12 @@ describe("evaluateEscalation", () => {
           ...DEFAULT_POLICY,
           escalation: {
             ...DEFAULT_POLICY.escalation,
-            escalateOnSuspectedInjection: false,
+            // Cast past the pinned literal type on purpose. The compile-time
+            // half of this fix protects call sites in *our* code; the policy
+            // this engine actually reads arrives from a jsonb column, where
+            // TypeScript guarantees nothing. Testing the runtime half requires
+            // handing it the value the compiler would have caught.
+            escalateOnSuspectedInjection: false as never,
           },
         },
       }),
@@ -633,19 +638,23 @@ describe("evaluateRefund — boundaries the engine's own comments promise", () =
     expect(undef).toEqual(nul);
   });
 
-  /** "Money is never a float" — above 2^53 integers stop behaving like integers. */
+  /**
+   * "Money is never a float" — above 2^53 integers stop behaving like integers.
+   *
+   * This used to raise `maxRefundCents`/`maxAutoApproveCents` to
+   * `MAX_SAFE_INTEGER` so that `non_integer_amount` was the only reason for
+   * denial. Round 4's absolute ceilings make that policy unrepresentable, and
+   * the override is no longer needed: the assertion is `toContain`, so it still
+   * pins this specific violation even though the amount now also trips
+   * `exceeds_max_refund`. Deleting the safe-integer guard still fails this test.
+   * Exhaustive violations are a documented property of the engine, so the extra
+   * one is the design working, not noise.
+   */
   it("rejects an amount above the safe-integer range", () => {
     const decision = evaluateRefund(
       input({
         requestedCents: 1e21,
         invoice: { amountCents: Number.MAX_SAFE_INTEGER },
-        policy: {
-          refund: {
-            ...DEFAULT_POLICY.refund,
-            maxRefundCents: Number.MAX_SAFE_INTEGER,
-            maxAutoApproveCents: Number.MAX_SAFE_INTEGER,
-          },
-        },
       }),
     );
 
@@ -1256,7 +1265,9 @@ describe("the injection guard is not an operator setting", () => {
           refund: DEFAULT_POLICY.refund,
           escalation: {
             churnRiskLtvCents: 250_000,
-            escalateOnSuspectedInjection: false,
+            // See the cast note above: jsonb is not typed, so the runtime
+            // rejection is the one that actually holds and must be tested.
+            escalateOnSuspectedInjection: false as never,
             escalateOnUnknownCustomer: false,
             escalateOnPolicyDenial: false,
           },
