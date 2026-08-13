@@ -24,6 +24,7 @@
     "verify:seed": "tsx scripts/verify-seed.ts"
   },
   "dependencies": {
+    "@anthropic-ai/bedrock-sdk": "^0.32.1",
     "@anthropic-ai/sdk": "^0.116.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
