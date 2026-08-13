@@ -282,6 +282,34 @@ describe("toStrictJsonSchema", () => {
 
     expect(() => toStrictJsonSchema(schema)).toThrow(/phantom/);
   });
+
+  /**
+   * Round 4. The orphan check asked `name in properties`, and `in` walks the
+   * prototype chain — so `"toString" in {}` is `true` and every name
+   * `Object.prototype` supplies is treated as a property that exists. A schema
+   * requiring `toString` with no such property passed the one assertion whose
+   * stated purpose is "catches this whole bug class".
+   *
+   * The same family as FAILURES.md entry 1: a JSON Schema key is an *author
+   * identifier*, and reasoning about it with a JavaScript operator that knows
+   * about inherited members treats attacker- or author-chosen strings as
+   * language builtins. `Object.hasOwn` is the operator that means what this
+   * check meant.
+   *
+   * Reachable rather than theoretical — these are ordinary English words, and
+   * `constructor`, `valueOf` and `toString` are plausible field names in a
+   * billing tool. `__proto__` is the one that would be chosen deliberately.
+   */
+  it.each(["toString", "constructor", "valueOf", "hasOwnProperty", "__proto__"])(
+    "catches an orphaned required named %s, which Object.prototype supplies",
+    (inherited) => {
+      const schema = z
+        .object({ a: z.string() })
+        .meta({ required: ["a", inherited] } as never);
+
+      expect(() => toStrictJsonSchema(schema)).toThrow(ToolRegistryError);
+    },
+  );
 });
 
 describe("buildRegistry — boot-time validation", () => {
