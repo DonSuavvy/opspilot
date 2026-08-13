@@ -168,6 +168,24 @@ Each of these cost real time. Don't rediscover them.
   `UNVERIFIED_RATE_SAFETY_FACTOR`. Fix by reading covara's line items in Cost
   Explorer, then set real rates *and* a `verifiedOn` date — a test fails if you
   set one without the other.
+- **OPEN — the spend guard is per-run, not per-account.** `spentTodayNanos()`
+  sums `agent_runs.cost_usd`, and `finishRun` is that column's only writer, so
+  a run *in flight* contributes zero to the baseline every other run reads.
+  Two concurrent `POST /api/agent/run` calls therefore each see the same
+  starting figure and each may spend up to the full daily cap; ten concurrent
+  calls, ten times the cap. The in-run accrual added on Day 2 fixes the
+  sequential case *inside* one run and does nothing across runs. Confirmed by
+  inspection, not yet by a concurrent test. This is exactly the "stranger
+  clicking the scenario injector" case `budget.ts` was written for, and it
+  becomes reachable on Day 8 when sandboxes go public — fix before then, by
+  charging spend as it accrues or taking a row lock, not by patching the read.
+- **OPEN — constraint stripping is now gratuitous.** `toStrictJsonSchema`
+  strips `minimum`/`maxLength`/`pattern`/`format` *because `strict: true`
+  rejects them*. With strict off by default (see above), that reason is gone,
+  and the model is now told `amount_cents` is a bare `number` when Zod demands
+  a positive integer. Every strip is a correction the model has to be walked
+  through via an `is_error` round-trip, for no remaining benefit. Make the
+  stripping conditional on the same flag — test-first.
 - **The seed's invoice ages are load-bearing.** `INV-2002` is paid 22 days ago
   precisely so it is inside a 30-day window and outside a 14-day one. If that
   stops being true, demo arc step 2 silently demonstrates nothing.
