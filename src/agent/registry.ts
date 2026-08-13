@@ -393,8 +393,26 @@ export function buildRegistry(definitions: ToolDefinition[]): ToolRegistry {
     list: () => [...definitions],
     get: (name) => byName.get(name),
     toAnthropicTools: () => specs,
-    requiresApproval: (name) =>
-      byName.get(name)?.safetyClass === "confirm_write",
+    requiresApproval: (name) => {
+      // Optional chaining made this fail *open*: `undefined === "confirm_write"`
+      // is false, so a name the registry never heard of was reported as needing
+      // no approval — the one input it cannot vouch for getting the safest-
+      // sounding answer. From Day 2 these names come out of model output.
+      //
+      // Throws rather than returning true because an unknown name is a caller
+      // bug, not a risky-but-real tool call: the loop has to reject it as an
+      // unknown tool, and routing it to the approval queue would put a human in
+      // front of a tool that does not exist.
+      const definition = byName.get(name);
+      if (!definition) {
+        throw new ToolRegistryError([
+          `requiresApproval("${name}"): no such tool is registered — an ` +
+            `unknown tool cannot be assessed for approval, so it is refused ` +
+            `rather than reported as safe`,
+        ]);
+      }
+      return definition.safetyClass === "confirm_write";
+    },
     terminalToolName: terminal.name,
   };
 }
