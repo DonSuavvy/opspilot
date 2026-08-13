@@ -737,7 +737,10 @@ CHECK (c >= 0 AND c <= 1000000)   -> INSERT 'NaN' rejected
 
 Postgres `numeric` accepts the literal `'NaN'` and orders it **above** every
 other numeric value. The lower bound admits it; the **upper** bound is the half
-that does the work.
+that does the work. (The probe above used `1000000`; the shipped ceiling is
+tighter at `10000`. Any finite bound excludes NaN — $10,000 is already absurd
+beside a ~$0.06 Haiku run, and this is a data-integrity guard, not a budget
+control.)
 
 One NaN turns every `SUM` over the column into NaN — so *cost per resolved
 ticket*, the managed-services KPI Mission Control is built around, would display

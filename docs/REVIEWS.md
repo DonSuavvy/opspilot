@@ -62,6 +62,19 @@ The only bound was relative — `maxAutoApproveCents <= maxRefundCents` — whic
 is a consistency check. It says the two numbers agree with each other, not that
 either is sane, and it is satisfied at any magnitude.
 
+Both reproductions were **run against the pre-fix code at `ecb5dc6`**, not taken
+from the finding's description — the figures below are output, not paraphrase:
+
+```
+REFUND      outcome=approve approvedCents=99999999 violations=[]
+ESCALATION  {"escalate":false,"reasons":[]}
+```
+
+That check exists because entry 6 in FAILURES.md is this repository quantifying
+a claim more strongly than its evidence supported. Restating a reviewer's
+numbers as observed output would have repeated it in the round written to catch
+it.
+
 The ceilings are derived from the data rather than chosen. The largest invoice
 Beacon Analytics issues is one Scale month, **$299** (`max(amount_cents)` is
 29900 across all 54 rows), so a $5,000 hard ceiling is ~17× the largest
@@ -123,9 +136,13 @@ stdout | src/db/seed.test.ts
 Seeding Beacon Analytics...
 ```
 
-`npm test` wrote to Postgres, in a suite CLAUDE.md requires to work without a
-database — and would have on any CI machine with `DATABASE_URL` set. The CLI
-now lives in `scripts/seed.ts` and the module is inert on import.
+`npm test` *began writing* to Postgres, in a suite CLAUDE.md requires to work
+without a database — and would have on any CI machine with `DATABASE_URL` set.
+Stated that way deliberately: what was observed is the seed starting and
+`verify:seed` passing afterwards, which does not establish whether the
+delete-and-reinsert committed or the process died partway. The hazard is the
+same either way; the stronger verb would not be evidenced. The CLI now lives in
+`scripts/seed.ts` and the module is inert on import.
 
 Verified by seeding a second workspace against the live database, the case that
 previously died on `customers_pkey`:
@@ -148,9 +165,15 @@ CHECK (c >= 0)                   -> INSERT 'NaN' SUCCEEDS
 CHECK (c >= 0 AND c <= 1000000)  -> INSERT 'NaN' rejected
 ```
 
-The upper bound is the half that does the work. One NaN turns every `SUM` over
-the column into NaN, so *cost per resolved ticket* — the KPI Mission Control is
-built around — would show nothing rather than something wrong.
+The upper bound is the half that does the work. The probe used `1000000`; the
+shipped constraint is tighter at **10000** (`MAX_COST_USD`) for the same reason
+— any finite ceiling excludes NaN, and $10,000 is already absurd beside a ~$0.06
+Haiku run. It is a data-integrity guard, not a budget control; budgets are
+enforced in the application with a banner and a kill switch.
+
+One NaN turns every `SUM` over the column into NaN, so *cost per resolved
+ticket* — the KPI Mission Control is built around — would show nothing rather
+than something wrong.
 
 **The first generated migration was wrong and was thrown away.** A plain
 `${MAX_COST_USD}` inside drizzle's `sql` template becomes a bind parameter, and
