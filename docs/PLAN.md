@@ -42,7 +42,8 @@ Next.js 16 (App Router, TS strict) ── Vercel
 │   ├── /api/evals/run        → executes a suite
 │   ├── /api/health           → DB + provider checks
 │   └── /api/cron/cleanup     → sandbox TTL sweep (Vercel cron)
-├── Agent core (no framework — raw @anthropic-ai/sdk, hand-rolled loop)
+├── Agent core (no framework — hand-rolled loop over a provider adapter:
+│              Bedrock/covara by default, @anthropic-ai/sdk as fallback)
 ├── Drizzle ORM → Neon Postgres
 └── GitHub Actions: typecheck + tests + eval suite on prompt/SOP changes
 ```

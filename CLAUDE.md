@@ -34,7 +34,7 @@ that arc better gets cut first:
 | DB | Postgres via Drizzle ORM — local Docker for dev, Neon for deploy |
 | Validation | Zod 4 (native `z.toJSONSchema()`) |
 | Tests | Vitest, node environment, config in `vitest.config.mts` |
-| Agent | Raw `@anthropic-ai/sdk` with a hand-rolled tool loop |
+| Agent | Hand-rolled tool loop over a provider adapter (`@anthropic-ai/bedrock-sdk` on covara, `@anthropic-ai/sdk` as fallback) |
 
 **No LangChain or agent frameworks.** This is deliberate and load-bearing for
 the interview story: pause/resume across serverless invocations requires

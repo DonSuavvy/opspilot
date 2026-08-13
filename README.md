@@ -284,7 +284,8 @@ earlier reviews, and including the ones found while fixing something else.
 **In the repo today:** Next.js 16 (App Router, TypeScript strict) · Tailwind v4 ·
 shadcn/ui on Radix · Drizzle ORM → Postgres · Zod 4 · Vitest · GitHub Actions
 
-**Arriving with the agent loop and deploy:** raw `@anthropic-ai/sdk` (Day 2) ·
+**Arriving with the agent loop and deploy:** hand-rolled loop over a provider
+adapter — Bedrock by default, `@anthropic-ai/sdk` as fallback (Day 2) ·
 Neon · Vercel (Day 8)
 
 The public demo *will* run `claude-haiku-4-5` (rate-capped, ~pennies per run),
