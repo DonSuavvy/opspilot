@@ -163,7 +163,13 @@ describe("toStrictJsonSchema", () => {
       }),
     );
 
-    const orphaned = schema.required.filter((r) => !(r in schema.properties));
+    // `Object.hasOwn` rather than `in` for the same reason the implementation
+    // uses it — a test that asks `in` would call an orphaned `toString`
+    // satisfied. No current field name triggers it; the point is that this
+    // assertion should not carry the bug it is checking for.
+    const orphaned = schema.required.filter(
+      (r) => !Object.hasOwn(schema.properties, r),
+    );
     expect(orphaned).toEqual([]);
   });
 

@@ -43,13 +43,13 @@ not the reply text.
 | | |
 |---|---|
 | **Data model** | 15-table Drizzle schema + migrations — workspaces, customers, subscriptions, invoices, tickets, KB articles, SOPs + SOP versions, agent runs, run spans, approvals, audit log, eval cases/runs/results — plus a lazy client that picks TLS from the parsed host. 20 tests |
-| **Policy engine** | Pure refund + escalation rules, with both the stored policy blob *and* the evaluation input parsed rather than trusted. 93 tests |
+| **Policy engine** | Pure refund + escalation rules, with both the stored policy blob *and* the evaluation input parsed rather than trusted — and the limits bounded absolutely, not just against each other. 104 tests |
 | **Tool registry** | 9 tools with Zod schemas → strict JSON Schema, three-class safety model, boot-time validation. 42 tests, plus 9 pinning the nine tools' wire schemas |
-| **Seed** | Deterministic Beacon Analytics dataset — 30 customers, 54 invoices, 20 KB articles, 8 tickets |
+| **Seed** | Deterministic Beacon Analytics dataset — 30 customers, 54 invoices, 20 KB articles, 8 tickets — with every id scoped to its workspace, so Day 8 can seed a sandbox per visitor. 7 tests |
 | **Infra** | Next.js 16, Tailwind v4, shadcn/ui on Radix, Vitest, GitHub Actions CI, Docker Postgres |
 
-**164 tests passing** — 93 + 42 + 9 + 20, across four files. No test requires a
-database.
+**182 tests passing** — 104 + 42 + 9 + 20 + 7, across five files. No test
+requires a database.
 
 ### Coming (see [`docs/PLAN.md`](docs/PLAN.md))
 

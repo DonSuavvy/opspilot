@@ -232,8 +232,15 @@ function assertConsistent(node: unknown, issues: string[], path: string): void {
 
   if (node.type === "object" && Array.isArray(node.required)) {
     const properties = isPlainObject(node.properties) ? node.properties : {};
+    // `Object.hasOwn`, not `in`. `in` walks the prototype chain, so
+    // `"toString" in {}` is true and every name Object.prototype supplies —
+    // toString, constructor, valueOf, hasOwnProperty, __proto__ — reads as a
+    // property that exists. That let an orphaned `required` through the one
+    // assertion whose job is to catch orphaned `required`. JSON Schema keys are
+    // author identifiers; the operator used to reason about them must not know
+    // anything about inherited members.
     const orphaned = (node.required as string[]).filter(
-      (name) => !(name in properties),
+      (name) => !Object.hasOwn(properties, name),
     );
     if (orphaned.length > 0) {
       issues.push(
