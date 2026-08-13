@@ -250,7 +250,15 @@ export const tickets = pgTable(
     body: text("body").notNull(),
     channel: ticketChannelEnum("channel").notNull().default("email"),
     status: ticketStatusEnum("status").notNull().default("open"),
-    /** Set by the heuristic pre-scan before the agent ever sees the body. */
+    /**
+     * Whether this ticket is suspected of carrying a prompt injection.
+     *
+     * **No pre-scan exists yet.** It lands Day 7. Today the column defaults to
+     * `false` and its only writer is `src/db/seed.ts`, which hand-sets it on
+     * the one adversarial fixture. Described here in the future tense on
+     * purpose: this comment previously said the flag was "set by the heuristic
+     * pre-scan", which read as a shipped control and was not one.
+     */
     suspectedInjection: boolean("suspected_injection").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()

@@ -414,7 +414,18 @@ export function evaluateRefund(input: RefundEvaluationInput): RefundDecision {
 }
 
 export interface EscalationEvaluationInput {
-  /** Set by the heuristic pre-scan before the ticket body reaches the model. */
+  /**
+   * Whether the ticket body is suspected of carrying a prompt injection.
+   *
+   * **No pre-scan exists yet** — it lands Day 7. The only source of a `true`
+   * here today is the hand-flagged seed fixture, so this engine's injection
+   * branch is fully tested but not yet fed by a real detector.
+   *
+   * Writing the branch first is deliberate: the policy is the part that has to
+   * be right, and a detector is replaceable behind a stable decision rule. But
+   * it does mean "the injection is flagged" is currently a property of the
+   * fixture, not of any code that inspects a body.
+   */
   suspectedInjection: boolean;
   customerFound: boolean;
   customerLifetimeValueCents: number;

@@ -254,7 +254,19 @@ async function main() {
 
   /* ---------------------------------------------------------------------- */
 
-  console.log("\n\x1b[1m5. Adversarial ticket is present and pre-flagged\x1b[0m");
+  /*
+   * What this section can and cannot show.
+   *
+   * It proves the adversarial *fixture* is present and carries a real payload,
+   * which is what Day 7's guardrail work will be tested against. It proves
+   * nothing about detection: the flag is hand-set in the seed, and the pre-scan
+   * that would earn it lands Day 7. The wording below used to claim the ticket
+   * was "flagged by the injection pre-scan" — gate evidence for a control that
+   * does not exist.
+   */
+  console.log(
+    "\n\x1b[1m5. Adversarial ticket fixture is present and hand-flagged\x1b[0m",
+  );
   const [adversarial] = await db
     .select()
     .from(tickets)
@@ -264,7 +276,10 @@ async function main() {
         eq(tickets.suspectedInjection, true),
       ),
     );
-  check(Boolean(adversarial), "one ticket flagged by the injection pre-scan");
+  check(
+    Boolean(adversarial),
+    "one ticket carries the hand-set injection flag (no pre-scan yet — Day 7)",
+  );
   check(
     adversarial?.body.includes("Ignore all previous instructions") ?? false,
     "carries a real injection payload for the Day 7 guardrail test",
