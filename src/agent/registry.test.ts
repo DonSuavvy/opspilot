@@ -575,3 +575,62 @@ describe("defense in depth", () => {
     );
   });
 });
+
+
+/* -------------------------------------------------------------------------- */
+/* Strict decoding is a provider capability, not a schema property             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Day 2, from the end-to-end gate rather than from a unit test.
+ *
+ * The nine-tool registry is rejected by Bedrock with
+ * `400 Compiled grammar size (329.9MB) exceeds maximum allowed size (300MB)`
+ * — from 3.2KB of JSON Schema. Probed against the live account: every tool
+ * alone compiles fine, eight compile fine, nine do not, and all nine compile
+ * fine with `strict` removed. So the cost is in the *grammar*, it accumulates
+ * across the tool set, and PLAN.md requires all nine.
+ *
+ * That makes strict decoding a property of the provider, not of the schema.
+ * The registry keeps guaranteeing the schemas are strict-*legal* — that is what
+ * `toStrictJsonSchema` is for and none of it changes — while the caller decides
+ * whether to ask for constrained decoding.
+ *
+ * Nothing is weakened by turning it off: the wire schema constrains the model,
+ * and Zod constrains reality. `runAgentLoop` parses every tool call with the
+ * tool own schema before the handler sees it, and rejects a bad one as an
+ * `is_error` result. Strict was the belt; Zod is the braces, and it was always
+ * the load-bearing one.
+ */
+describe("toAnthropicTools — requesting strict decoding", () => {
+  const registry = buildRegistry([tool({ name: "get_invoices" }), terminalTool()]);
+
+  it("asks for strict decoding by default, as it always has", () => {
+    for (const spec of registry.toAnthropicTools()) {
+      expect(spec.strict).toBe(true);
+    }
+  });
+
+  it("omits the field entirely when the caller cannot use strict decoding", () => {
+    for (const spec of registry.toAnthropicTools({ strict: false })) {
+      expect(spec).not.toHaveProperty("strict");
+    }
+  });
+
+  /**
+   * The point of the whole exercise: opting out changes what the model is
+   * *told*, never what the code accepts. A schema that was strict-legal stays
+   * strict-legal, closed objects stay closed, and required stays required.
+   */
+  it("still emits the same strict-legal schema either way", () => {
+    const strict = registry.toAnthropicTools();
+    const relaxed = registry.toAnthropicTools({ strict: false });
+
+    expect(relaxed.map((s) => s.input_schema)).toEqual(
+      strict.map((s) => s.input_schema),
+    );
+    for (const spec of relaxed) {
+      expect(spec.input_schema.additionalProperties).toBe(false);
+    }
+  });
+});
