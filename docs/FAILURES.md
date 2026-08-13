@@ -809,3 +809,79 @@ carrying the bug it checks for — and was corrected too.
 unusable should report, not return." Its own safety net then shipped with a
 member of the same bug family. Writing the fix does not immunise you against the
 category; the category is a habit of thought, and it recurs.
+
+## 19. 3.2KB of schema compiled to a 330MB grammar — 2026-08-13
+
+**Caught by:** the Day 2 end-to-end gate, on its first live run. Nothing else
+could have caught it.
+
+The nine-tool registry has been strict-legal since Day 1, and 49 registry tests
+say so: closed objects at every depth, explicit `required`, every keyword
+Anthropic's `strict: true` rejects stripped before the schema goes on the wire.
+All of that is correct and none of it changed. The first real call still failed:
+
+```
+400 Compiled grammar size (329.9MB) exceeds maximum allowed size (300MB).
+Simplify your JSON schema to reduce grammar complexity.
+```
+
+The error's own advice is a dead end. The whole tool block is **3,241 bytes**,
+and the largest single schema is 658. Here is `get_customer` in full:
+
+```json
+{ "type": "object",
+  "properties": { "query": { "type": "string", "description": "…" } },
+  "required": ["query"],
+  "additionalProperties": false }
+```
+
+There is no complexity in that to simplify. So the cost is not in the schema; it
+is in the grammar compiled *from* the schema, and the interesting question is
+what makes it grow.
+
+**Probed rather than reasoned about** (`scripts/probe-grammar.ts`; each
+rejection takes ~68s, because the compiler grinds before giving up):
+
+```
+each tool alone           -> all nine compile
+cumulative 1..8 tools     -> compiles
+cumulative 9 tools        -> FAIL 329.9MB
+all nine, strict removed  -> compiles
+```
+
+Then, to separate "nine tools" from "one bad tool", two different eight-tool
+subsets: dropping `search_kb` **still fails at exactly 329.9MB**, dropping
+`draft_reply` passes. So it accumulates across the set, the free-text tools
+dominate, and no individual schema is at fault. Note the margin — 329.9 against
+300 is 10% over. This was always going to happen at some tool count; nine is
+just where it landed.
+
+**Why dropping a tool is the wrong fix.** It works today and breaks again at the
+tenth, and PLAN.md's nine are all load-bearing — the safety-class demo needs
+both confirm-write tools, and the eval suite keys off `resolve_ticket`.
+
+**The fix is to stop asking for constrained decoding.** `strict` moved from a
+property of the schema to a decision of the caller: `toAnthropicTools()` still
+defaults to requesting it, `toAnthropicTools({ strict: false })` omits it, and
+the emitted schema is byte-identical either way — asserted, because the
+registry's guarantee is that the schema *is* strict-legal, not that anyone asks
+for it. The agent loop defaults to off, since the only provider this project
+runs on cannot do it.
+
+**Nothing was weakened, and that is not a consolation — it is the design.**
+CLAUDE.md's rule has always been "the wire schema constrains the *model*; Zod
+constrains the *code*." `runAgentLoop` parses every tool call with the tool's
+own Zod schema before the handler sees it and returns an `is_error` result on
+failure, which is separately tested. Strict was the belt. Zod is the braces, and
+it was always the load-bearing one — which is why losing strict cost nothing but
+a config flag.
+
+**Lesson:** a boot-time validator can only check the contract it was told about.
+Ours proved the schemas were strict-*legal* and was right; nobody had thought to
+ask whether they were strict-*affordable*, because that property does not exist
+until a real provider compiles them. Two consequences worth keeping. Gates that
+run the real thing find a category of defect that no amount of unit testing
+reaches — this one survived four review rounds and 320 green tests. And when a
+provider's error message tells you to simplify something that is already
+minimal, disbelieve the message and go measure: the advice was aimed at a cause
+that was not ours.

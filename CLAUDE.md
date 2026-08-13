@@ -115,6 +115,19 @@ Each of these cost real time. Don't rediscover them.
   string constraints. `toStrictJsonSchema()` in `src/agent/registry.ts` strips
   them at every depth. The Zod schema keeps enforcing them at parse time, so
   stripping narrows what the *model* is told, never what the *code* accepts.
+- **`strict: true` does not scale to nine tools, and the error blames the wrong
+  thing.** Bedrock rejects the full tool block with `400 Compiled grammar size
+  (329.9MB) exceeds maximum allowed size (300MB). Simplify your JSON schema` —
+  from **3.2KB** of schema whose largest member is 658 bytes. There is nothing
+  to simplify: the cost is in the compiled grammar, and it accumulates across
+  the set. Measured with `npx tsx scripts/probe-grammar.ts`: every tool alone
+  compiles, any eight compile, nine do not, and all nine compile with `strict`
+  removed. Dropping a tool works today and breaks at the tenth. So `strict` is
+  now the caller's choice — `toAnthropicTools({ strict: false })` — and the
+  agent loop defaults it **off**, because the provider this runs on cannot take
+  it. Nothing is weakened: the loop parses every call with the tool's own Zod
+  schema before the handler, which was always the real guard. Re-test if the
+  tool set shrinks or a provider raises the cap. Full write-up: FAILURES 19.
 - **`getDb()` is lazy on purpose.** A module-scope pool would make every module
   that transitively imports the schema throw at *import* time when
   `DATABASE_URL` is unset, taking down vitest, tsc and CI for unrelated reasons.
@@ -200,12 +213,25 @@ IDs and API shapes changed in 2025–26; do not code from memory.
 docs/PLAN.md            authoritative build plan
 src/policy/             pure policy engine (refund limits, escalation)
 src/agent/registry.ts   tool registry: Zod -> strict JSON Schema, boot validation
-src/agent/tools.ts      the 9 tools — schemas live, handlers land Day 2
+src/agent/tools.ts      the 9 tools — 7 handlers live, confirm-write pair Day 5
+src/agent/loop.ts       the hand-rolled tool loop (MessageCreator seam)
+src/agent/data.ts       OpsData — the workspace-bound seam handlers run against
+src/agent/trace.ts      span -> run_spans row, and SSE framing
+src/agent/streaming.ts  the production MessageCreator (stream -> finalMessage)
 src/db/schema.ts        Drizzle schema (15 tables)
 src/db/client.ts        lazy getDb()
+src/db/ops-data.ts      Drizzle OpsData, scoped to one workspace
+src/db/runs.ts          run + span persistence, today's spend
 src/db/seed.ts          deterministic Beacon Analytics seed
+src/app/api/agent/run/  POST a ticket id, stream the trace back as SSE
 scripts/verify-*.ts     gate evidence that needs a database
+scripts/probe-grammar.ts  which tool set blows the strict grammar cap
 ```
+
+**Two seams carry the whole test strategy.** `MessageCreator` stands in for the
+Anthropic client and `OpsData` for the database, so the loop and the handlers
+are unit-tested with neither a key nor Postgres — and the things that genuinely
+need both get their evidence from `scripts/verify-*.ts` and the day's gate.
 
 ## Safety classes
 
