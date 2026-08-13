@@ -138,6 +138,23 @@ Each of these cost real time. Don't rediscover them.
   `stop_reason`, never on `stop_details`**: it can be null *on* a refusal too,
   and `explanation` is not guaranteed. `if (stop_details)` is the wrong test and
   will miss refusals.
+- **Bedrock is a different client *and* different model ids.** Use
+  `AnthropicBedrock`, not `AnthropicBedrockMantle` — Mantle 404s every model on
+  the covara account. The two spell the same field differently
+  (`awsSecretKey` vs `awsSecretAccessKey`) and mixing them throws "must be
+  provided together", which reads like a *missing* variable. Model ids carry
+  non-uniform suffixes that cannot be inferred — haiku needs a date **and** a
+  version, opus a bare `-v1`, sonnet neither — and all need the `global.`
+  prefix, which selects the cross-region inference profile that makes them
+  resolve from `ap-southeast-1` at all. Four plausible guesses 400'd before the
+  right strings came from reading Causa's working config.
+- **Bedrock pricing is unverified and may be ~2x.** AWS prices Claude
+  separately; the only figure retrievable showed a retired model at $6/$30
+  against the first-party $3/$15. `BEDROCK_RATES` carries `verifiedOn: null`,
+  every cost from it is `estimated: true`, and the spend guard charges it at
+  `UNVERIFIED_RATE_SAFETY_FACTOR`. Fix by reading covara's line items in Cost
+  Explorer, then set real rates *and* a `verifiedOn` date — a test fails if you
+  set one without the other.
 - **The seed's invoice ages are load-bearing.** `INV-2002` is paid 22 days ago
   precisely so it is inside a 30-day window and outside a 14-day one. If that
   stops being true, demo arc step 2 silently demonstrates nothing.
@@ -145,12 +162,29 @@ Each of these cost real time. Don't rediscover them.
 
 ## Model strategy
 
-| Context | Model |
-|---|---|
-| Public demo | `claude-haiku-4-5` (rate-capped, ~pennies) |
-| Quality mode / Loom | `claude-sonnet-5` or `claude-opus-5` |
-| CI eval runs | `claude-haiku-4-5` |
-| Bake-off | all three |
+Models are named **logically** (`haiku` / `sonnet` / `opus`) everywhere except
+`src/agent/provider.ts`, which maps them to whatever the active provider calls
+them. Never write a wire model id anywhere else.
+
+| Context | Logical model | On Bedrock (covara) — what you actually get |
+|---|---|---|
+| Public demo | `haiku` | Haiku 4.5 ✅ |
+| Quality mode / Loom | `sonnet` / `opus` | **4.6, not 5** — see below |
+| CI eval runs | `haiku` | Haiku 4.5 ✅ |
+| Bake-off | all three | Haiku 4.5 + Sonnet 4.6 + Opus 4.6 |
+
+**The runtime provider is Bedrock, not the first-party API.** OpsPilot runs on
+the `covara` account (345485442040) via `AWS_ANTHROPIC_*` in `.env.local`;
+`ANTHROPIC_API_KEY` is the fallback path and Bedrock wins if both are set.
+That account is **shared with Causa's live Claude generation for a working law
+firm**, which is why `src/agent/budget.ts` exists and why it landed on Day 2
+rather than Day 7 as PLAN.md scheduled. Do not point the public demo at it
+without revisiting that.
+
+**Sonnet 5 and Opus 5 are not available on covara** — both 400 as invalid model
+identifiers (verified 2026-08-13). The demo arc is unaffected because it runs
+Haiku, but PLAN.md's quality-mode and bake-off entries mean 4.6 on this
+account. Pricing is unchanged across that gap, so the rate cards stand.
 
 API notes baked in: no `temperature` on Opus/Sonnet 5; thinking is default-on
 for Opus 5 (omit `thinking`, use `output_config.effort: "low"` for agent runs);
