@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { ESCALATION_REASONS } from "../policy/refund";
 import { buildRegistry, UNSUPPORTED_KEYWORDS } from "./registry";
 import { NotImplementedError, TOOLS } from "./tools";
 
@@ -144,5 +145,52 @@ describe("production tool set", () => {
         now: new Date(),
       }),
     ).rejects.toBeInstanceOf(NotImplementedError);
+  });
+});
+
+/**
+ * Round 4. The policy engine decides *that* a ticket escalates and *why*; the
+ * `escalate` tool is how the agent says so. If the engine can reach a
+ * conclusion the tool cannot express, the agent is forced to either drop the
+ * real reason or substitute a different one — and escalation reasons are what
+ * Mission Control's escalation-rate breakdown is built from, so a substituted
+ * reason is a wrong number on a dashboard rather than a caught error.
+ *
+ * The divergence was real and had two shapes. `evaluateEscalation` can return
+ * `unknown_customer`, and (since Round 3 added it) `unknown_customer_value`;
+ * the tool enum offered neither. And the engine's `refund_denied_by_policy`
+ * appeared in the enum under the different name `policy_denied` — the same
+ * concept spelled two ways across a module boundary, which is how the next
+ * reader concludes they are different things.
+ *
+ * Asserted as a set difference rather than a pinned list on purpose: a pinned
+ * list has to be remembered, and this one was not. The test names the
+ * *invariant* — the tool's vocabulary is a superset of the engine's — so the
+ * next reason added to the policy fails here until it is expressible.
+ */
+describe("the escalate tool can express every reason the policy engine emits", () => {
+  // Read off the wire spec rather than the Zod definition: what the model is
+  // actually offered is what determines whether a reason is expressible.
+  const escalateReasons = new Set(
+    (
+      registry.toAnthropicTools().find((t) => t.name === "escalate")!
+        .input_schema.properties as { reason: { enum: string[] } }
+    ).reason.enum,
+  );
+
+  it("offers a value for every EscalationReason", () => {
+    const missing = ESCALATION_REASONS.filter((r) => !escalateReasons.has(r));
+    expect(missing).toEqual([]);
+  });
+
+  /**
+   * The converse is deliberately *not* asserted. The tool may legitimately
+   * offer more than the engine emits — `missing_information` and
+   * `out_of_scope` are conclusions the model reaches from the ticket text,
+   * which no policy rule computes. Superset, not equality.
+   */
+  it("also keeps the model-observed reasons the engine cannot compute", () => {
+    expect(escalateReasons).toContain("missing_information");
+    expect(escalateReasons).toContain("out_of_scope");
   });
 });
