@@ -40,7 +40,31 @@ export interface ModelPricing {
   cacheWrite1hNanosPerToken: number;
 }
 
-function pricing(inputPerMTok: number, outputPerMTok: number): ModelPricing {
+/**
+ * A price list plus the answer to "how do you know?".
+ *
+ * Provenance is part of the data because OpsPilot runs on two providers and
+ * only one of them has confirmed rates. Amazon Bedrock is partner-operated and
+ * priced separately; its current Claude rates could not be verified, and the
+ * one figure that could be retrieved showed a retired model at **2x** the
+ * first-party price. A rate card that cannot say where it came from is a rate
+ * card whose output should not be presented as a fact — so `verifiedOn: null`
+ * propagates into `CostBreakdown.estimated` and the number is labelled rather
+ * than asserted. Cost per resolved ticket is the headline KPI; confidently
+ * wrong is worse than openly approximate.
+ */
+export interface RateCard extends ModelPricing {
+  /** ISO date these rates were confirmed, or `null` when unverified. */
+  verifiedOn: string | null;
+  /** Where they came from — a doc, a bill, a skill. Read by humans. */
+  source: string;
+}
+
+export function rateCard(
+  inputPerMTok: number,
+  outputPerMTok: number,
+  provenance: { verifiedOn: string | null; source: string },
+): RateCard {
   const input = inputPerMTok * 1_000;
   return {
     inputNanosPerToken: input,
@@ -48,19 +72,25 @@ function pricing(inputPerMTok: number, outputPerMTok: number): ModelPricing {
     cacheReadNanosPerToken: input / 10,
     cacheWrite5mNanosPerToken: (input * 5) / 4,
     cacheWrite1hNanosPerToken: input * 2,
+    ...provenance,
   };
 }
 
+const ANTHROPIC_PROVENANCE = {
+  verifiedOn: "2026-08-13",
+  source: "claude-api skill, first-party list rates",
+} as const;
+
 /**
- * Derived rather than transcribed: every cache rate is a multiple of the input
- * rate, so writing them out by hand would create four more places for a typo
- * to hide. The multipliers are the part nobody quotes and therefore the part
- * most likely to be wrong.
+ * First-party Anthropic API rates. Derived rather than transcribed: every
+ * cache rate is a multiple of the input rate, so writing them out by hand
+ * would create four more places for a typo to hide. The multipliers are the
+ * part nobody quotes and therefore the part most likely to be wrong.
  */
-export const MODEL_PRICING: Readonly<Record<ModelId, ModelPricing>> = {
-  "claude-haiku-4-5": pricing(1, 5),
-  "claude-sonnet-5": pricing(3, 15),
-  "claude-opus-5": pricing(5, 25),
+export const ANTHROPIC_RATES: Readonly<Record<ModelId, RateCard>> = {
+  "claude-haiku-4-5": rateCard(1, 5, ANTHROPIC_PROVENANCE),
+  "claude-sonnet-5": rateCard(3, 15, ANTHROPIC_PROVENANCE),
+  "claude-opus-5": rateCard(5, 25, ANTHROPIC_PROVENANCE),
 };
 
 /**
@@ -83,6 +113,13 @@ export interface CostBreakdown {
   cacheReadNanos: number;
   cacheWriteNanos: number;
   totalNanos: number;
+  /**
+   * True when the rate card had no `verifiedOn` date. The arithmetic is exact
+   * either way — this says the *prices* are unconfirmed, so the figure is an
+   * estimate. Callers must not present an estimated cost as measured, and the
+   * spend guard charges it at a pessimistic multiple.
+   */
+  estimated: boolean;
 }
 
 /**
@@ -102,16 +139,19 @@ function tokenCount(value: number, field: string): number {
   return value;
 }
 
+/**
+ * Takes the rate card rather than a model name, so the provider owns pricing
+ * and this module owns only arithmetic. That split is what lets Bedrock and
+ * the first-party API be priced differently without a branch in here.
+ */
 export function costOf(
-  model: ModelId,
+  rates: RateCard,
   usage: TokenUsage,
   options: { cacheTtl?: CacheTtl } = {},
 ): CostBreakdown {
-  const rates = MODEL_PRICING[model];
   if (!rates) {
     throw new RangeError(
-      `cost: no pricing for model "${model}" — add it to MODEL_PRICING ` +
-        `before running it, so a run can never be silently free`,
+      "cost: no rate card supplied — a run must never be silently free",
     );
   }
 
@@ -137,6 +177,7 @@ export function costOf(
     cacheReadNanos,
     cacheWriteNanos,
     totalNanos: inputNanos + outputNanos + cacheReadNanos + cacheWriteNanos,
+    estimated: rates.verifiedOn === null,
   };
 }
 

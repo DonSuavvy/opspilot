@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ANTHROPIC_RATES,
   costOf,
-  MODEL_PRICING,
   nanosToMicros,
-  type ModelId,
+  type RateCard,
   type TokenUsage,
 } from "./cost";
 
@@ -32,9 +32,9 @@ import {
  * Rates verified against the `claude-api` skill on 2026-08-13:
  * Haiku 4.5 $1/$5 · Sonnet 5 $3/$15 · Opus 5 $5/$25 per MTok.
  */
-describe("MODEL_PRICING", () => {
+describe("ANTHROPIC_RATES", () => {
   it("prices the three models the project actually runs", () => {
-    expect(Object.keys(MODEL_PRICING).sort()).toEqual([
+    expect(Object.keys(ANTHROPIC_RATES).sort()).toEqual([
       "claude-haiku-4-5",
       "claude-opus-5",
       "claude-sonnet-5",
@@ -48,8 +48,8 @@ describe("MODEL_PRICING", () => {
   ] as const)(
     "%s costs the published per-MTok rate, in nanos per token",
     (model, inputNanos, outputNanos) => {
-      expect(MODEL_PRICING[model].inputNanosPerToken).toBe(inputNanos);
-      expect(MODEL_PRICING[model].outputNanosPerToken).toBe(outputNanos);
+      expect(ANTHROPIC_RATES[model].inputNanosPerToken).toBe(inputNanos);
+      expect(ANTHROPIC_RATES[model].outputNanosPerToken).toBe(outputNanos);
     },
   );
 
@@ -62,16 +62,55 @@ describe("MODEL_PRICING", () => {
   it.each(["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"] as const)(
     "%s derives cache rates from its input rate exactly",
     (model) => {
-      const p = MODEL_PRICING[model];
+      const p = ANTHROPIC_RATES[model];
       expect(p.cacheReadNanosPerToken).toBe(p.inputNanosPerToken / 10);
       expect(p.cacheWrite5mNanosPerToken).toBe(
         (p.inputNanosPerToken * 5) / 4,
       );
       expect(p.cacheWrite1hNanosPerToken).toBe(p.inputNanosPerToken * 2);
-      // Every rate lands on the integer grid — no float anywhere.
-      for (const v of Object.values(p)) expect(Number.isInteger(v)).toBe(true);
+      // Every rate lands on the integer grid — no float anywhere. Only the
+      // numeric fields; a rate card also carries its provenance as strings.
+      for (const [k, v] of Object.entries(p)) {
+        if (typeof v === "number") {
+          expect(Number.isInteger(v), `${k} must be an integer`).toBe(true);
+        }
+      }
     },
   );
+
+  /**
+   * Provenance is data, not a comment. `verifiedOn` is what makes a cost an
+   * assertion rather than an estimate — the first-party card has a date
+   * because these rates were read off the claude-api skill today.
+   */
+  it.each(["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"] as const)(
+    "%s records when and where its rates were verified",
+    (model) => {
+      expect(ANTHROPIC_RATES[model].verifiedOn).toBe("2026-08-13");
+      expect(ANTHROPIC_RATES[model].source).toMatch(/claude-api skill/i);
+    },
+  );
+
+  it("prices a first-party run as measured, not estimated", () => {
+    expect(
+      costOf(ANTHROPIC_RATES["claude-haiku-4-5"], usage({ inputTokens: 1 }))
+        .estimated,
+    ).toBe(false);
+  });
+
+  /**
+   * The complement, and the reason `estimated` exists: a card with no
+   * `verifiedOn` — Bedrock's, today — taints every figure derived from it.
+   */
+  it("flags a run priced with an unverified card as an estimate", () => {
+    const unverified: RateCard = {
+      ...ANTHROPIC_RATES["claude-haiku-4-5"],
+      verifiedOn: null,
+      source: "UNVERIFIED placeholder",
+    };
+
+    expect(costOf(unverified, usage({ inputTokens: 1 })).estimated).toBe(true);
+  });
 });
 
 function usage(over: Partial<TokenUsage> = {}): TokenUsage {
@@ -86,7 +125,7 @@ function usage(over: Partial<TokenUsage> = {}): TokenUsage {
 
 describe("costOf", () => {
   it("charges nothing for a run that used nothing", () => {
-    expect(costOf("claude-haiku-4-5", usage()).totalNanos).toBe(0);
+    expect(costOf(ANTHROPIC_RATES["claude-haiku-4-5"], usage()).totalNanos).toBe(0);
   });
 
   /**
@@ -94,14 +133,13 @@ describe("costOf", () => {
    * model costs exactly one dollar — 10^9 nanos — with no rounding applied.
    */
   it("charges exactly $1.00 for 1M input tokens at $1/MTok", () => {
-    const c = costOf("claude-haiku-4-5", usage({ inputTokens: 1_000_000 }));
+    const c = costOf(ANTHROPIC_RATES["claude-haiku-4-5"], usage({ inputTokens: 1_000_000 }));
     expect(c.inputNanos).toBe(1_000_000_000);
     expect(c.totalNanos).toBe(1_000_000_000);
   });
 
   it("charges each token class at its own rate and sums them", () => {
-    const c = costOf(
-      "claude-opus-5",
+    const c = costOf(ANTHROPIC_RATES["claude-opus-5"],
       usage({
         inputTokens: 1_000,
         outputTokens: 500,
@@ -126,22 +164,19 @@ describe("costOf", () => {
    * isn't there.
    */
   it("makes a cache read exactly a tenth of an uncached input token", () => {
-    const cached = costOf(
-      "claude-sonnet-5",
+    const cached = costOf(ANTHROPIC_RATES["claude-sonnet-5"],
       usage({ cacheReadInputTokens: 10_000 }),
     );
-    const uncached = costOf("claude-sonnet-5", usage({ inputTokens: 10_000 }));
+    const uncached = costOf(ANTHROPIC_RATES["claude-sonnet-5"], usage({ inputTokens: 10_000 }));
 
     expect(cached.totalNanos * 10).toBe(uncached.totalNanos);
   });
 
   it("charges a 1-hour cache write more than a 5-minute one", () => {
-    const short = costOf(
-      "claude-sonnet-5",
+    const short = costOf(ANTHROPIC_RATES["claude-sonnet-5"],
       usage({ cacheCreationInputTokens: 1_000 }),
     );
-    const long = costOf(
-      "claude-sonnet-5",
+    const long = costOf(ANTHROPIC_RATES["claude-sonnet-5"],
       usage({ cacheCreationInputTokens: 1_000 }),
       { cacheTtl: "1h" },
     );
@@ -156,7 +191,7 @@ describe("costOf", () => {
    * in "cost per resolved ticket", which is the number on the dashboard.
    */
   it("sums ten thousand spans without drift", () => {
-    const one = costOf("claude-haiku-4-5", usage({ outputTokens: 3 }));
+    const one = costOf(ANTHROPIC_RATES["claude-haiku-4-5"], usage({ outputTokens: 3 }));
     let total = 0;
     for (let i = 0; i < 10_000; i++) total += one.totalNanos;
 
@@ -177,14 +212,19 @@ describe("costOf", () => {
     ["fractional", 1.5],
   ])("rejects a %s token count rather than costing it", (_label, value) => {
     expect(() =>
-      costOf("claude-haiku-4-5", usage({ inputTokens: value })),
+      costOf(ANTHROPIC_RATES["claude-haiku-4-5"], usage({ inputTokens: value })),
     ).toThrow();
   });
 
-  it("rejects a model it has no price for", () => {
+  /**
+   * Pricing moved to the provider, so the failure this guards changed shape:
+   * not "unknown model" but "no rate card reached me". A run must never be
+   * silently free because a lookup returned undefined.
+   */
+  it("rejects a missing rate card rather than costing a run at zero", () => {
     expect(() =>
-      costOf("claude-opus-4-8" as ModelId, usage({ inputTokens: 1 })),
-    ).toThrow(/claude-opus-4-8/);
+      costOf(undefined as unknown as RateCard, usage({ inputTokens: 1 })),
+    ).toThrow(/rate card/i);
   });
 });
 
@@ -211,8 +251,7 @@ describe("nanosToMicros", () => {
    * a reader sees in the trace viewer is reproducible from the rates.
    */
   it("prices a realistic Haiku run to a stable micro figure", () => {
-    const c = costOf(
-      "claude-haiku-4-5",
+    const c = costOf(ANTHROPIC_RATES["claude-haiku-4-5"],
       usage({ inputTokens: 4_000, outputTokens: 800 }),
     );
 

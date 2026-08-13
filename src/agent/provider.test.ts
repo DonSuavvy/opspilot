@@ -142,7 +142,9 @@ describe("providerFromEnv", () => {
    * boot-validation principle the tool registry already applies.
    */
   it("names the missing variable rather than failing later at call time", () => {
-    const { AWS_ANTHROPIC_SECRET_ACCESS_KEY: _omitted, ...partial } = AWS;
+    const partial: Record<string, string> = { ...AWS };
+    delete partial.AWS_ANTHROPIC_SECRET_ACCESS_KEY;
+
     expect(() => providerFromEnv(partial)).toThrow(
       /AWS_ANTHROPIC_SECRET_ACCESS_KEY/,
     );
