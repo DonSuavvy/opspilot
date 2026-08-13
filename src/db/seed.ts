@@ -2,7 +2,14 @@
  * Seed Beacon Analytics, the fictional B2B product-analytics SaaS OpsPilot runs
  * the back office for.
  *
- * Two rules govern this file:
+ * This is a **library**: it exports `seedWorkspace` and performs no I/O of its
+ * own beyond the queries that caller asks for. Reading `.env.local`, opening
+ * the pool, printing and exit codes all live in `scripts/seed.ts`. The split is
+ * load-bearing — `seed()` used to run at module scope, so merely importing this
+ * file wrote to Postgres, including from a vitest run that CLAUDE.md requires
+ * to work with no database at all.
+ *
+ * Three rules govern this file:
  *
  * 1. **Deterministic.** No Math.random, no unseeded faker. Ids are derived from
  *    stable string keys via SHA-256, so the eval suite can reference a specific
@@ -11,7 +18,12 @@
  *
  * 2. **Dates are relative to seed time, not hard-coded.** The refund window is
  *    measured in days since payment, so a fixed calendar date would drift out
- *    of the window as the project ages and silently break the demo.
+ *    of the window as the project ages and silently break the demo. `now` is
+ *    injected for the same reason the policy engine injects it.
+ *
+ * 3. **Every derived id is scoped to its workspace.** Day 8 seeds a sandbox per
+ *    visitor; ids derived from the key alone made the second one collide on
+ *    `customers_pkey`. See {@link seedIdsFor}.
  *
  * The load-bearing fixtures are the three refund-window cases. Demo arc step 2
  * narrows the refund window from 30 days to 14 and re-runs the same ticket; the
@@ -26,11 +38,10 @@
  */
 import { createHash } from "node:crypto";
 
-import { config } from "dotenv";
 import { eq } from "drizzle-orm";
 
 import { DEFAULT_POLICY } from "../policy/refund";
-import { closeDb, getDb } from "./client";
+import type { Db } from "./client";
 import {
   customers,
   invoices,
@@ -42,27 +53,65 @@ import {
   workspaces,
 } from "./schema";
 
-config({ path: ".env.local" });
-
-const WORKSPACE_SLUG = "demo";
-const NOW = new Date();
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** Deterministic, valid v4-shaped UUID derived from a stable key. */
-function seedId(key: string): string {
-  const h = createHash("sha256").update(key).digest("hex");
-  const variant = ((parseInt(h.slice(16, 17), 16) & 0x3) | 0x8).toString(16);
-  return [
-    h.slice(0, 8),
-    h.slice(8, 12),
-    `4${h.slice(13, 16)}`,
-    `${variant}${h.slice(17, 20)}`,
-    h.slice(20, 32),
-  ].join("-");
+/**
+ * Build the id derivation for one workspace.
+ *
+ * Ids are derived rather than generated so Day 6's eval cases can reference a
+ * specific invoice by computing its id instead of querying for it. Until Round
+ * 4 the digest covered the key alone, which made every workspace derive the
+ * *same* ids — correct for one workspace and fatal for two, since Day 8 seeds
+ * a sandbox per visitor and the second would collide on `customers_pkey`.
+ *
+ * The slug is length-prefixed rather than concatenated or delimited. Plain
+ * concatenation maps ("ab", "c") and ("a", "bc") to one digest, and a fixed
+ * delimiter only moves the problem to slugs that contain it. Length-prefixing
+ * is unambiguous for any alphabet, which matters because Day 8's slugs are
+ * generated per visitor and this module does not get to assume their shape.
+ */
+export function seedIdsFor(slug: string): (key: string) => string {
+  return function seedId(key: string): string {
+    const h = createHash("sha256")
+      .update(`${slug.length}:${slug}:${key}`)
+      .digest("hex");
+    const variant = ((parseInt(h.slice(16, 17), 16) & 0x3) | 0x8).toString(16);
+    return [
+      h.slice(0, 8),
+      h.slice(8, 12),
+      `4${h.slice(13, 16)}`,
+      `${variant}${h.slice(17, 20)}`,
+      h.slice(20, 32),
+    ].join("-");
+  };
 }
 
-const daysAgo = (n: number) => new Date(NOW.getTime() - n * DAY_MS);
-const daysAhead = (n: number) => new Date(NOW.getTime() + n * DAY_MS);
+/**
+ * What one call to {@link seedWorkspace} plants.
+ *
+ * `now` is injected for the same reason the policy engine injects it: every
+ * date in the fixture set is relative to seed time, and the refund-window cases
+ * are only meaningful because of where they sit relative to `now`. A
+ * module-scope `new Date()` made that unreachable from a caller and made the
+ * seed impossible to place at a chosen instant.
+ */
+export interface SeedWorkspaceOptions {
+  /** Tenant slug. Also scopes every derived id — see {@link seedIdsFor}. */
+  slug: string;
+  /** Sandbox TTL for Day 8's cron sweep; `null` for the durable demo tenant. */
+  expiresAt: Date | null;
+  /** Seed instant. Every fixture date is relative to this. */
+  now: Date;
+}
+
+export interface SeedCounts {
+  customers: number;
+  subscriptions: number;
+  invoices: number;
+  kbArticles: number;
+  tickets: number;
+  sopVersions: number;
+}
 
 const PLAN_PRICE_CENTS = { free: 0, pro: 4_900, scale: 29_900 } as const;
 
@@ -306,23 +355,36 @@ this SOP does not authorise.
 /* Seed                                                                       */
 /* -------------------------------------------------------------------------- */
 
-async function seed() {
-  const db = getDb();
-
-  console.log("Seeding Beacon Analytics...");
+/**
+ * Plant the full Beacon Analytics fixture set into one workspace.
+ *
+ * Takes `db` rather than calling `getDb()` so a caller can supply a
+ * transaction, and returns counts rather than printing them — reporting is the
+ * caller's business. The CLI wrapper lives at `scripts/seed.ts`.
+ *
+ * Idempotent per workspace: the leading delete cascades to every tenant-scoped
+ * table, which is also the single lever behind the demo's Reset button.
+ */
+export async function seedWorkspace(
+  db: Db,
+  { slug, expiresAt, now }: SeedWorkspaceOptions,
+): Promise<SeedCounts> {
+  const seedId = seedIdsFor(slug);
+  const daysAgo = (n: number) => new Date(now.getTime() - n * DAY_MS);
+  const daysAhead = (n: number) => new Date(now.getTime() + n * DAY_MS);
 
   // Deleting the workspace cascades to every tenant-scoped table, which makes
   // the seed idempotent and gives the demo's Reset button a single lever.
-  await db.delete(workspaces).where(eq(workspaces.slug, WORKSPACE_SLUG));
+  await db.delete(workspaces).where(eq(workspaces.slug, slug));
 
-  const workspaceId = seedId("workspace:demo");
+  const workspaceId = seedId("workspace");
   await db.insert(workspaces).values({
     id: workspaceId,
-    slug: WORKSPACE_SLUG,
+    slug,
     label: "Beacon Analytics (demo)",
     isDemo: true,
-    seededAt: NOW,
-    expiresAt: null,
+    seededAt: now,
+    expiresAt,
   });
 
   /* --- customers + subscriptions --- */
@@ -587,7 +649,7 @@ async function seed() {
     },
   ]);
 
-  const counts = {
+  return {
     customers: customerRows.length,
     subscriptions: subscriptionRows.length,
     invoices: invoiceRows.length,
@@ -595,22 +657,4 @@ async function seed() {
     tickets: 8,
     sopVersions: 1,
   };
-
-  console.log("Seeded:", counts);
-  console.log(`\nRefund-window fixtures (window flip is demo arc step 2):`);
-  console.log(`  INV-2001  paid  5d ago  -> in policy at 30 and at 14`);
-  console.log(`  INV-2002  paid 22d ago  -> in policy at 30, OUT at 14  <- flips`);
-  console.log(`  INV-2003  paid 45d ago  -> out of policy either way`);
-  console.log(`  INV-2004/5 paid 9d ago  -> duplicate charge, always refundable`);
 }
-
-seed()
-  .then(async () => {
-    await closeDb();
-    console.log("\nSeed complete.");
-  })
-  .catch(async (error) => {
-    console.error("\nSeed failed:", error);
-    await closeDb();
-    process.exit(1);
-  });
