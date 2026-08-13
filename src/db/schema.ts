@@ -13,11 +13,13 @@
 import { sql } from "drizzle-orm";
 import {
   boolean,
+  check,
   customType,
   index,
   integer,
   jsonb,
   numeric,
+  type PgColumn,
   pgEnum,
   pgTable,
   text,
@@ -25,6 +27,45 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+
+/**
+ * Upper bound on any single `cost_usd` value, in dollars.
+ *
+ * Absurd by five orders of magnitude — a Haiku run costs ~$0.06 and a 20-case
+ * eval suite costs pennies — because this is a data-integrity guard, not a
+ * budget control. Budgets are enforced in the application with a visible
+ * banner and a kill switch; this is the constraint that says a number is a
+ * number at all.
+ */
+const MAX_COST_USD = 10_000;
+
+/**
+ * Both bounds, and the upper one is the load-bearing half.
+ *
+ * Postgres `numeric` accepts the literal `'NaN'`, and orders it **above** every
+ * other numeric value — so `CHECK (cost_usd >= 0)`, the obvious guard, admits
+ * it. Verified against the running database rather than assumed:
+ *
+ *   'NaN'::numeric >= 0                -> true
+ *   'NaN'::numeric <= 1000000          -> false
+ *   CHECK (c >= 0)                     -> INSERT 'NaN' SUCCEEDS
+ *   CHECK (c >= 0 AND c <= 1000000)    -> INSERT 'NaN' rejected
+ *
+ * A NaN cost silently destroys "cost per resolved ticket", the managed-services
+ * KPI Mission Control is built around: every SUM over the column becomes NaN,
+ * and the dashboard shows nothing rather than something wrong, which is harder
+ * to notice. Day 2 is what starts writing these rows.
+ */
+function costSane(name: string, column: PgColumn) {
+  // `sql.raw`, not an interpolated value. A plain `${MAX_COST_USD}` becomes a
+  // bind parameter, and drizzle-kit emits it into the migration verbatim as
+  // `<= $1` — invalid in DDL, so the migration fails the moment it is applied.
+  // Caught by reading the generated SQL; nothing before that point complains.
+  return check(
+    name,
+    sql`${column} >= 0 AND ${column} <= ${sql.raw(String(MAX_COST_USD))}`,
+  );
+}
 
 /**
  * Postgres full-text search vector. Deliberately NOT pgvector embeddings:
@@ -439,6 +480,7 @@ export const agentRuns = pgTable(
     index("agent_runs_workspace_started_idx").on(t.workspaceId, t.startedAt),
     index("agent_runs_ticket_idx").on(t.ticketId),
     index("agent_runs_status_idx").on(t.status),
+    costSane("agent_runs_cost_usd_sane", t.costUsd),
   ],
 );
 
@@ -471,7 +513,10 @@ export const runSpans = pgTable(
       .defaultNow(),
     endedAt: timestamp("ended_at", { withTimezone: true }),
   },
-  (t) => [uniqueIndex("run_spans_run_seq_idx").on(t.runId, t.seq)],
+  (t) => [
+    uniqueIndex("run_spans_run_seq_idx").on(t.runId, t.seq),
+    costSane("run_spans_cost_usd_sane", t.costUsd),
+  ],
 );
 
 /* -------------------------------------------------------------------------- */
@@ -622,6 +667,7 @@ export const evalRuns = pgTable(
      * fall back to a seq scan without this.
      */
     index("eval_runs_started_idx").on(t.startedAt),
+    costSane("eval_runs_cost_usd_sane", t.costUsd),
   ],
 );
 
@@ -663,5 +709,6 @@ export const evalResults = pgTable(
      * cascade with an index instead of a seq scan on every TTL cleanup.
      */
     index("eval_results_workspace_idx").on(t.workspaceId),
+    costSane("eval_results_cost_usd_sane", t.costUsd),
   ],
 );

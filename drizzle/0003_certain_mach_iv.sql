@@ -1,0 +1,4 @@
+ALTER TABLE "agent_runs" ADD CONSTRAINT "agent_runs_cost_usd_sane" CHECK ("agent_runs"."cost_usd" >= 0 AND "agent_runs"."cost_usd" <= 10000);--> statement-breakpoint
+ALTER TABLE "eval_results" ADD CONSTRAINT "eval_results_cost_usd_sane" CHECK ("eval_results"."cost_usd" >= 0 AND "eval_results"."cost_usd" <= 10000);--> statement-breakpoint
+ALTER TABLE "eval_runs" ADD CONSTRAINT "eval_runs_cost_usd_sane" CHECK ("eval_runs"."cost_usd" >= 0 AND "eval_runs"."cost_usd" <= 10000);--> statement-breakpoint
+ALTER TABLE "run_spans" ADD CONSTRAINT "run_spans_cost_usd_sane" CHECK ("run_spans"."cost_usd" >= 0 AND "run_spans"."cost_usd" <= 10000);
