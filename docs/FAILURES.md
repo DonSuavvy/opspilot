@@ -56,6 +56,10 @@ to audit agent code — and then verifying their findings rather than taking the
 on faith — is the practice being demonstrated, not a shortcut around it. They
 were right about the substantive things and I confirmed each one myself.
 
+The exact prompt is checked in at [`REVIEW-PROMPT.md`](REVIEW-PROMPT.md), along
+with why each instruction is in it. This file records what the reviews found;
+that one records how to run them again.
+
 ---
 
 ## 1. The schema sanitizer was position-blind — 2026-08-11
