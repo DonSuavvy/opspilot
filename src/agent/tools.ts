@@ -226,7 +226,14 @@ export const TOOLS: ToolDefinition[] = [
         .number()
         .int()
         .positive()
-        .describe("Refund amount in integer cents. Never a decimal."),
+        // `.positive()` emits `exclusiveMinimum`, which the registry strips as
+        // strict-illegal — so the constraint has to be restated here or the
+        // model never hears it. `.int()` survives as `type: "integer"` and
+        // needs no such help. A test pins this pairing.
+        .describe(
+          "Refund amount in integer cents, and must be positive — never zero, " +
+            "negative or a decimal.",
+        ),
       reason: z
         .enum([
           "duplicate_charge",

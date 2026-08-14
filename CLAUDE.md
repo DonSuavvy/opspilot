@@ -179,13 +179,18 @@ Each of these cost real time. Don't rediscover them.
   clicking the scenario injector" case `budget.ts` was written for, and it
   becomes reachable on Day 8 when sandboxes go public — fix before then, by
   charging spend as it accrues or taking a row lock, not by patching the read.
-- **OPEN — constraint stripping is now gratuitous.** `toStrictJsonSchema`
-  strips `minimum`/`maxLength`/`pattern`/`format` *because `strict: true`
-  rejects them*. With strict off by default (see above), that reason is gone,
-  and the model is now told `amount_cents` is a bare `number` when Zod demands
-  a positive integer. Every strip is a correction the model has to be walked
-  through via an `is_error` round-trip, for no remaining benefit. Make the
-  stripping conditional on the same flag — test-first.
+- **CLOSED, and the original claim was wrong — constraint stripping stays.**
+  This was logged as "stripping is now gratuitous once `strict` is off, and the
+  model is told `amount_cents` is a bare `number`". Measuring it before acting
+  on it reversed the conclusion, twice over. `type` was never on the strip list,
+  so the model *is* told `integer`. And across all nine tools exactly eight
+  keywords are stripped, of which **seven are Zod's MAX_SAFE_INTEGER
+  boilerplate** (`maximum: 9007199254740991` and its negative twin, emitted for
+  every `z.number().int()`). Restoring them would put noise in the cached prefix
+  and teach the model nothing. Exactly one strip carried signal — positivity on
+  `amount_cents` — and that now lives in the field's `description`, where the
+  model actually reads it, pinned by a test. **Lesson: a follow-up written from
+  reasoning is a hypothesis; measure before building the mechanism it asks for.**
 - **The seed's invoice ages are load-bearing.** `INV-2002` is paid 22 days ago
   precisely so it is inside a 30-day window and outside a 14-day one. If that
   stops being true, demo arc step 2 silently demonstrates nothing.
