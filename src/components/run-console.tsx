@@ -135,7 +135,10 @@ export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
   const slowest = spans.reduce((max, s) => Math.max(max, s.latencyMs), 0);
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[22rem_1fr]">
+    // Two columns from `md`, not `lg`: the trace is the thing being
+    // demonstrated, and at 1024px it fell below the fold on any laptop-sized
+    // split view — the viewer had to scroll away from the inbox to watch it.
+    <div className="grid gap-6 md:grid-cols-[18rem_1fr]">
       <section aria-label="Inbox" className="flex flex-col gap-2">
         <h2 className="px-1 text-sm font-medium text-zinc-500">
           Inbox · {tickets.length} open
