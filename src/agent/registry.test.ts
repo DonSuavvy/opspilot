@@ -163,7 +163,13 @@ describe("toStrictJsonSchema", () => {
       }),
     );
 
-    const orphaned = schema.required.filter((r) => !(r in schema.properties));
+    // `Object.hasOwn` rather than `in` for the same reason the implementation
+    // uses it — a test that asks `in` would call an orphaned `toString`
+    // satisfied. No current field name triggers it; the point is that this
+    // assertion should not carry the bug it is checking for.
+    const orphaned = schema.required.filter(
+      (r) => !Object.hasOwn(schema.properties, r),
+    );
     expect(orphaned).toEqual([]);
   });
 
@@ -224,6 +230,92 @@ describe("toStrictJsonSchema", () => {
     expect(meta.additionalProperties).toBe(false);
     expect(meta.required).toEqual(["source"]);
   });
+
+  /**
+   * Anthropic's strict tool use accepts exactly ten string formats. Zod emits
+   * many more — `z.base64()` alone adds `format: "base64"` *and* the
+   * unsupported `contentEncoding` keyword. Neither is in the blocklist, so
+   * both sail through boot validation and are rejected on the wire instead:
+   * exactly the 2am failure boot validation exists to prevent.
+   */
+  it("keeps the string formats strict mode actually supports", () => {
+    const schema = toStrictJsonSchema(
+      z.object({ when: z.iso.datetime(), who: z.email(), id: z.uuid() }),
+    );
+
+    const properties = schema.properties as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(properties.when.format).toBe("date-time");
+    expect(properties.who.format).toBe("email");
+    expect(properties.id.format).toBe("uuid");
+  });
+
+  it("strips a string format outside Anthropic's supported set", () => {
+    const schema = toStrictJsonSchema(z.object({ blob: z.base64() }));
+
+    const blob = (schema.properties as Record<string, Record<string, unknown>>)
+      .blob;
+    expect(blob.format).toBeUndefined();
+    expect(blob.contentEncoding).toBeUndefined();
+    expect(blob.type).toBe("string");
+  });
+
+  /**
+   * `assertConsistent` is the safety net FAILURES.md entry 1 added, and its
+   * claim is that "one assertion catches this whole bug class". Nothing proved
+   * it: the test that looks like coverage asserts a property the fixed
+   * sanitizer already guarantees on its own, so the check could be deleted
+   * outright and the suite stayed green. These feed it an inconsistency the
+   * sanitizer cannot produce, via `.meta()` raw-schema injection.
+   */
+  it("fails when required names an absent property", () => {
+    const schema = z
+      .object({ a: z.string() })
+      .meta({ required: ["a", "ghost"] } as never);
+
+    expect(() => toStrictJsonSchema(schema)).toThrow(ToolRegistryError);
+    expect(() => toStrictJsonSchema(schema)).toThrow(/ghost/);
+  });
+
+  it("catches an orphaned required nested inside properties", () => {
+    const schema = z.object({
+      outer: z
+        .object({ kept: z.string() })
+        .meta({ required: ["kept", "phantom"] } as never),
+    });
+
+    expect(() => toStrictJsonSchema(schema)).toThrow(/phantom/);
+  });
+
+  /**
+   * Round 4. The orphan check asked `name in properties`, and `in` walks the
+   * prototype chain — so `"toString" in {}` is `true` and every name
+   * `Object.prototype` supplies is treated as a property that exists. A schema
+   * requiring `toString` with no such property passed the one assertion whose
+   * stated purpose is "catches this whole bug class".
+   *
+   * The same family as FAILURES.md entry 1: a JSON Schema key is an *author
+   * identifier*, and reasoning about it with a JavaScript operator that knows
+   * about inherited members treats attacker- or author-chosen strings as
+   * language builtins. `Object.hasOwn` is the operator that means what this
+   * check meant.
+   *
+   * Reachable rather than theoretical — these are ordinary English words, and
+   * `constructor`, `valueOf` and `toString` are plausible field names in a
+   * billing tool. `__proto__` is the one that would be chosen deliberately.
+   */
+  it.each(["toString", "constructor", "valueOf", "hasOwnProperty", "__proto__"])(
+    "catches an orphaned required named %s, which Object.prototype supplies",
+    (inherited) => {
+      const schema = z
+        .object({ a: z.string() })
+        .meta({ required: ["a", inherited] } as never);
+
+      expect(() => toStrictJsonSchema(schema)).toThrow(ToolRegistryError);
+    },
+  );
 });
 
 describe("buildRegistry — boot-time validation", () => {
@@ -425,5 +517,120 @@ describe("defense in depth", () => {
 
     expect(registry.requiresApproval("issue_refund")).toBe(true);
     expect(registry.requiresApproval("get_invoices")).toBe(false);
+  });
+
+  /**
+   * Round 4. The test above covers `confirm_write` and `read` and nothing
+   * else, so `requiresApproval` could be widened from
+   * `safetyClass === "confirm_write"` to `safetyClass !== "read"` and the whole
+   * suite stayed green. That mutation is not academic: it routes every
+   * `auto_write` tool — `draft_reply`, `escalate`, `resolve_ticket` — into the
+   * approval queue, which stalls every run behind a human on the terminal tool
+   * and quietly converts the demo into a manual process.
+   *
+   * Three classes, two tested. The missing cell is the one in the middle.
+   */
+  it("does not gate auto_write tools — reversible and logged is not confirm", () => {
+    const registry = buildRegistry([
+      tool({ name: "get_invoices" }),
+      tool({ name: "draft_reply", safetyClass: "auto_write", idempotent: true }),
+      tool({ name: "escalate", safetyClass: "auto_write", idempotent: true }),
+      tool({
+        name: "issue_refund",
+        safetyClass: "confirm_write",
+        idempotent: true,
+      }),
+      terminalTool(),
+    ]);
+
+    expect(registry.requiresApproval("draft_reply")).toBe(false);
+    expect(registry.requiresApproval("escalate")).toBe(false);
+    // The terminal tool is auto_write too; gating it deadlocks every run.
+    expect(registry.requiresApproval(registry.terminalToolName)).toBe(false);
+    expect(registry.requiresApproval("issue_refund")).toBe(true);
+  });
+
+  /**
+   * Round 4. `byName.get(name)?.safetyClass === "confirm_write"` is `false` for
+   * a name the registry has never heard of, so an unknown tool was reported as
+   * *not* needing approval — a security control failing open on exactly the
+   * input it cannot vouch for.
+   *
+   * Reachable from Day 2: the agent loop reads tool names out of model output,
+   * and a hallucinated or renamed name lands here. Throwing rather than
+   * returning `true` because an unknown name is a bug in the caller, not a
+   * risky-but-real tool call: the loop must reject it as an unknown tool, and
+   * silently routing it into the approval queue would put a human in front of a
+   * tool that does not exist. Same reasoning as `parsePolicyConfig` — refusing
+   * to answer beats answering about nothing.
+   */
+  it("throws on an unknown tool rather than reporting it needs no approval", () => {
+    const registry = buildRegistry([tool({ name: "get_invoices" }), terminalTool()]);
+
+    expect(() => registry.requiresApproval("definitely_not_a_tool")).toThrow(
+      ToolRegistryError,
+    );
+    expect(() => registry.requiresApproval("definitely_not_a_tool")).toThrow(
+      /definitely_not_a_tool/,
+    );
+  });
+});
+
+
+/* -------------------------------------------------------------------------- */
+/* Strict decoding is a provider capability, not a schema property             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Day 2, from the end-to-end gate rather than from a unit test.
+ *
+ * The nine-tool registry is rejected by Bedrock with
+ * `400 Compiled grammar size (329.9MB) exceeds maximum allowed size (300MB)`
+ * — from 3.2KB of JSON Schema. Probed against the live account: every tool
+ * alone compiles fine, eight compile fine, nine do not, and all nine compile
+ * fine with `strict` removed. So the cost is in the *grammar*, it accumulates
+ * across the tool set, and PLAN.md requires all nine.
+ *
+ * That makes strict decoding a property of the provider, not of the schema.
+ * The registry keeps guaranteeing the schemas are strict-*legal* — that is what
+ * `toStrictJsonSchema` is for and none of it changes — while the caller decides
+ * whether to ask for constrained decoding.
+ *
+ * Nothing is weakened by turning it off: the wire schema constrains the model,
+ * and Zod constrains reality. `runAgentLoop` parses every tool call with the
+ * tool own schema before the handler sees it, and rejects a bad one as an
+ * `is_error` result. Strict was the belt; Zod is the braces, and it was always
+ * the load-bearing one.
+ */
+describe("toAnthropicTools — requesting strict decoding", () => {
+  const registry = buildRegistry([tool({ name: "get_invoices" }), terminalTool()]);
+
+  it("asks for strict decoding by default, as it always has", () => {
+    for (const spec of registry.toAnthropicTools()) {
+      expect(spec.strict).toBe(true);
+    }
+  });
+
+  it("omits the field entirely when the caller cannot use strict decoding", () => {
+    for (const spec of registry.toAnthropicTools({ strict: false })) {
+      expect(spec).not.toHaveProperty("strict");
+    }
+  });
+
+  /**
+   * The point of the whole exercise: opting out changes what the model is
+   * *told*, never what the code accepts. A schema that was strict-legal stays
+   * strict-legal, closed objects stay closed, and required stays required.
+   */
+  it("still emits the same strict-legal schema either way", () => {
+    const strict = registry.toAnthropicTools();
+    const relaxed = registry.toAnthropicTools({ strict: false });
+
+    expect(relaxed.map((s) => s.input_schema)).toEqual(
+      strict.map((s) => s.input_schema),
+    );
+    for (const spec of relaxed) {
+      expect(spec.input_schema.additionalProperties).toBe(false);
+    }
   });
 });

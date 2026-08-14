@@ -20,6 +20,8 @@
  */
 import { z } from "zod";
 
+import type { OpsData } from "./data";
+
 export type SafetyClass = "read" | "auto_write" | "confirm_write";
 
 const SAFETY_CLASSES: readonly SafetyClass[] = [
@@ -58,7 +60,32 @@ export const UNSUPPORTED_KEYWORDS: readonly string[] = [
   "minContains",
   "maxContains",
   "$schema",
+  // Zod attaches contentEncoding alongside format for z.base64() and friends.
+  // It is not a supported keyword at all, at any value.
+  "contentEncoding",
+  "contentMediaType",
 ];
+
+/**
+ * The only string formats Anthropic's strict tool use accepts. `format` itself
+ * is legal, so it cannot go in the blocklist — but Zod emits many values
+ * outside this set (`base64`, `cidrv4`, `nanoid`, `emoji`, …) and an
+ * unsupported one is rejected on the wire. Dropping the keyword narrows what
+ * the model is told; the Zod schema still enforces the format at parse time,
+ * exactly as with the numeric and string constraints above.
+ */
+const SUPPORTED_FORMATS: ReadonlySet<string> = new Set([
+  "date-time",
+  "time",
+  "date",
+  "duration",
+  "email",
+  "hostname",
+  "uri",
+  "ipv4",
+  "ipv6",
+  "uuid",
+]);
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyZodObject = z.ZodObject<any>;
@@ -76,14 +103,34 @@ export interface AnthropicToolSpec {
   name: string;
   description: string;
   input_schema: StrictJsonSchema;
-  strict: true;
+  /**
+   * Present only when the caller asked for constrained decoding. See
+   * `ToolRegistry.toAnthropicTools` for why that is a provider decision.
+   */
+  strict?: true;
 }
 
 export interface ToolContext {
   workspaceId: string;
   runId: string;
+  /**
+   * The ticket this run was dispatched for.
+   *
+   * `resolve_ticket` has no ticket id in its schema, deliberately: the run
+   * already knows which ticket it is about, so the terminal tool reads it from
+   * here rather than from model output. A ticket id the model chooses is a
+   * ticket id the model can get wrong.
+   */
+  ticketId: string;
   /** Injected so tool handlers stay as deterministic as the policy engine. */
   now: Date;
+  /**
+   * The data seam. Already scoped to `workspaceId` when it was built, which is
+   * why no method on it takes one — see src/agent/data.ts. Handlers reach the
+   * database only through here, so a unit test needs a fake rather than
+   * Postgres.
+   */
+  data: OpsData;
 }
 
 export interface ToolDefinition<T extends AnyZodObject = AnyZodObject> {
@@ -153,6 +200,13 @@ function sanitize(node: unknown, issues: string[], path: string): unknown {
   for (const [key, value] of Object.entries(node)) {
     if (UNSUPPORTED_KEYWORDS.includes(key)) continue;
 
+    // `format` is legal, but only for ten specific values. Position matters
+    // here too: this is the keyword, not a property named "format".
+    if (key === "format" && typeof value === "string") {
+      if (SUPPORTED_FORMATS.has(value)) out[key] = value;
+      continue;
+    }
+
     if (LITERAL_KEYS.has(key)) {
       // Literal data — a default of {pattern: "abc"} must survive intact.
       out[key] = value;
@@ -200,8 +254,15 @@ function assertConsistent(node: unknown, issues: string[], path: string): void {
 
   if (node.type === "object" && Array.isArray(node.required)) {
     const properties = isPlainObject(node.properties) ? node.properties : {};
+    // `Object.hasOwn`, not `in`. `in` walks the prototype chain, so
+    // `"toString" in {}` is true and every name Object.prototype supplies —
+    // toString, constructor, valueOf, hasOwnProperty, __proto__ — reads as a
+    // property that exists. That let an orphaned `required` through the one
+    // assertion whose job is to catch orphaned `required`. JSON Schema keys are
+    // author identifiers; the operator used to reason about them must not know
+    // anything about inherited members.
     const orphaned = (node.required as string[]).filter(
-      (name) => !(name in properties),
+      (name) => !Object.hasOwn(properties, name),
     );
     if (orphaned.length > 0) {
       issues.push(
@@ -251,8 +312,24 @@ export function toStrictJsonSchema(schema: AnyZodObject): StrictJsonSchema {
 export interface ToolRegistry {
   list(): ToolDefinition[];
   get(name: string): ToolDefinition | undefined;
-  /** Deterministically ordered — the tools block is the head of the cache prefix. */
-  toAnthropicTools(): AnthropicToolSpec[];
+  /**
+   * Deterministically ordered — the tools block is the head of the cache prefix.
+   *
+   * **`strict` is the caller's decision, because it is a provider capability.**
+   * The nine-tool set is rejected by Bedrock with `400 Compiled grammar size
+   * (329.9MB) exceeds maximum allowed size (300MB)` — from 3.2KB of schema.
+   * Probed against the live account (`scripts/probe-grammar.ts`): every tool
+   * alone compiles, any eight compile, nine do not, and all nine compile with
+   * `strict` removed. The cost is in the grammar and it accumulates across the
+   * set, so no single schema can be simplified to fix it.
+   *
+   * What the registry still guarantees is unchanged: the emitted schema is
+   * strict-*legal* either way — closed objects, explicit `required`, no
+   * unsupported keywords. Opting out changes only what the model is told.
+   * `runAgentLoop` parses every call with the tool's own Zod schema before the
+   * handler sees it, which is where the real guarantee always lived.
+   */
+  toAnthropicTools(options?: { strict?: boolean }): AnthropicToolSpec[];
   requiresApproval(name: string): boolean;
   terminalToolName: string;
 }
@@ -343,19 +420,44 @@ export function buildRegistry(definitions: ToolDefinition[]): ToolRegistry {
   const sorted = [...definitions].sort((a, b) => a.name.localeCompare(b.name));
   const terminal = definitions.find((d) => d.terminal === true)!;
 
-  const specs: AnthropicToolSpec[] = sorted.map((d) => ({
+  // Compiled once: the schemas are identical either way, so only the presence
+  // of `strict` differs and there is no reason to re-walk the Zod trees.
+  const schemas = sorted.map((d) => ({
     name: d.name,
     description: d.description,
     input_schema: toStrictJsonSchema(d.input),
+  }));
+
+  const strictSpecs: AnthropicToolSpec[] = schemas.map((s) => ({
+    ...s,
     strict: true,
   }));
 
   return {
     list: () => [...definitions],
     get: (name) => byName.get(name),
-    toAnthropicTools: () => specs,
-    requiresApproval: (name) =>
-      byName.get(name)?.safetyClass === "confirm_write",
+    toAnthropicTools: (options) =>
+      options?.strict === false ? schemas : strictSpecs,
+    requiresApproval: (name) => {
+      // Optional chaining made this fail *open*: `undefined === "confirm_write"`
+      // is false, so a name the registry never heard of was reported as needing
+      // no approval — the one input it cannot vouch for getting the safest-
+      // sounding answer. From Day 2 these names come out of model output.
+      //
+      // Throws rather than returning true because an unknown name is a caller
+      // bug, not a risky-but-real tool call: the loop has to reject it as an
+      // unknown tool, and routing it to the approval queue would put a human in
+      // front of a tool that does not exist.
+      const definition = byName.get(name);
+      if (!definition) {
+        throw new ToolRegistryError([
+          `requiresApproval("${name}"): no such tool is registered — an ` +
+            `unknown tool cannot be assessed for approval, so it is refused ` +
+            `rather than reported as safe`,
+        ]);
+      }
+      return definition.safetyClass === "confirm_write";
+    },
     terminalToolName: terminal.name,
   };
 }

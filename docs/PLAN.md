@@ -42,7 +42,8 @@ Next.js 16 (App Router, TS strict) ── Vercel
 │   ├── /api/evals/run        → executes a suite
 │   ├── /api/health           → DB + provider checks
 │   └── /api/cron/cleanup     → sandbox TTL sweep (Vercel cron)
-├── Agent core (no framework — raw @anthropic-ai/sdk, hand-rolled loop)
+├── Agent core (no framework — hand-rolled loop over a provider adapter:
+│              Bedrock/covara by default, @anthropic-ai/sdk as fallback)
 ├── Drizzle ORM → Neon Postgres
 └── GitHub Actions: typecheck + tests + eval suite on prompt/SOP changes
 ```
@@ -75,6 +76,7 @@ Next.js 16 (App Router, TS strict) ── Vercel
 ### 3. Flight recorder — "debug agent behavior, improve reliability"
 
 - Every run persisted as ordered spans; streamed live over SSE into a waterfall trace viewer: expandable LLM payloads and tool args/results, per-span tokens (input/output/cache-read/cache-write), cost in USD (pricing table in config — Opus 5 $5/$25, Sonnet 5 $3/$15, Haiku 4.5 $1/$5 per MTok), latency, cache badges.
+  - **Sonnet 5 carries introductory pricing of $2/$10 per MTok through 2026-08-31.** $3/$15 is the list price and the right number to hardcode, but a cost table built today over-reports Sonnet spend by 50% until that date. Since the per-run USD badge is a headline feature, the pricing table needs an effective-date field rather than a single rate — otherwise the demo's own numbers are wrong in a way a reviewer can check.
 - Runs are replayable from the DB. **Stretch: "what-if replay"** — one click re-runs a historical ticket against the *current* SOP version and diffs the outcomes side by side.
 - Structured logging (pino) correlated by run_id; `/api/health`.
 

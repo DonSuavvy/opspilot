@@ -13,11 +13,13 @@
 import { sql } from "drizzle-orm";
 import {
   boolean,
+  check,
   customType,
   index,
   integer,
   jsonb,
   numeric,
+  type PgColumn,
   pgEnum,
   pgTable,
   text,
@@ -25,6 +27,45 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+
+/**
+ * Upper bound on any single `cost_usd` value, in dollars.
+ *
+ * Absurd by five orders of magnitude — a Haiku run costs ~$0.06 and a 20-case
+ * eval suite costs pennies — because this is a data-integrity guard, not a
+ * budget control. Budgets are enforced in the application with a visible
+ * banner and a kill switch; this is the constraint that says a number is a
+ * number at all.
+ */
+const MAX_COST_USD = 10_000;
+
+/**
+ * Both bounds, and the upper one is the load-bearing half.
+ *
+ * Postgres `numeric` accepts the literal `'NaN'`, and orders it **above** every
+ * other numeric value — so `CHECK (cost_usd >= 0)`, the obvious guard, admits
+ * it. Verified against the running database rather than assumed:
+ *
+ *   'NaN'::numeric >= 0                -> true
+ *   'NaN'::numeric <= 1000000          -> false
+ *   CHECK (c >= 0)                     -> INSERT 'NaN' SUCCEEDS
+ *   CHECK (c >= 0 AND c <= 1000000)    -> INSERT 'NaN' rejected
+ *
+ * A NaN cost silently destroys "cost per resolved ticket", the managed-services
+ * KPI Mission Control is built around: every SUM over the column becomes NaN,
+ * and the dashboard shows nothing rather than something wrong, which is harder
+ * to notice. Day 2 is what starts writing these rows.
+ */
+function costSane(name: string, column: PgColumn) {
+  // `sql.raw`, not an interpolated value. A plain `${MAX_COST_USD}` becomes a
+  // bind parameter, and drizzle-kit emits it into the migration verbatim as
+  // `<= $1` — invalid in DDL, so the migration fails the moment it is applied.
+  // Caught by reading the generated SQL; nothing before that point complains.
+  return check(
+    name,
+    sql`${column} >= 0 AND ${column} <= ${sql.raw(String(MAX_COST_USD))}`,
+  );
+}
 
 /**
  * Postgres full-text search vector. Deliberately NOT pgvector embeddings:
@@ -250,7 +291,15 @@ export const tickets = pgTable(
     body: text("body").notNull(),
     channel: ticketChannelEnum("channel").notNull().default("email"),
     status: ticketStatusEnum("status").notNull().default("open"),
-    /** Set by the heuristic pre-scan before the agent ever sees the body. */
+    /**
+     * Whether this ticket is suspected of carrying a prompt injection.
+     *
+     * **No pre-scan exists yet.** It lands Day 7. Today the column defaults to
+     * `false` and its only writer is `src/db/seed.ts`, which hand-sets it on
+     * the one adversarial fixture. Described here in the future tense on
+     * purpose: this comment previously said the flag was "set by the heuristic
+     * pre-scan", which read as a shipped control and was not one.
+     */
     suspectedInjection: boolean("suspected_injection").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -305,13 +354,31 @@ export const sops = pgTable(
     slug: text("slug").notNull(),
     title: text("title").notNull(),
     /**
-     * Intentionally has no FK constraint, unlike every other relationship
-     * column in this schema. `sops` and `sop_versions` are mutually
-     * referential (sop_versions.sop_id → sops.id, and this pointing back), so
-     * a real FK needs a deferred constraint added after both tables exist.
-     * The invariant — that this points at a sop_version belonging to the same
-     * sop_id and workspace_id — is enforced in application code, not the
-     * database. Revisit when Day 4's SOP editor starts writing here.
+     * Has no FK constraint today, unlike every other relationship column in
+     * this schema — but *not* because one is impossible. An earlier version of
+     * this comment claimed a deferred constraint was required; that is wrong,
+     * and was disproved against this project's own Postgres.
+     *
+     * The mutual reference (sop_versions.sop_id → sops.id, and this pointing
+     * back) is not an insert-time cycle, because this column is nullable:
+     * insert the sop with NULL, insert the version, then UPDATE the pointer.
+     * A *composite* FK additionally enforces the real invariant — that the
+     * target version belongs to this same sop — which a single-column FK
+     * cannot express:
+     *
+     *   CREATE UNIQUE INDEX ON sop_versions (id, sop_id);
+     *   ALTER TABLE sops ADD CONSTRAINT sops_active_version_fk
+     *     FOREIGN KEY (active_version_id, id) REFERENCES sop_versions (id, sop_id)
+     *     ON DELETE SET NULL (active_version_id);
+     *
+     * Verified in a rolled-back transaction: created without deferral, the
+     * three-step insert order succeeds, and a pointer at another sop's version
+     * is rejected. Two traps if you add it — the PG15+ column-list form of
+     * `SET NULL` is required (plain `SET NULL` also nulls `sops.id` and fails
+     * the not-null constraint), and `seed.ts` sets this before inserting the
+     * version, so it needs the three-step reorder. Left off until Day 4's SOP
+     * editor is the thing writing here, since a drifted pointer breaks prompt
+     * assembly loudly rather than silently.
      */
     activeVersionId: uuid("active_version_id"),
     createdAt: timestamp("created_at", { withTimezone: true })
@@ -379,8 +446,19 @@ export const agentRuns = pgTable(
      * tool pauses the run. /api/agent/resume reconstructs the loop from this
      * across a separate serverless invocation. This field is the reason the
      * loop is hand-rolled rather than delegated to an SDK tool runner.
+     *
+     * **`text`, not `jsonb`, deliberately.** Postgres `jsonb` rejects a NUL
+     * escape outright (`unsupported Unicode escape sequence`), and
+     * `JSON.stringify` emits exactly that for a NUL anywhere in the array — a
+     * ticket body pasted from a binary file is enough. The usual fix, sanitise
+     * before writing, is unavailable *here*: replaying a paused turn requires
+     * passing thinking blocks back byte-identical, so editing the payload is
+     * precisely what the resume contract forbids. This column is a replay
+     * buffer, never queried by content; `text` round-trips it exactly.
+     * (`run_spans.input/output` and `audit_log.before/after` stay jsonb —
+     * those are display and audit data, so stripping NULs there is fine.)
      */
-    serializedMessages: jsonb("serialized_messages"),
+    serializedMessages: text("serialized_messages"),
     iterations: integer("iterations").notNull().default(0),
     inputTokens: integer("input_tokens").notNull().default(0),
     outputTokens: integer("output_tokens").notNull().default(0),
@@ -402,6 +480,7 @@ export const agentRuns = pgTable(
     index("agent_runs_workspace_started_idx").on(t.workspaceId, t.startedAt),
     index("agent_runs_ticket_idx").on(t.ticketId),
     index("agent_runs_status_idx").on(t.status),
+    costSane("agent_runs_cost_usd_sane", t.costUsd),
   ],
 );
 
@@ -434,7 +513,10 @@ export const runSpans = pgTable(
       .defaultNow(),
     endedAt: timestamp("ended_at", { withTimezone: true }),
   },
-  (t) => [uniqueIndex("run_spans_run_seq_idx").on(t.runId, t.seq)],
+  (t) => [
+    uniqueIndex("run_spans_run_seq_idx").on(t.runId, t.seq),
+    costSane("run_spans_cost_usd_sane", t.costUsd),
+  ],
 );
 
 /* -------------------------------------------------------------------------- */
@@ -511,6 +593,18 @@ export const auditLog = pgTable(
 /* Eval lab                                                                   */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * **Deliberately workspace-independent.** This is the developer's authored
+ * regression suite — one shared set of cases, not per-visitor data — so unlike
+ * every other table here it carries no `workspaceId`, and
+ * `eval_cases_slug_idx` is globally unique by design rather than by oversight.
+ * A case is checked in alongside the prompts it guards; a demo sandbox being
+ * TTL-cleaned must never take the suite with it.
+ *
+ * `eval_runs` and `eval_results` are the opposite: they are *executions* of
+ * this suite against one workspace's SOP version, so they are workspace-scoped
+ * and cascade with it.
+ */
 export const evalCases = pgTable(
   "eval_cases",
   {
@@ -536,6 +630,16 @@ export const evalRuns = pgTable(
   "eval_runs",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    /**
+     * Stays `set null`: a SOP version can be deleted independently of its
+     * workspace, and a run record with a null pointer is still worth keeping.
+     * The workspace-delete path is covered by `workspaceId`'s cascade above —
+     * without it, dropping a workspace left these rows alive and attributable
+     * to nothing.
+     */
     sopVersionId: uuid("sop_version_id").references(() => sopVersions.id, {
       onDelete: "set null",
     }),
@@ -554,13 +658,26 @@ export const evalRuns = pgTable(
       .defaultNow(),
     endedAt: timestamp("ended_at", { withTimezone: true }),
   },
-  (t) => [index("eval_runs_started_idx").on(t.startedAt)],
+  (t) => [
+    index("eval_runs_workspace_started_idx").on(t.workspaceId, t.startedAt),
+    /**
+     * Kept alongside the composite above, which cannot serve a workspace-less
+     * scan: the composite's leading column is `workspace_id`, so a global
+     * "runs since <date>" sweep (cross-workspace analytics, CI history) would
+     * fall back to a seq scan without this.
+     */
+    index("eval_runs_started_idx").on(t.startedAt),
+    costSane("eval_runs_cost_usd_sane", t.costUsd),
+  ],
 );
 
 export const evalResults = pgTable(
   "eval_results",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
     evalRunId: uuid("eval_run_id")
       .notNull()
       .references(() => evalRuns.id, { onDelete: "cascade" }),
@@ -584,5 +701,14 @@ export const evalResults = pgTable(
   },
   (t) => [
     uniqueIndex("eval_results_run_case_idx").on(t.evalRunId, t.evalCaseId),
+    /**
+     * Plain `(workspaceId)` rather than a composite, deliberately: every read
+     * of this table goes through `evalRunId`, which already leads the unique
+     * index above, so there is no second column worth pairing. This exists to
+     * scope a query without joining `eval_runs`, and to back the workspace
+     * cascade with an index instead of a seq scan on every TTL cleanup.
+     */
+    index("eval_results_workspace_idx").on(t.workspaceId),
+    costSane("eval_results_cost_usd_sane", t.costUsd),
   ],
 );

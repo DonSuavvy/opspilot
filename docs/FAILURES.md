@@ -4,9 +4,25 @@ A dated log of what broke, how it was caught, and what changed.
 
 This file exists because the interesting question about any codebase is not
 whether it works — it's what happened on the way to working, and whether anyone
-was looking. Every entry below is a real defect in this repository. Most were
-caught before they could matter. One was caught only because the code was
-reviewed by someone other than the person who wrote it.
+was looking.
+
+Every entry below is a real problem this repository had. Most are defects; two
+are not, and are labelled as such — entry 4 is an API trap caught during
+implementation, and entry 7 is a process-evidence gap whose own verdict was
+"unverifiable, not false." Calling those defects would be the same kind of
+overclaim the rest of this file exists to record. Most were caught before they
+could matter. Several were caught only because the code was reviewed by someone
+other than the person who wrote it.
+
+Two things this file does **not** claim. **Entry 14 is open** — a live defect,
+left that way because it is a comment overstating what its code does rather than
+anything that changes a decision. Entry 13 was held open for the same discipline
+and is now closed: every available fix was a contract change, so it waited for an
+owner's decision instead of taking whichever option was cheapest to type. And
+entries 9 and 10 carry dated corrections: a later pass found that both had
+described their own fixes inaccurately. Those corrections are marked in place
+rather than edited away, because a defect log that quietly rewrites itself is
+worth about as much as a green suite that never had a failing test.
 
 ## How this repo is checked
 
@@ -277,3 +293,599 @@ table was scrupulously accurate; only the prose section overclaimed. Same for a
 **Lesson:** the honest-sounding sections are the ones to re-read. An accurate
 status table sitting above inaccurate prose is worse than either alone, because
 the accurate part earns trust the inaccurate part then spends.
+
+---
+
+## 9. The policy engine failed open on a malformed policy — 2026-08-11
+
+**Severity: critical.** The single worst defect found in this repository.
+
+**Caught by:** a second independent review round, on code that had already been
+through one adversarial pass and had 79 passing tests.
+
+`evaluateRefund` takes `policy: PolicyConfig`. That type is erased at build
+time, and the value it describes arrives at runtime from
+`sop_versions.policy_config` — a `jsonb` blob written by the SOP editor, which
+is the product's headline feature. Nothing parsed it.
+
+Every rule in the engine is a `>` comparison, and **`x > undefined` is
+`false`**. So a missing key did not throw. It silently removed that limit:
+
+```
+invoice: 400 days old, requesting $99,999.99 | hard cap: $500.00
+A. well-formed DEFAULT_POLICY     outcome=deny      approved=$0.00       violations=[outside_refund_window,exceeds_max_refund]
+B. refund:{} (all keys missing)   outcome=approve   approved=$99999.99   violations=[]
+F. windowDays missing only        outcome=deny      approved=$0.00       violations=[exceeds_max_refund]
+```
+
+Case B is a $99,999.99 refund on a year-old invoice, approved with **zero
+violations** and no human in the loop. Case F shows the deletion is per-key, so
+a single typo is enough. A typo'd ceiling was worse than useless: it didn't deny
+the refund, it routed it to the approval queue as a *legitimate* pending
+request.
+
+**Why it is the worst one:** this module is the code half of "never trust the
+model." It exists so that a model's proposal is revalidated by something that
+cannot be talked out of it. It was revalidating against a blob it trusted
+completely.
+
+**Fix:** `policyConfigSchema` — a Zod schema parsed **at the point of decision,
+not only at the boundary**. The first attempt validated only in a
+`parsePolicyConfig` helper that callers were expected to call; re-running the
+original probe showed `evaluateRefund` still approving $99,999.99, because a
+guarantee nothing is obliged to invoke is documentation, not enforcement. That
+is the same "claimed but not enforced" pattern this very file catalogues, so the
+parse moved inside both `evaluateRefund` and `evaluateEscalation`.
+
+**Correction — 2026-08-12.** This entry originally continued: *"`.strict()` is
+what catches the misspelling — without it a typo'd key is dropped as unknown and
+the real key reads as missing, which is the identical silent failure."* **That
+mechanism cannot occur.** A misspelling leaves the correct key absent, and an
+absent required key is rejected with or without `.strict()`. Measured against
+the installed Zod 4.4.3:
+
+```
+typo: maxRefundCent (missing final s)
+  .strict()        REJECTED (invalid_type: expected number, received undefined
+                             | unrecognized_keys: "maxRefundCent")
+  without strict   REJECTED (invalid_type: expected number, received undefined)
+all 4 correct keys PLUS one bogus extra key
+  .strict()        REJECTED (unrecognized_keys: "maxRefundDollars")
+  without strict   ACCEPTED                            <-- the real difference
+```
+
+`.strict()` buys something narrower and still worth having: it rejects an
+**extra** key alongside an otherwise-complete, valid policy. That is the Day-4
+SOP editor writing a limit this engine does not implement — without it the key
+is dropped in silence and the operator believes a rule is enforced that no line
+of code reads. The code comment carried the same wrong explanation and was
+corrected with it.
+
+**The class was only half-closed — 2026-08-12.** The argument above applies
+word for word to `RefundEvaluationInput`, and this entry made it without
+noticing. That interface is erased at build time too, its `invoice` arrives from
+a Drizzle row, and from Day 2 its fields carry model-proposed values. Nothing
+parsed it either. `new Date(undefined)` is an Invalid Date — a real `Date`
+instance — so it survived normalisation and poisoned `ageDays`, and NaN is false
+against both `< 0` and `> windowDays`, skipping the future-dated guard **and**
+the window check at once:
+
+```
+paidAt = new Date(undefined)   before: approve $50.00 on a 400-day-old invoice, violations=[]
+amountCents = NaN              before: approve $30.00 against a $20.00 invoice, violations=[]
+```
+
+Under $100 those auto-approved with no human; between $100 and $500 they reached
+the approval queue with an empty violations list, which is the trap this entry
+describes two paragraphs above. Fixed in `2273ae1`: invoice fields now yield a
+single `invalid_invoice_data` violation rather than throwing, because this
+engine's job is to report *every* violation so the trace viewer can show why a
+refund was refused, and a `ZodError` shows the reader nothing.
+
+**Lesson:** a TypeScript interface is a claim about a value, not a check on it.
+Wherever a typed value crosses a runtime boundary — a database, a request body,
+a file — the type is a comment until something parses it. And "I added a
+validator" is not the same as "the thing is validated." Nor is naming a bug
+class the same as checking every place it applies: this entry described the
+class precisely and then shipped with the second instance still open, one
+argument to the left of the one it fixed.
+
+---
+
+## 10. The safety net from entry 1 had no test that could fail — 2026-08-11
+
+**Caught by:** mutation testing during the second review, not by reading.
+
+Entry 1's fix added `assertConsistent()` and claimed "one assertion catches this
+whole bug class." Deleting the call entirely left the suite green:
+
+```
+  SURVIVED  remove assertConsistent() call entirely   <-- TEST HOLE
+  SURVIVED  assertConsistent: never report orphans    <-- TEST HOLE
+```
+
+The test that *looked* like coverage — "never lets required reference a property
+that does not exist" — asserted a property the fixed sanitizer already
+guarantees on its own, so it passed with or without the check. That is exactly
+the "asserting on the wrong cell" pattern from entry 5, recurring **inside the
+fix for entry 1**.
+
+**Fix:** tests that feed `assertConsistent` an inconsistency the sanitizer
+cannot produce, via Zod's `.meta()` raw-schema injection. Both mutations are now
+killed. Fourteen further deliberate reversions were then run across the round's
+fixes, and all fourteen were caught.
+
+**Correction — 2026-08-12.** That last sentence originally read *"the whole
+suite was then mutation-tested: fourteen deliberate reversions of every fix in
+this round, fourteen caught."* Fourteen reversions that all die prove those
+fourteen lines are covered. They are not a statement about every fix, and the
+sentence was written as though they were. A later pass ran fourteen **different**
+reversions on `src/policy/refund.ts` alone: **11 killed, 3 survived**, all three
+being the `.strict()` calls this file describes in entry 9. They are pinned now
+— removing each in turn fails exactly one named test. A separate 6 reversions on
+`src/db/client.ts` were all killed.
+
+**Lesson:** a test that passes is not evidence of coverage. The only way to know
+an assertion is load-bearing is to break the thing it guards and watch it fail.
+A regression test written in the same sitting as its fix is especially suspect,
+because it was written by someone who already knew the answer. And a kill rate
+describes the mutants somebody chose: when the same party picks the mutants and
+reports the score, the number is evidence about the picker as much as the suite.
+
+---
+
+## 11. Three smaller ones from the same pass — 2026-08-11
+
+**The regression net contradicted the fix it was protecting.** `keywordsIn()` in
+`tools.test.ts` collected every key at every depth — *position-blind*, the exact
+bug entry 1 was about. A tool field legitimately named `pattern` failed it,
+while `registry.test.ts:145` asserts that same field must survive. Two test
+files demanding opposite things is worse than either being wrong alone, because
+the first one to fail sends you to the wrong file. Reproduced by adding a
+`pattern` field to `search_kb`: `search_kb leaked "pattern" into its wire
+schema` — the sanitizer was right, the test was wrong.
+
+**TLS was selected by substring.** `getDb()` used
+`url.includes("localhost")` over the *whole* connection string, so a password,
+username or database name containing `localhost` silently disabled encryption
+against a remote host. It failed open, in the one direction that loses
+confidentiality rather than availability. Now decided from the parsed hostname,
+which also makes a malformed `DATABASE_URL` fail at `getDb()` rather than on the
+first query.
+
+**Two boundary bugs the engine's own comments already promised.** A future-dated
+`paidAt` produced a negative age, which read as inside every refund window —
+unlimited refunds from clock skew or a mis-mapped column. And `settled` tested
+`paidAt !== null` while the age calculation used truthiness; they disagree on
+`undefined`, which a Drizzle row or a JSON round-trip can produce, so an invoice
+with no payment date at all came back **approved**. A nullable field now gets
+exactly one null test.
+
+**Lesson:** the nullable-enum class from entry 5 is not one bug, it's a habit.
+Two comparisons against the same nullable field, written minutes apart with
+different idioms, will eventually disagree.
+
+---
+
+## 12. A comment that was confidently wrong about Postgres — 2026-08-11
+
+**Caught by:** a reviewer that refused to take the comment at face value and
+tested the claim against the running database.
+
+`sops.active_version_id` carried a comment explaining that a real foreign key
+was impossible without a deferred constraint, because `sops` and `sop_versions`
+are mutually referential. Both halves were wrong. The column is nullable, so
+there is no insert-time cycle, and a *composite* FK enforces more than the
+single-column one could — including that the target version belongs to this same
+SOP. Verified in a rolled-back transaction on this project's own PG17:
+
+```
+ALTER TABLE
+OK: three-step insert order works with a NON-deferred FK
+ERROR: insert or update on table "sops" violates foreign key constraint "sops_active_version_fk"
+```
+
+**Impact status: not a live bug.** No FK was missing that should have been there
+— the constraint is still deliberately deferred to Day 4. What was wrong was the
+*stated reason*.
+
+**Fix:** the comment now carries the working SQL, the two traps that come with it
+(the PG15+ column-list form of `ON DELETE SET NULL`, and the seed's insert
+order), and an honest reason for waiting.
+
+**Lesson:** for a repository read by engineers, a confidently wrong explanation
+costs more than a missing feature. The feature is a to-do; the explanation is
+evidence about whether the author knows the system. Comments asserting what a
+database *cannot* do should be tested exactly like code.
+
+---
+
+## 13. The escalation engine has entry 9's bug, pointing the other way — 2026-08-12
+
+**Severity: medium (latent). Status: FIXED — after an owner decision.**
+
+**Caught by:** fixing entry 9's other half. Once `evaluateRefund` was made to
+parse its own input, the same question was asked of `evaluateEscalation` and it
+had not been.
+
+`evaluateEscalation` parses its `policy` argument and **not** its input. The
+churn-risk rule reads:
+
+```ts
+input.customerLifetimeValueCents >= rules.churnRiskLtvCents && dissatisfied
+```
+
+`customerLifetimeValueCents` is typed `number`, which is erased at build time;
+the value arrives from a Drizzle row. `NaN >= x` and `undefined >= x` are both
+`false`, so a missing or unparseable lifetime value does not throw and does not
+escalate — it silently drops `churn_risk`. **A dissatisfied $5,000 customer gets
+handled as routine.**
+
+This is entry 9's failure mode in the opposite direction. There, a deleted limit
+made the engine *over*-permissive and approved refunds it should have denied.
+Here a deleted limit makes it *under*-escalate, so the failure is invisible: no
+violation, no error, one fewer row in a queue nobody is counting. Silent
+under-escalation is the harder of the two to notice in production.
+
+**Why it was held open first.** Every fix is a contract change, and picking one
+by default is how a headline metric ends up meaning something nobody agreed to:
+
+- a new `EscalationReason` for unknown LTV changes the enum the eval scorers key
+  off;
+- throwing contradicts this engine's stated job of returning exhaustive reasons
+  rather than failing;
+- treating unknown LTV as a churn risk inflates escalation rate, which is a
+  Mission Control KPI — the exact metric entry 5's bug inflated.
+
+It was recorded as an open defect with a named owner decision rather than closed
+with whichever option was cheapest to type. The owner chose the first.
+
+**Fix:** a new `unknown_customer_value` reason. An unreadable lifetime value now
+escalates with a stated cause instead of vanishing, and never claims a churn risk
+that was not established — so the churn-risk rate stays a meaningful number. The
+rule is scoped to `dissatisfied`, because a satisfied customer is not a churn
+risk at any lifetime value: there an unknown LTV decides nothing, and escalating
+on it would inflate the very KPI the third option was rejected for.
+
+Reproduced before the fix and re-run after, threshold `churnRiskLtvCents` =
+250000:
+
+```
+                                        BEFORE                          AFTER
+dissatisfied, ltv $5,000    escalate=true  [churn_risk]         (unchanged)
+ltv = NaN, dissatisfied     escalate=false []                   escalate=true  [unknown_customer_value]
+ltv = undefined             escalate=false []                   escalate=true  [unknown_customer_value]
+ltv = NaN, refund denied    escalate=true  [refund_denied…]     escalate=true  [refund_denied…,unknown_customer_value]
+ltv = NaN but satisfied     escalate=false []                   (unchanged — must not inflate the rate)
+```
+
+Test-first: the two tests asserting the new behaviour failed before it existed,
+and disabling the guard afterwards fails exactly those two. The two guard tests
+against over-firing passed from the start, which is correct — they pin a
+behaviour that must survive the change rather than one being added.
+
+**Lesson:** when a bug class is found in one function, the next move is to grep
+for its siblings, not to fix the instance. Entry 9 named the class and shipped
+with two more instances live — one in its own module's other exported function.
+
+---
+
+## 14. A guard that catches less than its comment claims — 2026-08-12
+
+**Severity: low (dev papercut).**
+
+**Caught by:** testing the claim in a comment instead of reading it — the same
+move that produced entry 12.
+
+`src/db/client.ts` says its `resolveSsl` throw "surfaces a bad `DATABASE_URL`
+here rather than on the first query several layers away." It catches less than
+that. Drop the scheme — one easy way to mistype a connection string — and
+`new URL()` parses it happily:
+
+```
+input          : "localhost:5434/opspilot"
+did NOT throw  : protocol=localhost: hostname=""
+resolveSsl()   : { rejectUnauthorized: true }   <- TLS
+```
+
+`localhost:` is read as the *protocol* and the hostname is empty, so the string
+is not malformed as far as `URL` is concerned. The empty hostname misses
+`LOCAL_HOSTS`, TLS is demanded, and the failure lands on connect — precisely
+where the comment promises it will not.
+
+**Impact status: not a security bug.** It fails closed. An empty hostname is not
+a loopback host, so the mistake produces TLS-against-nothing and a confusing
+connection error, never a silent plaintext connection to a remote host. That is
+the direction entry 11's TLS fix cared about, and it still holds.
+
+**Why record it at all:** the code is fine; the *comment* overstates what the
+code does, and this repository's own entry 12 argues that a confidently wrong
+explanation costs more than a missing feature. A reader who trusts this comment
+will not check their connection string when a query fails.
+
+**Lesson:** `new URL()` is a parser, not a validator. It accepts any
+`scheme:opaque` string, so "it parsed" means "it was URL-shaped," not "it is the
+kind of URL you wanted."
+
+---
+
+## 15. A perfectly valid policy that authorised $999,999.99 — 2026-08-13
+
+**Severity: critical.** Reachable from the SOP editor, by an operator doing
+nothing wrong.
+
+**Caught by:** the Round 4 review pass.
+
+Entry 9 fixed this engine failing open on a *malformed* policy. This is the same
+column of the same table, one cell over: a policy that is entirely well-formed.
+
+The only bound on the refund limits was relative — `maxAutoApproveCents <=
+maxRefundCents`. Set both to `99_999_999` and it is satisfied, every required
+key is present, every type is right, nothing is misspelled, no extra keys, no
+NaN. Every test entry 9 added still passes. `evaluateRefund` then approves
+$999,999.99 with `violations: []`.
+
+**A consistency check is not a bound.** `a <= b` says the two numbers agree with
+each other, not that either one is sane, and it holds at any magnitude.
+
+The second half was worse, because it needed no unusual number at all:
+
+```
+escalation: { escalateOnSuspectedInjection: false, ... }
+```
+
+`escalateOnSuspectedInjection` was an ordinary `z.boolean()`. So "escalate when
+the ticket looks like a prompt injection" was a preference, switchable from a
+text field with no code change, no review, and no failing test. Combined with
+the other two toggles, a ticket with injection flagged, an unknown customer, and
+a refund denied by policy returned:
+
+```
+{ escalate: false, reasons: [] }
+```
+
+Three independent reasons to involve a human, and the engine reported none of
+them.
+
+**Fix.** Three absolute ceilings, derived from the data rather than picked: the
+largest invoice Beacon Analytics issues is one Scale month, **$299**
+(`max(amount_cents)` = 29900 across all 54 rows), so the $5,000 hard ceiling is
+~17× the largest legitimate refund and constrains no real case — while sitting
+strictly below the **$10,000** the adversarial ticket demands. Demo arc step 4
+must not be defeatable by editing a number.
+
+`escalateOnSuspectedInjection` becomes `z.literal(true)` — pinned, not deleted,
+because the key is already persisted in every stored `policy_config` and the
+object is `.strict()`, so removing it would make every existing row unparseable
+and take the engine down on read.
+
+One existing test asserted the exact capability being removed. It was
+**inverted, not deleted or worked around** — a test that encodes a behaviour you
+have decided is wrong is evidence about the old design, and quietly dropping it
+loses the record that it was ever believed.
+
+**Lesson:** hardening against malformed input and hardening against *harmful*
+input are different jobs. The second one is the one an attacker — or a tired
+operator — actually reaches.
+
+---
+
+## 16. Importing the seed ran the seed — 2026-08-13
+
+**Caught by:** running a failing test. Not by any of four review passes.
+
+Round 4 flagged that seed ids had no workspace component. Writing the RED test
+for that — a pure test, of a pure function — produced this:
+
+```
+stdout | src/db/seed.test.ts
+◇ injected env (4) from .env.local
+Seeding Beacon Analytics...
+```
+
+`seed()` was invoked at module scope, so `import { … } from "./seed"` *executed*
+it. A unit test run read `.env.local` and started writing to Postgres.
+
+CLAUDE.md states the rule this breaks: **`npm test` must never require a
+database.** It had been true only because no test had ever imported that module.
+On any CI machine with `DATABASE_URL` set, the first test that did would have
+silently rewritten a database mid-suite.
+
+**What made it invisible:** nothing was wrong with the file in isolation. It ran
+correctly as a script, which is all anyone had ever asked it to do. The defect
+existed only in a use case that had not happened yet — which is exactly the kind
+a review reading for correctness will not find, because the code is correct for
+what it currently does.
+
+**Fix:** `src/db/seed.ts` is a library exporting `seedWorkspace(db, {slug,
+expiresAt, now})`; everything with a side effect — dotenv, the pool, printing,
+the exit code — moved to `scripts/seed.ts`, matching the existing
+`scripts/verify-*.ts` convention.
+
+The underlying finding was real too, and confirmed against the live database
+before being fixed:
+
+```
+derived seedId("workspace:demo") = 03153a0e-1643-442f-b9c4-7186c15ffea3
+select id from workspaces        = 03153a0e-1643-442f-b9c4-7186c15ffea3
+```
+
+Every workspace derived identical primary keys, so the second sandbox to be
+seeded would die on `customers_pkey` — blocking Day 8's per-visitor sandboxes,
+which are themselves the permanent fix for the seed's ~8-day shelf life.
+
+The slug is **length-prefixed** into the digest rather than concatenated:
+`slug + key` maps `("ab", "c")` and `("a", "bc")` to one hash, and a delimiter
+only moves the problem to slugs that contain it. Both wrong fixes are pinned by
+mutation tests, because both are what a reasonable person writes first.
+
+**Lesson:** "it works when you run it" and "it is safe to import" are different
+properties. A module that does work at import time has an API surface nobody
+declared.
+
+---
+
+## 17. The obvious constraint would not have caught the thing it was for — 2026-08-13
+
+**Caught by:** Round 4, and then by refusing to write the constraint from
+memory.
+
+No `CHECK` existed on any of the four `cost_usd` columns. The natural one to add
+is `CHECK (cost_usd >= 0)`. It does not work:
+
+```
+'NaN'::numeric >= 0               -> true
+CHECK (c >= 0)                    -> INSERT 'NaN' SUCCEEDS
+CHECK (c >= 0 AND c <= 1000000)   -> INSERT 'NaN' rejected
+```
+
+Postgres `numeric` accepts the literal `'NaN'` and orders it **above** every
+other numeric value. The lower bound admits it; the **upper** bound is the half
+that does the work. (The probe above used `1000000`; the shipped ceiling is
+tighter at `10000`. Any finite bound excludes NaN — $10,000 is already absurd
+beside a ~$0.06 Haiku run, and this is a data-integrity guard, not a budget
+control.)
+
+One NaN turns every `SUM` over the column into NaN — so *cost per resolved
+ticket*, the managed-services KPI Mission Control is built around, would display
+nothing rather than something visibly wrong. The silent direction again.
+
+**Then the fix itself was wrong, and the tests could not tell.** The first
+generated migration read:
+
+```sql
+ALTER TABLE "agent_runs" ADD CONSTRAINT "agent_runs_cost_usd_sane"
+  CHECK ("agent_runs"."cost_usd" >= 0 AND "agent_runs"."cost_usd" <= $1);
+```
+
+A plain `${MAX_COST_USD}` inside drizzle's `sql` template becomes a **bind
+parameter**, and drizzle-kit wrote it into the migration verbatim. `$1` is
+invalid in DDL; it would have failed the moment anyone applied it. `npm run
+typecheck`, `npm run lint` and all 191 tests were green with that file on disk.
+It was caught by reading the generated SQL — the artifact, not the source.
+
+**Fix:** `sql.raw`, and the migration validated in a rolled-back transaction
+against the real database, proving both directions:
+
+```
+INSERT cost_usd='NaN'    -> ERROR: violates check constraint "agent_runs_cost_usd_sane"
+INSERT cost_usd='0.0612' -> PASS: a real cost of 0.061200 is accepted
+```
+
+Generated and validated; **not applied**, consistent with migrations 0001 and
+0002.
+
+**Lesson:** two of them. A type's comparison semantics are part of its
+behaviour — `>= 0` means something different for `numeric` than for `integer`.
+And a code generator's *output* is the deliverable; a green suite says nothing
+about a file no test reads.
+
+---
+
+## 18. A prototype chain in the safety net — 2026-08-13
+
+**Caught by:** Round 4.
+
+Entry 1 added `assertConsistent`, whose claim was that "one assertion catches
+this whole bug class". It asked:
+
+```ts
+(name) => !(name in properties)
+```
+
+`in` walks the prototype chain. `"toString" in {}` is `true`. So a schema whose
+`required` names `toString`, `constructor`, `valueOf`, `hasOwnProperty` or
+`__proto__` — with no such property — passed the check whose entire purpose is
+catching exactly that.
+
+**The same family as entry 1, one level up.** There, a field named `pattern` was
+destroyed because a *keyword* blocklist was applied to *author identifiers*.
+Here, an orphaned field was missed because a JavaScript operator that knows
+about inherited members was applied to author identifiers. Both times the bug is
+treating a name chosen by a tool author as though it meant something to the
+language.
+
+`Object.hasOwn` is the operator that means what the check meant. The same idiom
+was also present in a *test* asserting no required entry is orphaned — a test
+carrying the bug it checks for — and was corrected too.
+
+**Lesson:** entry 1's lesson was "a transform that can produce something
+unusable should report, not return." Its own safety net then shipped with a
+member of the same bug family. Writing the fix does not immunise you against the
+category; the category is a habit of thought, and it recurs.
+
+## 19. 3.2KB of schema compiled to a 330MB grammar — 2026-08-13
+
+**Caught by:** the Day 2 end-to-end gate, on its first live run. Nothing else
+could have caught it.
+
+The nine-tool registry has been strict-legal since Day 1, and 49 registry tests
+say so: closed objects at every depth, explicit `required`, every keyword
+Anthropic's `strict: true` rejects stripped before the schema goes on the wire.
+All of that is correct and none of it changed. The first real call still failed:
+
+```
+400 Compiled grammar size (329.9MB) exceeds maximum allowed size (300MB).
+Simplify your JSON schema to reduce grammar complexity.
+```
+
+The error's own advice is a dead end. The whole tool block is **3,241 bytes**,
+and the largest single schema is 658. Here is `get_customer` in full:
+
+```json
+{ "type": "object",
+  "properties": { "query": { "type": "string", "description": "…" } },
+  "required": ["query"],
+  "additionalProperties": false }
+```
+
+There is no complexity in that to simplify. So the cost is not in the schema; it
+is in the grammar compiled *from* the schema, and the interesting question is
+what makes it grow.
+
+**Probed rather than reasoned about** (`scripts/probe-grammar.ts`; each
+rejection takes ~68s, because the compiler grinds before giving up):
+
+```
+each tool alone           -> all nine compile
+cumulative 1..8 tools     -> compiles
+cumulative 9 tools        -> FAIL 329.9MB
+all nine, strict removed  -> compiles
+```
+
+Then, to separate "nine tools" from "one bad tool", two different eight-tool
+subsets: dropping `search_kb` **still fails at exactly 329.9MB**, dropping
+`draft_reply` passes. So it accumulates across the set, the free-text tools
+dominate, and no individual schema is at fault. Note the margin — 329.9 against
+300 is 10% over. This was always going to happen at some tool count; nine is
+just where it landed.
+
+**Why dropping a tool is the wrong fix.** It works today and breaks again at the
+tenth, and PLAN.md's nine are all load-bearing — the safety-class demo needs
+both confirm-write tools, and the eval suite keys off `resolve_ticket`.
+
+**The fix is to stop asking for constrained decoding.** `strict` moved from a
+property of the schema to a decision of the caller: `toAnthropicTools()` still
+defaults to requesting it, `toAnthropicTools({ strict: false })` omits it, and
+the emitted schema is byte-identical either way — asserted, because the
+registry's guarantee is that the schema *is* strict-legal, not that anyone asks
+for it. The agent loop defaults to off, since the only provider this project
+runs on cannot do it.
+
+**Nothing was weakened, and that is not a consolation — it is the design.**
+CLAUDE.md's rule has always been "the wire schema constrains the *model*; Zod
+constrains the *code*." `runAgentLoop` parses every tool call with the tool's
+own Zod schema before the handler sees it and returns an `is_error` result on
+failure, which is separately tested. Strict was the belt. Zod is the braces, and
+it was always the load-bearing one — which is why losing strict cost nothing but
+a config flag.
+
+**Lesson:** a boot-time validator can only check the contract it was told about.
+Ours proved the schemas were strict-*legal* and was right; nobody had thought to
+ask whether they were strict-*affordable*, because that property does not exist
+until a real provider compiles them. Two consequences worth keeping. Gates that
+run the real thing find a category of defect that no amount of unit testing
+reaches — this one survived four review rounds and 320 green tests. And when a
+provider's error message tells you to simplify something that is already
+minimal, disbelieve the message and go measure: the advice was aimed at a cause
+that was not ours.

@@ -34,7 +34,7 @@ that arc better gets cut first:
 | DB | Postgres via Drizzle ORM — local Docker for dev, Neon for deploy |
 | Validation | Zod 4 (native `z.toJSONSchema()`) |
 | Tests | Vitest, node environment, config in `vitest.config.mts` |
-| Agent | Raw `@anthropic-ai/sdk` with a hand-rolled tool loop |
+| Agent | Hand-rolled tool loop over a provider adapter (`@anthropic-ai/bedrock-sdk` on covara, `@anthropic-ai/sdk` as fallback) |
 
 **No LangChain or agent frameworks.** This is deliberate and load-bearing for
 the interview story: pause/resume across serverless invocations requires
@@ -115,6 +115,19 @@ Each of these cost real time. Don't rediscover them.
   string constraints. `toStrictJsonSchema()` in `src/agent/registry.ts` strips
   them at every depth. The Zod schema keeps enforcing them at parse time, so
   stripping narrows what the *model* is told, never what the *code* accepts.
+- **`strict: true` does not scale to nine tools, and the error blames the wrong
+  thing.** Bedrock rejects the full tool block with `400 Compiled grammar size
+  (329.9MB) exceeds maximum allowed size (300MB). Simplify your JSON schema` —
+  from **3.2KB** of schema whose largest member is 658 bytes. There is nothing
+  to simplify: the cost is in the compiled grammar, and it accumulates across
+  the set. Measured with `npx tsx scripts/probe-grammar.ts`: every tool alone
+  compiles, any eight compile, nine do not, and all nine compile with `strict`
+  removed. Dropping a tool works today and breaks at the tenth. So `strict` is
+  now the caller's choice — `toAnthropicTools({ strict: false })` — and the
+  agent loop defaults it **off**, because the provider this runs on cannot take
+  it. Nothing is weakened: the loop parses every call with the tool's own Zod
+  schema before the handler, which was always the real guard. Re-test if the
+  tool set shrinks or a provider raises the cap. Full write-up: FAILURES 19.
 - **`getDb()` is lazy on purpose.** A module-scope pool would make every module
   that transitively imports the schema throw at *import* time when
   `DATABASE_URL` is unset, taking down vitest, tsc and CI for unrelated reasons.
@@ -133,8 +146,46 @@ Each of these cost real time. Don't rediscover them.
   silently not cache. Either pad the constitution past 4096 or display "below
   cache threshold" honestly — never claim a hit that didn't happen.
 - **`stop_reason: "refusal"` must be handled before reading `content`.** Opus 5
-  can decline via safety classifiers; `stop_details` is populated *only* on a
-  refusal and is null otherwise.
+  can decline via safety classifiers. `stop_details` is populated *only* on a
+  refusal and is null for every other stop reason — but **branch on
+  `stop_reason`, never on `stop_details`**: it can be null *on* a refusal too,
+  and `explanation` is not guaranteed. `if (stop_details)` is the wrong test and
+  will miss refusals.
+- **Bedrock is a different client *and* different model ids.** Use
+  `AnthropicBedrock`, not `AnthropicBedrockMantle` — Mantle 404s every model on
+  the covara account. The two spell the same field differently
+  (`awsSecretKey` vs `awsSecretAccessKey`) and mixing them throws "must be
+  provided together", which reads like a *missing* variable. Model ids carry
+  non-uniform suffixes that cannot be inferred — haiku needs a date **and** a
+  version, opus a bare `-v1`, sonnet neither — and all need the `global.`
+  prefix, which selects the cross-region inference profile that makes them
+  resolve from `ap-southeast-1` at all. Four plausible guesses 400'd before the
+  right strings came from reading Causa's working config.
+- **Bedrock pricing is unverified and may be ~2x.** AWS prices Claude
+  separately; the only figure retrievable showed a retired model at $6/$30
+  against the first-party $3/$15. `BEDROCK_RATES` carries `verifiedOn: null`,
+  every cost from it is `estimated: true`, and the spend guard charges it at
+  `UNVERIFIED_RATE_SAFETY_FACTOR`. Fix by reading covara's line items in Cost
+  Explorer, then set real rates *and* a `verifiedOn` date — a test fails if you
+  set one without the other.
+- **OPEN — the spend guard is per-run, not per-account.** `spentTodayNanos()`
+  sums `agent_runs.cost_usd`, and `finishRun` is that column's only writer, so
+  a run *in flight* contributes zero to the baseline every other run reads.
+  Two concurrent `POST /api/agent/run` calls therefore each see the same
+  starting figure and each may spend up to the full daily cap; ten concurrent
+  calls, ten times the cap. The in-run accrual added on Day 2 fixes the
+  sequential case *inside* one run and does nothing across runs. Confirmed by
+  inspection, not yet by a concurrent test. This is exactly the "stranger
+  clicking the scenario injector" case `budget.ts` was written for, and it
+  becomes reachable on Day 8 when sandboxes go public — fix before then, by
+  charging spend as it accrues or taking a row lock, not by patching the read.
+- **OPEN — constraint stripping is now gratuitous.** `toStrictJsonSchema`
+  strips `minimum`/`maxLength`/`pattern`/`format` *because `strict: true`
+  rejects them*. With strict off by default (see above), that reason is gone,
+  and the model is now told `amount_cents` is a bare `number` when Zod demands
+  a positive integer. Every strip is a correction the model has to be walked
+  through via an `is_error` round-trip, for no remaining benefit. Make the
+  stripping conditional on the same flag — test-first.
 - **The seed's invoice ages are load-bearing.** `INV-2002` is paid 22 days ago
   precisely so it is inside a 30-day window and outside a 14-day one. If that
   stops being true, demo arc step 2 silently demonstrates nothing.
@@ -142,12 +193,29 @@ Each of these cost real time. Don't rediscover them.
 
 ## Model strategy
 
-| Context | Model |
-|---|---|
-| Public demo | `claude-haiku-4-5` (rate-capped, ~pennies) |
-| Quality mode / Loom | `claude-sonnet-5` or `claude-opus-5` |
-| CI eval runs | `claude-haiku-4-5` |
-| Bake-off | all three |
+Models are named **logically** (`haiku` / `sonnet` / `opus`) everywhere except
+`src/agent/provider.ts`, which maps them to whatever the active provider calls
+them. Never write a wire model id anywhere else.
+
+| Context | Logical model | On Bedrock (covara) — what you actually get |
+|---|---|---|
+| Public demo | `haiku` | Haiku 4.5 ✅ |
+| Quality mode / Loom | `sonnet` / `opus` | **4.6, not 5** — see below |
+| CI eval runs | `haiku` | Haiku 4.5 ✅ |
+| Bake-off | all three | Haiku 4.5 + Sonnet 4.6 + Opus 4.6 |
+
+**The runtime provider is Bedrock, not the first-party API.** OpsPilot runs on
+the `covara` account (345485442040) via `AWS_ANTHROPIC_*` in `.env.local`;
+`ANTHROPIC_API_KEY` is the fallback path and Bedrock wins if both are set.
+That account is **shared with Causa's live Claude generation for a working law
+firm**, which is why `src/agent/budget.ts` exists and why it landed on Day 2
+rather than Day 7 as PLAN.md scheduled. Do not point the public demo at it
+without revisiting that.
+
+**Sonnet 5 and Opus 5 are not available on covara** — both 400 as invalid model
+identifiers (verified 2026-08-13). The demo arc is unaffected because it runs
+Haiku, but PLAN.md's quality-mode and bake-off entries mean 4.6 on this
+account. Pricing is unchanged across that gap, so the rate cards stand.
 
 API notes baked in: no `temperature` on Opus/Sonnet 5; thinking is default-on
 for Opus 5 (omit `thinking`, use `output_config.effort: "low"` for agent runs);
@@ -163,12 +231,25 @@ IDs and API shapes changed in 2025–26; do not code from memory.
 docs/PLAN.md            authoritative build plan
 src/policy/             pure policy engine (refund limits, escalation)
 src/agent/registry.ts   tool registry: Zod -> strict JSON Schema, boot validation
-src/agent/tools.ts      the 9 tools — schemas live, handlers land Day 2
+src/agent/tools.ts      the 9 tools — 7 handlers live, confirm-write pair Day 5
+src/agent/loop.ts       the hand-rolled tool loop (MessageCreator seam)
+src/agent/data.ts       OpsData — the workspace-bound seam handlers run against
+src/agent/trace.ts      span -> run_spans row, and SSE framing
+src/agent/streaming.ts  the production MessageCreator (stream -> finalMessage)
 src/db/schema.ts        Drizzle schema (15 tables)
 src/db/client.ts        lazy getDb()
+src/db/ops-data.ts      Drizzle OpsData, scoped to one workspace
+src/db/runs.ts          run + span persistence, today's spend
 src/db/seed.ts          deterministic Beacon Analytics seed
+src/app/api/agent/run/  POST a ticket id, stream the trace back as SSE
 scripts/verify-*.ts     gate evidence that needs a database
+scripts/probe-grammar.ts  which tool set blows the strict grammar cap
 ```
+
+**Two seams carry the whole test strategy.** `MessageCreator` stands in for the
+Anthropic client and `OpsData` for the database, so the loop and the handlers
+are unit-tested with neither a key nor Postgres — and the things that genuinely
+need both get their evidence from `scripts/verify-*.ts` and the day's gate.
 
 ## Safety classes
 

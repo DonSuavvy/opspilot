@@ -8,6 +8,27 @@
       "when": 1786436181430,
       "tag": "0000_clean_lester",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1786444180797,
+      "tag": "0001_giant_mac_gargan",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786463481617,
+      "tag": "0002_eager_longshot",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1786587978060,
+      "tag": "0003_certain_mach_iv",
+      "breakpoints": true
     }
   ]
 }

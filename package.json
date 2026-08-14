@@ -2,6 +2,9 @@
   "name": "opspilot",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -14,13 +17,15 @@
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
-    "db:seed": "tsx src/db/seed.ts",
+    "db:seed": "tsx scripts/seed.ts",
     "db:up": "docker compose up -d && sleep 3",
     "db:down": "docker compose down -v",
     "verify:boot": "tsx scripts/verify-boot.ts",
     "verify:seed": "tsx scripts/verify-seed.ts"
   },
   "dependencies": {
+    "@anthropic-ai/bedrock-sdk": "^0.32.1",
+    "@anthropic-ai/sdk": "^0.116.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "drizzle-orm": "^0.45.2",

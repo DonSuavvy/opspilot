@@ -1,0 +1,1 @@
+ALTER TABLE "agent_runs" ALTER COLUMN "serialized_messages" SET DATA TYPE text;

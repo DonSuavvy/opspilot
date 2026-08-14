@@ -1,19 +1,53 @@
 import { describe, expect, it } from "vitest";
 
-import { buildRegistry, UNSUPPORTED_KEYWORDS } from "./registry";
+import { ESCALATION_REASONS } from "../policy/refund";
+import {
+  buildRegistry,
+  UNSUPPORTED_KEYWORDS,
+  type ToolContext,
+} from "./registry";
 import { NotImplementedError, TOOLS } from "./tools";
 
 const registry = buildRegistry(TOOLS);
 
-/** Every JSON Schema keyword present at any depth of the emitted specs. */
+/** Maps of name → schema. Their keys are author identifiers, not keywords. */
+const SCHEMA_MAP_KEYS = new Set([
+  "properties",
+  "$defs",
+  "definitions",
+  "patternProperties",
+  "dependentSchemas",
+]);
+
+/** Keys whose value is literal data rather than a schema. */
+const LITERAL_KEYS = new Set(["default", "const", "examples", "enum"]);
+
+/**
+ * Every JSON Schema keyword present at any depth — in *keyword position*.
+ *
+ * This walker has to mirror `sanitize`, because a position-blind version is
+ * the same bug the sanitizer was fixed for (FAILURES.md entry 1), just moved
+ * into the regression net. Collecting field names as though they were keywords
+ * made this test fail the moment a tool declared an ordinary field called
+ * `pattern` — while registry.test.ts asserts that exact field must survive.
+ * Two files demanding opposite things is worse than either being wrong alone.
+ */
 function keywordsIn(node: unknown, found = new Set<string>()): Set<string> {
   if (Array.isArray(node)) {
     for (const item of node) keywordsIn(item, found);
-  } else if (node && typeof node === "object") {
-    for (const [key, value] of Object.entries(node)) {
-      found.add(key);
-      keywordsIn(value, found);
+    return found;
+  }
+  if (!node || typeof node !== "object") return found;
+
+  for (const [key, value] of Object.entries(node)) {
+    found.add(key);
+    if (LITERAL_KEYS.has(key)) continue;
+    if (SCHEMA_MAP_KEYS.has(key) && value && typeof value === "object") {
+      // Recurse into the sub-schemas, never over the field names.
+      for (const sub of Object.values(value)) keywordsIn(sub, found);
+      continue;
     }
+    keywordsIn(value, found);
   }
   return found;
 }
@@ -112,8 +146,59 @@ describe("production tool set", () => {
       registry.get("issue_refund")!.handler({}, {
         workspaceId: "w",
         runId: "r",
+        ticketId: "t",
         now: new Date(),
+        // Never reached: the stub throws before touching the repository, and
+        // the loop pauses before the handler at all.
+        data: {} as ToolContext["data"],
       }),
     ).rejects.toBeInstanceOf(NotImplementedError);
+  });
+});
+
+/**
+ * Round 4. The policy engine decides *that* a ticket escalates and *why*; the
+ * `escalate` tool is how the agent says so. If the engine can reach a
+ * conclusion the tool cannot express, the agent is forced to either drop the
+ * real reason or substitute a different one — and escalation reasons are what
+ * Mission Control's escalation-rate breakdown is built from, so a substituted
+ * reason is a wrong number on a dashboard rather than a caught error.
+ *
+ * The divergence was real and had two shapes. `evaluateEscalation` can return
+ * `unknown_customer`, and (since Round 3 added it) `unknown_customer_value`;
+ * the tool enum offered neither. And the engine's `refund_denied_by_policy`
+ * appeared in the enum under the different name `policy_denied` — the same
+ * concept spelled two ways across a module boundary, which is how the next
+ * reader concludes they are different things.
+ *
+ * Asserted as a set difference rather than a pinned list on purpose: a pinned
+ * list has to be remembered, and this one was not. The test names the
+ * *invariant* — the tool's vocabulary is a superset of the engine's — so the
+ * next reason added to the policy fails here until it is expressible.
+ */
+describe("the escalate tool can express every reason the policy engine emits", () => {
+  // Read off the wire spec rather than the Zod definition: what the model is
+  // actually offered is what determines whether a reason is expressible.
+  const escalateReasons = new Set(
+    (
+      registry.toAnthropicTools().find((t) => t.name === "escalate")!
+        .input_schema.properties as { reason: { enum: string[] } }
+    ).reason.enum,
+  );
+
+  it("offers a value for every EscalationReason", () => {
+    const missing = ESCALATION_REASONS.filter((r) => !escalateReasons.has(r));
+    expect(missing).toEqual([]);
+  });
+
+  /**
+   * The converse is deliberately *not* asserted. The tool may legitimately
+   * offer more than the engine emits — `missing_information` and
+   * `out_of_scope` are conclusions the model reaches from the ticket text,
+   * which no policy rule computes. Superset, not equality.
+   */
+  it("also keeps the model-observed reasons the engine cannot compute", () => {
+    expect(escalateReasons).toContain("missing_information");
+    expect(escalateReasons).toContain("out_of_scope");
   });
 });

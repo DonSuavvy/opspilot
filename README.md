@@ -42,13 +42,22 @@ not the reply text.
 
 | | |
 |---|---|
-| **Data model** | 15-table Drizzle schema + migration — workspaces, customers, subscriptions, invoices, tickets, KB articles, SOP versions, agent runs, run spans, approvals, audit log, eval cases/runs/results |
-| **Policy engine** | Pure, dependency-free refund + escalation rules. 32 tests, written first |
-| **Tool registry** | 9 tools with Zod schemas → strict JSON Schema, three-class safety model, boot-time validation. 39 tests, written first |
-| **Seed** | Deterministic Beacon Analytics dataset — 30 customers, 54 invoices, 20 KB articles, 8 tickets |
+| **Data model** | 15-table Drizzle schema + migrations — workspaces, customers, subscriptions, invoices, tickets, KB articles, SOPs + SOP versions, agent runs, run spans, approvals, audit log, eval cases/runs/results — plus a lazy client that picks TLS from the parsed host. 20 tests |
+| **Policy engine** | Pure refund + escalation rules, with both the stored policy blob *and* the evaluation input parsed rather than trusted — and the limits bounded absolutely, not just against each other. 104 tests |
+| **Tool registry** | 9 tools with Zod schemas → strict JSON Schema, three-class safety model, boot-time validation that refuses unknown tools rather than waving them through. 49 tests, plus 11 pinning the nine tools' wire schemas and holding their vocabulary in step with the policy engine |
+| **Seed** | Deterministic Beacon Analytics dataset — 30 customers, 54 invoices, 20 KB articles, 8 tickets — with every id scoped to its workspace, so Day 8 can seed a sandbox per visitor. 7 tests |
+| **Provider + spend guard** | Adapter over Amazon Bedrock and the first-party API — logical model names, per-provider rate cards carrying their own provenance, and a pre-flight budget cap + kill switch. 44 tests |
+| **Cost accounting** | Integer nano-dollar pricing; unverified rate cards produce figures flagged as estimates rather than reported as measured. 31 tests |
 | **Infra** | Next.js 16, Tailwind v4, shadcn/ui on Radix, Vitest, GitHub Actions CI, Docker Postgres |
 
-**71 tests passing.** No test requires a database.
+**266 tests passing** — 104 policy + 49 registry + 31 cost + 23 budget + 21
+provider + 11 tools + 20 client + 7 seed, across eight files. No test requires a
+database, and as of Round 4 none of them *touches* one either: importing the
+seed used to execute it.
+
+> Measured locally. This branch has not been pushed, so CI has never run
+> against this tree — the counts above are from `npm run test` on this machine,
+> not from a green check on a remote.
 
 ### Coming (see [`docs/PLAN.md`](docs/PLAN.md))
 
@@ -104,6 +113,12 @@ mid-iteration and reconstituting it in a different process. `approvals.tool_use_
 is persisted for the same reason: resuming requires emitting a `tool_result`
 whose id matches the original `tool_use` block, or the API rejects the turn.
 
+> **Built today:** the columns that make this shape possible, and the reasoning
+> about what they have to hold — `agent_runs.serialized_messages` is `text`
+> rather than `jsonb`, because `jsonb` rejects the NUL escape that
+> `JSON.stringify` emits, and sanitising the payload is exactly what the replay
+> contract forbids. **Day 2:** the loop. **Day 5:** the resume round trip.
+
 ### The refund limit is enforced twice, on purpose
 
 Once in the **SOP markdown** compiled into the system prompt, so the model knows
@@ -153,9 +168,16 @@ than one per redeploy.
 
 ## How this repo is checked — and what it caught
 
-**[`docs/FAILURES.md`](docs/FAILURES.md) is the most useful file here.** Eight
-dated entries, every one a real defect in this repository, with how it was
-caught and what changed.
+**[`docs/FAILURES.md`](docs/FAILURES.md) is the most useful file here.** A dated
+log of every problem this repository has had — mostly defects, plus the process
+gaps and API traps that were caught before they could become defects — with how
+each was found and what changed.
+
+**[`docs/REVIEWS.md`](docs/REVIEWS.md) is its counterpart.** FAILURES answers
+*what broke*; REVIEWS answers *how do you know you looked* — the method behind
+each review pass, its coverage, its cost, the findings it **rejected** and why,
+and what it could not verify. The review prompts themselves are recorded there
+too, because a review is only as good as what it was told to disbelieve.
 
 The project's engineering principle is *never trust the model* — the refund
 limit is enforced in the SOP **and** revalidated in code, because a model's
@@ -184,12 +206,79 @@ What that pass found, on code that already had 71 passing tests and a green gate
 | **An unevidenced process claim** | Commits claimed tests were written first. `git log` showed tests and implementation in the same commit — **unverifiable, not false.** Failing tests are now committed separately, so the RED step is checkable. |
 | **Present-tense overclaims** | Prose described a policy-revalidating handler and a public demo. Neither exists yet. Both re-scoped. |
 
-Every one is fixed, test-first, with the failing test committed first. 79 tests,
-up from 71.
+The sanitizer fix was test-first, with the failing test committed separately
+(`21aa814`) so the RED step is checkable in `git log`. The rest were
+documentation, seed-data and process changes with no test to write.
+
+A second review pass, run the same way, found more — including one that
+mattered more than anything in the first round:
+
+| | |
+|---|---|
+| **The policy engine failed open** | `PolicyConfig` was a TypeScript interface over a `jsonb` blob that nothing parsed. Every rule is a `>` comparison, and `x > undefined` is `false` — so a missing or misspelled key didn't error, it silently deleted that limit. A `refund: {}` blob approved **$99,999.99 on a 400-day-old invoice against a $500 ceiling, with zero violations**. The layer whose entire job is not trusting the model was itself trusting an unvalidated blob. |
+| **A safety net nothing tested** | `assertConsistent()` — the boot check added by the fix above — could be deleted outright and the suite stayed green. The test that looked like coverage asserted a property the fixed sanitizer already guaranteed on its own: the same "asserting on the wrong cell" pattern as the nullable-enum bug, recurring inside its own fix. |
+| **Two files demanding opposite things** | The regression net in `tools.test.ts` walked the schema *position-blind* — the very bug the sanitizer had been fixed for. A tool field legitimately named `pattern` would fail it, while `registry.test.ts` asserted that same field must survive. |
+| **TLS chosen by substring** | `getDb()` picked TLS with `url.includes("localhost")` over the whole connection string, so a password or database name containing `localhost` silently disabled encryption against a remote host. It failed open, in the direction that loses confidentiality. |
+| **Boundary bugs the comments already promised** | A future-dated `paidAt` gave a negative age, which read as inside every refund window. `settled` tested `!== null` while the age test used truthiness — they disagreed on `undefined`, so an invoice with no payment date was approved. |
+| **A comment confidently wrong about Postgres** | `sops.active_version_id` claimed a real foreign key "needs a deferred constraint". It doesn't — the column is nullable, so there's no insert-time cycle, and a *composite* FK also enforces the belongs-to-this-SOP invariant. Disproved in a rolled-back transaction against this project's own database. |
+
+Each was reproduced independently before being touched, and several reviewer
+findings were rejected on the evidence — including one hypothesis the reviewer
+was explicitly asked to test and correctly disproved. One of my own tests
+initially passed for the wrong reason and had to be rebuilt. The fixes went
+RED → GREEN with the failing output recorded, and fourteen deliberate reversions
+to the fixed code were all caught by the suite. That round ended at **131 tests,
+up from 79** (71 before the first one).
+
+### Then a third pass audited the second one
+
+Written up as Round 3 in [`docs/REVIEWS.md`](docs/REVIEWS.md), run by an agent
+that had not taken part in Round 2 and told to treat its write-up as marketing
+until executed. It found the round had been right about the code and wrong about
+itself:
+
+| | |
+|---|---|
+| **A bug class fixed halfway** | Round 2 made the policy engine parse the policy blob because a TypeScript interface is erased at runtime. The engine's *other* argument is the same kind of claim, arriving from a Drizzle row, and nothing parsed it either. `new Date(undefined)` is an Invalid Date — a real `Date` — so it poisoned the age calculation, and NaN is false against both `< 0` and `> window`, skipping the future-dated guard **and** the window check at once: **$50.00 approved on a 400-day-old invoice with zero violations.** Round 2 described this class precisely, then shipped with the second instance open. |
+| **"Every fix is pinned by a mutation test"** | Fourteen reversions that all die prove those fourteen lines are covered — not that every fix is. A different fourteen on one file left **three alive**, all of them `.strict()` calls. Now pinned: removing each fails exactly one named test. |
+| **A gate run against the wrong tree** | Round 2 claimed clean-clone CI parity. Its work was uncommitted at the time, so the clone reproduced the *pre-review* tree — 79 tests, and not one occurrence of the function the round was built around. The check passed, on code that did not contain the fixes. It has since been re-run properly, on the committed tree. |
+| **A right answer from a false premise** | Seven speculative schema additions were rejected because "those tables have zero rows." One of them targeted `invoices`, which holds 54 — a figure the same document reports elsewhere. The conclusion survived on evidence (all 54 rows satisfy every constraint proposed), but the reason written down was wrong, and one item was overturned outright. |
+| **An explanation of the wrong mechanism** | Both the docs and a code comment explained `.strict()` as catching misspelled policy keys. It cannot: a misspelling leaves the real key absent, and an absent required key is rejected either way. What it actually catches is an *extra* key alongside a valid policy — narrower, real, and now stated correctly. |
+
+**164 tests, up from 131.** Two further defects turned up while fixing those.
+The first was the escalation engine carrying the refund engine's bug pointing the
+other way — an unreadable customer lifetime value silently *dropped* a churn-risk
+escalation, where bad refund data had silently *approved*. It was held open
+rather than patched, because every available fix changed a contract the eval
+scorers key off; it is now closed with the option that was chosen rather than the
+one that was cheapest to type. The second is still open and written down: a
+comment claiming its guard catches more than it does.
+
+### A fourth pass asked what a *valid* edit could do
+
+The first three rounds checked that the code does what it says under the inputs
+it expects. Round 4 asked what a well-formed configuration change could make it
+do — and the answer was most of the things the project exists to prevent.
+
+| | |
+|---|---|
+| **A valid policy that authorised anything** | The refund limits were bounded only against *each other* — `maxAutoApproveCents <= maxRefundCents`. Set both to 99999999 and every check the previous rounds added still passes: no missing keys, no typos, no NaN, no extra keys. `evaluateRefund` then approved **$999,999.99 with `violations: []`**. A consistency check says two numbers agree; it never said either was sane. |
+| **A security control with an off switch** | `escalateOnSuspectedInjection` was an ordinary boolean in the editable policy, so "escalate on prompt injection" was a preference. With the other two toggles off, a ticket with injection flagged, an unknown customer, *and* a refund denied by policy returned `{escalate: false, reasons: []}`. It is now pinned to `true` — the demo's step-4 claim must not be defeatable from a text field. |
+| **A gate asserting a control that doesn't exist** | `verify:seed` printed `✓ one ticket flagged by the injection pre-scan`. There is no pre-scan; the flag is one hand-written line in the seed. Three files described it in the present tense — and only two were named by the review. Grepping for the *claim* rather than the file list found the third. |
+| **A seed that could only ever seed once** | Every primary key was derived from its key alone, so `seedId("workspace:demo")` equalled the live workspace id and a second sandbox would die on `customers_pkey` — blocking the per-visitor sandboxes that are themselves the fix for the seed's ~8-day shelf life. Now scoped per workspace, and verified by seeding two side by side: 60 customer rows, 60 distinct ids. |
+| **`npm test` wrote to the database** | Found by *running* the failing test, not by reading code: `seed()` was invoked at module scope, so importing the seed executed it. The unit-test run injected `.env.local` and started seeding Postgres — in a suite whose stated rule is that no test requires a database. Correct as a script, unsafe as a module, and invisible until something imported it. |
+| **The obvious constraint wouldn't have worked** | Postgres `numeric` accepts `'NaN'` and sorts it *above* every value, so `CHECK (cost_usd >= 0)` admits it — one NaN turns every `SUM` into NaN and blanks the cost-per-ticket KPI. The upper bound is the half that does the work. Then the first generated migration emitted `<= $1`, a bind parameter, invalid in DDL — while typecheck, lint and all 191 tests were green. Caught by reading the generated SQL. |
+
+**191 tests, up from 164.** Two findings were deliberately *not* acted on and the
+reasoning is written down: `approvedCents` matches its own documented contract
+and has no consumer yet, so changing it would rewrite an interface against zero
+call sites; and the missing approval record on `ToolContext` is Day 5's
+pause/resume design, not a fix to guess at now.
 
 The point isn't that the reviews found things. It's that **shipping a green gate
 is where verification starts, not where it stops** — and that the failures are
-written down rather than quietly patched.
+written down rather than quietly patched, including the ones in the write-ups of
+earlier reviews, and including the ones found while fixing something else.
 
 ---
 
@@ -198,7 +287,8 @@ written down rather than quietly patched.
 **In the repo today:** Next.js 16 (App Router, TypeScript strict) · Tailwind v4 ·
 shadcn/ui on Radix · Drizzle ORM → Postgres · Zod 4 · Vitest · GitHub Actions
 
-**Arriving with the agent loop and deploy:** raw `@anthropic-ai/sdk` (Day 2) ·
+**Arriving with the agent loop and deploy:** hand-rolled loop over a provider
+adapter — Bedrock by default, `@anthropic-ai/sdk` as fallback (Day 2) ·
 Neon · Vercel (Day 8)
 
 The public demo *will* run `claude-haiku-4-5` (rate-capped, ~pennies per run),
@@ -212,7 +302,9 @@ There is no deployed demo yet — the link lands here on Day 8.
 ```
 docs/PLAN.md            authoritative build plan — 10-day schedule, per-day gates
 docs/FAILURES.md        dated log of what broke, how it was caught, what changed
+docs/REVIEWS.md         how each review was run: coverage, findings, rejections
 docs/REVIEW-PROMPT.md   the independent-review prompt, and why it's shaped so
+docs/reviews/           the review prompts themselves, verbatim
 src/policy/             pure policy engine (refund limits, escalation rules)
 src/agent/registry.ts   Zod → strict JSON Schema, safety classes, boot validation
 src/agent/tools.ts      the 9 tools
