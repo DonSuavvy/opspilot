@@ -202,3 +202,54 @@ describe("the escalate tool can express every reason the policy engine emits", (
     expect(escalateReasons).toContain("out_of_scope");
   });
 });
+
+
+/* -------------------------------------------------------------------------- */
+/* Stripped constraints have to survive somewhere the model reads              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * FAILURES 19 turned `strict` off by default, and the follow-up logged at the
+ * time claimed the constraint stripping had become gratuitous — that the model
+ * was now told `amount_cents` is a bare `number`. Measuring it says otherwise,
+ * and the measurement is the interesting part.
+ *
+ * `type` was never on the strip list, so the model is told `integer`. Across
+ * all nine tools exactly eight keywords are stripped, and seven of them are
+ * Zod's MAX_SAFE_INTEGER boilerplate — `maximum: 9007199254740991` and its
+ * negative twin on every `z.number().int()`. Restoring those would add noise to
+ * the cached prompt prefix and tell the model nothing it can use.
+ *
+ * Exactly **one** carries real signal: `exclusiveMinimum: 0` on
+ * `issue_refund.amount_cents`. So the fix is not a conditional-stripping
+ * mechanism — that would trade one piece of signal for seven of noise. It is
+ * that a constraint worth keeping must be restated where the model actually
+ * reads it, which is the description. Descriptions are the single biggest lever
+ * on tool-call quality; a keyword the wire format drops is not.
+ */
+describe("a stripped constraint is restated in the description", () => {
+  const registry = buildRegistry(TOOLS);
+
+  it("tells the model the refund amount must be positive", () => {
+    const spec = registry
+      .toAnthropicTools()
+      .find((s) => s.name === "issue_refund")!;
+    const amount = spec.input_schema.properties.amount_cents as {
+      description: string;
+    };
+
+    // Confirms the premise rather than assuming it: the keyword really is gone.
+    expect(amount).not.toHaveProperty("exclusiveMinimum");
+    expect(amount.description).toMatch(/positive|greater than zero/i);
+  });
+
+  /**
+   * The other seven strips are noise, and this fails if someone "restores the
+   * constraints" wholesale — which was the tempting and wrong version of this
+   * fix, and the one the original follow-up note called for.
+   */
+  it("does not carry Zod's MAX_SAFE_INTEGER bounds into the prompt prefix", () => {
+    const json = JSON.stringify(registry.toAnthropicTools());
+    expect(json).not.toContain("9007199254740991");
+  });
+});
