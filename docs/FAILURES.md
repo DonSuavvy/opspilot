@@ -954,3 +954,62 @@ There is a smaller lesson underneath. The honest-display decision — report the
 shortfall rather than pad the constitution past 4096 — is what made the bug
 *visible at all*. A padded prompt would have cleared the floor, the badge would
 have said "cache hit", and nobody would have looked at it again.
+
+## 21. The SOP said fourteen days; the model asked for a refund at twenty-two — 2026-08-15
+
+**Caught by:** the Day 4 gate, on the first end-to-end run through the new
+editor. Not a code defect — the code did exactly what it was built to do.
+
+Day 4's whole claim is that the SOP *is* the prompt: edit the refund window and
+the agent is told the new rule. That half works, and is verified. What the gate
+was supposed to show next is the decision changing. It didn't.
+
+The run, in full:
+
+```
+edit window 30 -> 14 in /sop, saved as v2
+re-run "Refund request for INV-2002"
+  -> model -> get_customer + get_invoices -> model -> issue_refund
+  -> paused for approval
+```
+
+Confirmed against the database rather than assumed, because "the model ignored
+the policy" and "the wiring handed it the old policy" look identical from the
+outside:
+
+```
+run.sop_version_id -> version 2, policy_config.refund.windowDays = 14
+INV-2002           -> paid 22.2 days ago, $49.00
+issue_refund input -> {"invoice_id": "INV-2002", "amount_cents": 4900,
+                       "reason": "service_issue"}
+```
+
+So the model read a document saying the window is **14 days**, read an invoice
+paid **22.2 days** ago, and requested the full refund anyway. The SOP's own
+escalation section — *"Policy denies what the customer asked for"* — is right
+there in the same prompt.
+
+**This is the project's central thesis arriving as evidence rather than
+assertion.** `CLAUDE.md` has said since Day 1 that refund limits are enforced
+twice, "in the SOP so the model knows them, and in the `issue_refund` handler so
+the code guarantees them", under the heading *Never trust the model*. That has
+been an architectural belief with no live counterexample behind it. Now there is
+one, from the project's own demo fixture, on the first honest attempt.
+
+It also relocates demo arc step 2. The arc is *"edit the SOP → the decision
+changes"*, and the decision does not change on prompting alone — not reliably,
+and not in this instance. What makes it change is the handler rejecting an
+out-of-policy call with `is_error: true` and the agent adapting. **Day 4 delivers
+the input to that mechanism; Day 5 delivers the mechanism.** Claiming the arc
+worked at the end of Day 4 would have been a demo that passes because the model
+happened to agree, which is precisely the class of demo this project exists not
+to build.
+
+Worth stating plainly: this is one observation, not a controlled experiment. A
+different sample might comply. That is the point — a guarantee you can only
+confirm by sampling is not a guarantee, and the eval suite in Day 6 exists to
+measure the rate rather than trust the anecdote in either direction.
+
+**Kept:** when a gate fails, first prove *which* layer failed. Ten minutes of
+SQL separated "the model disobeyed" from "I wired the wrong version", and those
+two have nothing in common except how they look in a screenshot.
