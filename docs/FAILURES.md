@@ -1064,3 +1064,56 @@ minute of running the thing — a metric that referred to nothing, a model that
 ignored its instructions, and now a guard nothing calls. The suite is not weak.
 It answers "is this correct", and the question that keeps biting is "is this
 wired".
+
+---
+
+## Closing #21 and #22 — 2026-08-15, same day
+
+Both closed by the same commit, and verified by the run that failed twice before.
+
+Edit the window to 14 in the editor, re-run INV-2002 (paid 22 days ago):
+
+```
+0  model
+1  get_customer
+2  get_invoices
+3  model
+4  issue_refund     ✗ guardrail, is_error: true
+5  model
+6  escalate         ✓
+7  model
+8  resolve_ticket   ✓
+completed · 4 iterations
+```
+
+The span, from the database rather than the screenshot:
+
+```
+guardrail | issue_refund | is_error: t
+  "refund denied by policy: outside_refund_window. Invoice INV-2002 was paid
+   22 days ago, the refund window is 14 days…"
+run: completed · sop_version 2 · windowDays 14
+```
+
+And what the customer would have received, written by the agent after the
+refusal:
+
+> "I've reviewed your refund request for INV-2002 ($49.00). The invoice is
+> outside our standard 14-day refund window (paid 22 days ago), so I'm handing
+> this to our management team for consideration."
+
+The model still asked for the refund — #21's finding is unchanged and was never
+going to be fixed by prompting. What changed is that the code refused it, the
+model was told why, and it escalated with an accurate explanation of a rule it
+had declined to follow on its own. That last step is the part worth watching:
+denial-adaptation, which PLAN.md lists as a demo moment, arrived as a
+side-effect of getting the ordering right rather than as a feature.
+
+"Refund limits are enforced twice" is now true rather than aspirational, and
+demo arc step 2 works end to end.
+
+The three defects this month — a metric that referred to nothing, a model that
+ignored its instructions, a guard nothing called — cost about an hour between
+them and none were reachable from the test suite. Every one surfaced within a
+minute of running the product. The suite answers "is this correct". Running it
+answers "is this wired", and that has been the more expensive question.
