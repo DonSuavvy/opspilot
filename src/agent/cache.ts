@@ -187,3 +187,57 @@ export function describeCache({
     label: "cache miss — prefix was eligible but not cached",
   };
 }
+
+/**
+ * One verdict for a whole run, from its per-call usages.
+ *
+ * **Combine verdicts, never tokens.** Token counts sum across calls;
+ * eligibility does not, because it is a property of each individual prefix.
+ * Summing first is how the console came to render "prefix was eligible but not
+ * cached" for a Haiku run whose two prompts were 2618 and 2945 tokens — neither
+ * eligible, but 5563 together, describing a prompt that never existed.
+ *
+ * Precedence is hit > write > below_threshold > miss: a read is the outcome
+ * worth reporting, and a run that wrote but never read has still done something
+ * a later run benefits from.
+ *
+ * When nothing cached, the report names the **largest** prompt. It is the one
+ * closest to clearing the floor, so its shortfall is the smallest true
+ * shortfall — the honest answer to "how much more would it take".
+ */
+export function describeRunCache({
+  model,
+  usages,
+}: {
+  model: LogicalModel;
+  usages: readonly TokenUsage[];
+}): CacheReport | null {
+  if (usages.length === 0) return null;
+
+  const reports = usages.map((usage) => describeCache({ model, usage }));
+
+  const readTokens = reports.reduce((sum, r) => sum + r.readTokens, 0);
+  if (readTokens > 0) {
+    const writtenTokens = reports.reduce((sum, r) => sum + r.writtenTokens, 0);
+    return {
+      ...reports.find((r) => r.status === "hit")!,
+      readTokens,
+      writtenTokens,
+      label: `cache hit — ${readTokens.toLocaleString("en-US")} tokens read`,
+    };
+  }
+
+  const writtenTokens = reports.reduce((sum, r) => sum + r.writtenTokens, 0);
+  if (writtenTokens > 0) {
+    return {
+      ...reports.find((r) => r.status === "write")!,
+      writtenTokens,
+      label: `cache written — ${writtenTokens.toLocaleString("en-US")} tokens cached`,
+    };
+  }
+
+  // Nothing cached anywhere. The largest prompt is the most informative one.
+  return reports.reduce((largest, r) =>
+    r.promptTokens > largest.promptTokens ? r : largest,
+  );
+}

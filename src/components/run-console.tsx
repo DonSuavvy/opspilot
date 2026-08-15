@@ -14,7 +14,7 @@
  */
 import { useCallback, useRef, useState } from "react";
 
-import { describeCache, type CacheStatus } from "@/agent/cache";
+import { describeRunCache, type CacheStatus } from "@/agent/cache";
 import type { TokenUsage } from "@/agent/cost";
 import type { LogicalModel } from "@/agent/provider";
 import { Badge } from "@/components/ui/badge";
@@ -35,7 +35,8 @@ interface Span {
   isError: boolean;
   costNanos: number;
   latencyMs: number;
-  usage: { inputTokens: number; outputTokens: number } | null;
+  /** All four token classes — the cache counters drive the badge. */
+  usage: TokenUsage | null;
 }
 
 interface Done {
@@ -158,15 +159,22 @@ export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
   const liveCost = spans.reduce((total, s) => total + s.costNanos, 0);
 
   /**
-   * Read from the run's measured usage, never predicted. Both cache counters
-   * zero on a request that *did* send `cache_control` means the prefix did not
-   * cache, and `describeCache` supplies the reason — on Haiku that is almost
-   * always the 4096-token floor.
+   * Measured, and computed **per model call** rather than from the run total.
+   *
+   * Summing first was a real bug: a Haiku run with prompts of 2618 and 2945
+   * tokens reported "prefix was eligible but not cached", because 5563 clears
+   * the 4096 floor even though neither prompt ever did. Token counts sum across
+   * calls; eligibility does not.
    */
-  const cache =
-    done?.usage != null
-      ? describeCache({ model: done.model, usage: done.usage })
-      : null;
+  const cache = done
+    ? describeRunCache({
+        model: done.model,
+        usages: spans
+          .filter((s) => s.type === "llm_call")
+          .map((s) => s.usage)
+          .filter((u): u is TokenUsage => u != null),
+      })
+    : null;
   const slowest = spans.reduce((max, s) => Math.max(max, s.latencyMs), 0);
 
   return (
