@@ -10,6 +10,7 @@
  * `node_modules/next/dist/docs/01-app/02-guides/streaming.md`, not from memory.
  */
 import { budgetConfigSchema } from "@/agent/budget";
+import { recordPendingApproval } from "@/db/approvals";
 import { cachedSystem } from "@/agent/cache";
 import { compileSop } from "@/agent/sop";
 import { createOpsData } from "@/db/ops-data";
@@ -235,6 +236,23 @@ export async function POST(request: Request) {
         });
 
         await finishRun(db, runId, result, new Date());
+
+        // A pause is only half-recorded until the question a human has to
+        // answer is durable. `serialized_messages` alone says *where* the run
+        // stopped; the approvals row says *what* is being asked, and is what
+        // the queue lists and what /api/agent/resume decides against.
+        if (result.status === "paused_for_approval" && result.pendingApproval) {
+          const pending = result.pendingApproval;
+          await recordPendingApproval(db, {
+            workspaceId: ticket.workspaceId,
+            runId,
+            toolUseId: pending.toolUseId,
+            toolName: pending.toolName,
+            toolInput: pending.toolInput,
+            safetyClass:
+              registry.get(pending.toolName)?.safetyClass ?? "confirm_write",
+          });
+        }
 
         try {
           controller.enqueue(
