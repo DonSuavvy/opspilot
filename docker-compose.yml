@@ -1,6 +1,19 @@
 # Local Postgres for development and for verifying the seed script without
 # touching Neon. Port 5434: 5432 is the usual host Postgres and 5433 is taken
 # by the legal-dms project on this machine.
+#
+# The host side of the mapping is pinned to 127.0.0.1 deliberately. A bare
+# "5434:5432" binds 0.0.0.0, which publishes the database to everyone on the
+# local network — Day 8 puts per-visitor sandbox data in here, so that is a
+# real exposure and not merely untidy.
+#
+# `name` is pinned for the same class of reason. Compose otherwise derives the
+# project from the directory name, so `db:up` from a git worktree resolves to a
+# different project and quietly builds a *new, empty* volume rather than reusing
+# this one — an app that starts fine and answers every query with nothing.
+# Pinning it means every worktree talks to the same database.
+name: tags_demo
+
 services:
   postgres:
     image: postgres:17-alpine
@@ -10,7 +23,7 @@ services:
       POSTGRES_PASSWORD: opspilot
       POSTGRES_DB: opspilot
     ports:
-      - "5434:5432"
+      - "127.0.0.1:5434:5432"
     volumes:
       - opspilot-pgdata:/var/lib/postgresql/data
     healthcheck:
