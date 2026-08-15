@@ -17,7 +17,11 @@ import { getDb } from "@/db/client";
 import { loadActiveSop } from "@/db/sops";
 import { runAgentLoop, type SpanEvent } from "@/agent/loop";
 import { buildRegistry } from "@/agent/registry";
-import { createClient, providerFromEnv } from "@/agent/provider";
+import {
+  createClient,
+  providerFromEnv,
+  type LogicalModel,
+} from "@/agent/provider";
 import { encodeSseEvent, spanToRow } from "@/agent/trace";
 import { finishRun, spentTodayNanos, startRun, writeSpan } from "@/db/runs";
 import { streamingMessageCreator } from "@/agent/streaming";
@@ -36,6 +40,16 @@ export const dynamic = "force-dynamic";
  * rate card it is charged at double anyway.
  */
 const ESTIMATED_CALL_NANOS = 20_000_000; // $0.02
+
+/**
+ * The public demo runs Haiku 4.5 — rate-capped and ~pennies per run.
+ *
+ * Named once because it is read three times below, and because the *logical*
+ * name is what the trace needs: the cache floor is per model (4096 on Haiku
+ * against 512 on Opus 5), so the console cannot explain a non-cache without
+ * knowing which model ran.
+ */
+const DEMO_MODEL: LogicalModel = "haiku";
 
 /**
  * The Day-2 stand-in is gone: the system prompt is now compiled from the
@@ -137,7 +151,7 @@ export async function POST(request: Request) {
   const runId = await startRun(db, {
     workspaceId: ticket.workspaceId,
     ticketId: ticket.id,
-    model: "haiku",
+    model: DEMO_MODEL,
     sopVersionId: sop.versionId,
   });
 
@@ -183,8 +197,8 @@ export async function POST(request: Request) {
         const result = await runAgentLoop({
           registry,
           createMessage: streamingMessageCreator(client),
-          model: provider.modelId("haiku"),
-          rates: provider.rateCard("haiku"),
+          model: provider.modelId(DEMO_MODEL),
+          rates: provider.rateCard(DEMO_MODEL),
           // Marked as a cacheable prefix. Whether it *actually* caches depends
           // on clearing the model's floor — 4096 tokens on Haiku, which demo
           // mode runs — and that is reported from measured usage rather than
@@ -224,6 +238,7 @@ export async function POST(request: Request) {
             encoder.encode(
               encodeSseEvent("done", {
                 runId,
+                model: DEMO_MODEL,
                 status: result.status,
                 outcome: result.outcome,
                 iterations: result.iterations,
