@@ -10,6 +10,7 @@
  * `node_modules/next/dist/docs/01-app/02-guides/streaming.md`, not from memory.
  */
 import { budgetConfigSchema } from "@/agent/budget";
+import { cachedSystem } from "@/agent/cache";
 import { compileSop } from "@/agent/sop";
 import { createOpsData } from "@/db/ops-data";
 import { getDb } from "@/db/client";
@@ -184,10 +185,16 @@ export async function POST(request: Request) {
           createMessage: streamingMessageCreator(client),
           model: provider.modelId("haiku"),
           rates: provider.rateCard("haiku"),
-          system: compileSop({
-            bodyMarkdown: sop.bodyMarkdown,
-            policyConfig: sop.policyConfig,
-          }),
+          // Marked as a cacheable prefix. Whether it *actually* caches depends
+          // on clearing the model's floor — 4096 tokens on Haiku, which demo
+          // mode runs — and that is reported from measured usage rather than
+          // predicted, so the trace never claims a hit that did not happen.
+          system: cachedSystem(
+            compileSop({
+              bodyMarkdown: sop.bodyMarkdown,
+              policyConfig: sop.policyConfig,
+            }),
+          ),
           messages: [
             {
               role: "user",

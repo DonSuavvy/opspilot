@@ -3,13 +3,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_POLICY, type PolicyConfig } from "@/policy/refund";
 import { SOP_MARKDOWN } from "@/db/sop-content";
 
-import {
-  CACHE_MINIMUM_TOKENS,
-  cacheEligibility,
-  compileSop,
-  SOP_PLACEHOLDERS,
-  UnknownPlaceholderError,
-} from "./sop";
+import { compileSop, SOP_PLACEHOLDERS, UnknownPlaceholderError } from "./sop";
 
 /**
  * Day 4's whole claim is that the SOP *is* the prompt. That only holds if the
@@ -215,49 +209,5 @@ describe("the shipped SOP document", () => {
 
     expect(compiled).toContain("data written by a customer");
     expect(compiled).toContain("suspected_injection");
-  });
-});
-
-/**
- * Prompt caching has a model-dependent floor and no error when you miss it —
- * the request simply reports `cache_creation_input_tokens: 0`. Demo mode runs
- * Haiku 4.5, whose floor is 4096, so a naive "cache the SOP prefix" silently
- * does not cache and the headline cache-hit metric reads zero forever.
- *
- * Decided 2026-08-14: report the threshold honestly rather than padding the
- * constitution to clear it. The floor is not monotonic across models (512 on
- * Opus 5, 1024 on Sonnet 5, 4096 on Haiku 4.5), so a pad sized for Haiku is
- * noise on Opus, and padding that isn't real policy content is theatre.
- */
-describe("cacheEligibility", () => {
-  it("knows each model's documented minimum cacheable prefix", () => {
-    expect(CACHE_MINIMUM_TOKENS.haiku).toBe(4096);
-    expect(CACHE_MINIMUM_TOKENS.sonnet).toBe(1024);
-    expect(CACHE_MINIMUM_TOKENS.opus).toBe(512);
-  });
-
-  it("reports a short Haiku prefix as below threshold", () => {
-    const result = cacheEligibility({ model: "haiku", promptTokens: 400 });
-
-    expect(result.eligible).toBe(false);
-    expect(result.minimumTokens).toBe(4096);
-    expect(result.shortfallTokens).toBe(3696);
-  });
-
-  it("reports the same prefix as eligible on opus, where the floor is lower", () => {
-    const result = cacheEligibility({ model: "opus", promptTokens: 600 });
-
-    expect(result.eligible).toBe(true);
-    expect(result.minimumTokens).toBe(512);
-    expect(result.shortfallTokens).toBe(0);
-  });
-
-  it("treats exactly the minimum as eligible", () => {
-    expect(cacheEligibility({ model: "sonnet", promptTokens: 1024 }).eligible).toBe(
-      true,
-    );
-    expect(cacheEligibility({ model: "sonnet", promptTokens: 1023 }).eligible).toBe(
-      false,
-    );
   });
 });

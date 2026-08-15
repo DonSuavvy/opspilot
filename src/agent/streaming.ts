@@ -38,7 +38,11 @@ export function streamingMessageCreator(client: AnthropicLike): MessageCreator {
     const stream = client.messages.stream({
       model: params.model,
       max_tokens: params.max_tokens,
-      system: params.system,
+      // Blocks when the prefix is marked cacheable, a bare string otherwise.
+      // Passed through untouched: caching is a byte-level prefix match.
+      system: params.system as Parameters<
+        AnthropicLike["messages"]["stream"]
+      >[0]["system"],
       messages: params.messages as Parameters<
         AnthropicLike["messages"]["stream"]
       >[0]["messages"],

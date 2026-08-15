@@ -16,7 +16,6 @@
  * So the markdown carries placeholders and the figures are substituted here,
  * from the same row, at compile time. One source of truth, no drift possible.
  */
-import type { LogicalModel } from "./provider";
 import type { PolicyConfig } from "@/policy/refund";
 
 /**
@@ -96,61 +95,4 @@ export function compileSop({
   });
 }
 
-/* -------------------------------------------------------------------------- */
-/* Prompt cache floor                                                         */
-/* -------------------------------------------------------------------------- */
-
-/**
- * The minimum cacheable prefix, per model, in tokens.
- *
- * Miss it and there is no error: the request succeeds and reports
- * `cache_creation_input_tokens: 0`. A cache-hit metric built without this check
- * reads zero forever and looks like a caching bug rather than a prefix that was
- * never eligible.
- *
- * The floor is **not monotonic** across generations — 512 on Opus 5, 1024 on
- * Sonnet 5, 4096 on Haiku 4.5 — so a constitution padded to clear Haiku's floor
- * is pure noise on Opus. Demo mode runs Haiku, which has the highest floor of
- * the three.
- *
- * Decided 2026-08-14: display the shortfall honestly rather than padding. The
- * number stays true on every model, and if the SOP later grows past 4096 on its
- * own the cache starts hitting with no code change.
- */
-export const CACHE_MINIMUM_TOKENS: Readonly<Record<LogicalModel, number>> =
-  Object.freeze({
-    haiku: 4096,
-    sonnet: 1024,
-    opus: 512,
-  });
-
-export interface CacheEligibility {
-  /** Whether the prefix clears this model's floor. */
-  eligible: boolean;
-  /** The floor that applied, for display next to the verdict. */
-  minimumTokens: number;
-  /** How many tokens short, or 0 when eligible. */
-  shortfallTokens: number;
-}
-
-/**
- * Whether a prefix of `promptTokens` can cache on `model`.
- *
- * Exactly the minimum is eligible — the documented rule is a minimum, not an
- * exclusive bound.
- */
-export function cacheEligibility({
-  model,
-  promptTokens,
-}: {
-  model: LogicalModel;
-  promptTokens: number;
-}): CacheEligibility {
-  const minimumTokens = CACHE_MINIMUM_TOKENS[model];
-  const eligible = promptTokens >= minimumTokens;
-  return {
-    eligible,
-    minimumTokens,
-    shortfallTokens: eligible ? 0 : minimumTokens - promptTokens,
-  };
-}
+/* The cache floor, prefix marking, and hit reporting live in `./cache`. */
