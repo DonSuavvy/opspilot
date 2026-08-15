@@ -178,9 +178,43 @@ export interface AgentLoopInput {
    * own schema below, before its handler sees it.
    */
   strictTools?: boolean;
+  /**
+   * Where this invocation's span numbering starts. Defaults to 0.
+   *
+   * A resumed run keeps its original `agent_runs` row so the trace viewer
+   * renders one continuous waterfall, and `run_spans` is unique on
+   * `(run_id, seq)`. A second invocation numbering from zero collides with the
+   * spans the paused one already wrote, and dies on its first insert.
+   */
+  startSeq?: number;
+  /**
+   * Every decided approval for this run, keyed by tool_use id. Set only by
+   * `/api/agent/resume`.
+   *
+   * When non-empty, the loop's first iteration re-processes the trailing
+   * assistant turn already on `messages` instead of calling the model — that
+   * turn was paid for by the invocation that paused, and re-asking would both
+   * double-bill and risk returning a *different* turn to the one the human
+   * actually answered. A call with a decision is dispatched (approved) or
+   * answered with `is_error` (denied) instead of pausing again.
+   *
+   * A list rather than one decision because a single turn may carry more than
+   * one confirm-write call. Each pause decides one; carrying only the latest
+   * would lose the earlier answers and the turn could never clear.
+   */
+  resumeDecisions?: ResumeDecision[] | null;
   /** Injected like `now` everywhere else here — never `Date.now()`. */
   clock: () => Date;
   emit: (span: SpanEvent) => void | Promise<void>;
+}
+
+/** The human's answer, carried from the approvals row into a resumed loop. */
+export interface ResumeDecision {
+  /** Anthropic's tool_use id for the paused call. */
+  toolUseId: string;
+  approved: boolean;
+  /** On denial, injected back as the `is_error` body so the agent can adapt. */
+  reason: string | null;
 }
 
 export type AgentLoopStatus =
@@ -226,6 +260,18 @@ const EMPTY_USAGE: TokenUsage = {
   outputTokens: 0,
   cacheCreationInputTokens: 0,
   cacheReadInputTokens: 0,
+};
+
+/**
+ * The wire-shaped equivalent, for the synthesized turn a resume replays. Its
+ * cost was already recorded by the invocation that paused, so counting it
+ * again would inflate the run's totals by one turn per resume.
+ */
+const EMPTY_TURN_USAGE: AssistantTurn["usage"] = {
+  input_tokens: 0,
+  output_tokens: 0,
+  cache_creation_input_tokens: 0,
+  cache_read_input_tokens: 0,
 };
 
 function toTokenUsage(u: AssistantTurn["usage"]): TokenUsage {
@@ -290,7 +336,10 @@ export async function runAgentLoop(
   const rateVerified = rates.verifiedOn !== null;
 
   const messages: MessageParam[] = [...input.messages];
-  let seq = 0;
+  const decisions = new Map(
+    (input.resumeDecisions ?? []).map((d) => [d.toolUseId, d] as const),
+  );
+  let seq = input.startSeq ?? 0;
   let iterations = 0;
   let accruedNanos = 0;
   let totals: TokenUsage = { ...EMPTY_USAGE };
@@ -323,6 +372,69 @@ export async function runAgentLoop(
       latencyMs: endedAt.getTime() - s.startedAt.getTime(),
     });
   };
+
+  /**
+   * The first call in a turn that needs a human and has no answer yet, or null
+   * if the whole turn can be dispatched.
+   *
+   * Calls whose arguments their own schema rejects, and calls whose preflight
+   * throws, deliberately return null: those are answered with `is_error` in
+   * the dispatch loop rather than queued for a person. Both checks are pure,
+   * so running them again there costs nothing and keeps every span emitted
+   * from a single place.
+   */
+  const firstCallAwaitingApproval = async (
+    calls: ToolUseBlock[],
+  ): Promise<ToolUseBlock | null> => {
+    for (const call of calls) {
+      if (decisions.has(call.id)) continue;
+
+      const definition = registry.get(call.name);
+      if (!definition) continue;
+
+      let needsApproval: boolean;
+      try {
+        needsApproval = registry.requiresApproval(call.name);
+      } catch {
+        continue;
+      }
+      if (!needsApproval) continue;
+
+      const parsed = definition.input.safeParse(call.input);
+      if (!parsed.success) continue;
+
+      if (definition.preflight) {
+        try {
+          await definition.preflight(parsed.data, toolContext);
+        } catch {
+          continue;
+        }
+      }
+
+      return call;
+    }
+    return null;
+  };
+
+  /**
+   * On resume, the turn to process is already on `messages` — the paused
+   * invocation pushed it before returning. Re-processing it instead of asking
+   * for a new one is the whole point: that turn is what the human answered.
+   */
+  let pendingContent: ContentBlock[] | null = null;
+  if (decisions.size > 0) {
+    const last = messages[messages.length - 1];
+    if (last?.role !== "assistant" || !Array.isArray(last.content)) {
+      return {
+        ...base(),
+        status: "failed",
+        error:
+          "resume: serialized messages do not end with an assistant turn — " +
+          "nothing to apply the approval decision to",
+      };
+    }
+    pendingContent = last.content as ContentBlock[];
+  }
 
   while (iterations < maxIterations) {
     // Pre-flight, every call, against the baseline *plus* what this run has
@@ -363,65 +475,85 @@ export async function runAgentLoop(
 
     iterations += 1;
 
-    const llmStartedAt = clock();
+    /**
+     * The resumed turn is already on `messages`, already billed, and already
+     * answered by a human — so it is taken as-is rather than re-requested.
+     * Asking again would double-bill it and could return a *different* turn,
+     * which is not the one the human approved.
+     */
     let assistant: AssistantTurn;
-    try {
-      assistant = await createMessage({
-        model,
-        max_tokens: maxTokens,
-        system,
-        messages,
-        tools,
-      });
-    } catch (error) {
+
+    if (pendingContent) {
+      assistant = {
+        content: pendingContent,
+        stop_reason: "tool_use",
+        stop_details: null,
+        // Zeroed on purpose: the invocation that paused recorded this turn's
+        // usage and cost on its own llm_call span. Counting it again here
+        // would inflate the run's totals by one turn per resume.
+        usage: { ...EMPTY_TURN_USAGE },
+      };
+      pendingContent = null;
+    } else {
+      const llmStartedAt = clock();
+      try {
+        assistant = await createMessage({
+          model,
+          max_tokens: maxTokens,
+          system,
+          messages,
+          tools,
+        });
+      } catch (error) {
+        await span({
+          type: "llm_call",
+          name: model,
+          input: { messages: messages.length },
+          output: { error: errorText(error) },
+          isError: true,
+          usage: null,
+          costNanos: 0,
+          estimated,
+          startedAt: llmStartedAt,
+        });
+        return { ...base(), status: "failed", error: errorText(error) };
+      }
+
+      const turnUsage = toTokenUsage(assistant.usage);
+      const cost = costOf(rates, turnUsage, { cacheTtl: input.cacheTtl });
+      totals = addUsage(totals, turnUsage);
+      accruedNanos += cost.totalNanos;
+      estimated = estimated || cost.estimated;
+
       await span({
         type: "llm_call",
         name: model,
         input: { messages: messages.length },
-        output: { error: errorText(error) },
-        isError: true,
-        usage: null,
-        costNanos: 0,
-        estimated,
+        output: {
+          stop_reason: assistant.stop_reason,
+          blocks: assistant.content.map((b) => b.type),
+        },
+        isError: false,
+        usage: turnUsage,
+        costNanos: cost.totalNanos,
+        estimated: cost.estimated,
         startedAt: llmStartedAt,
       });
-      return { ...base(), status: "failed", error: errorText(error) };
+
+      // Before `content`, never after. A refused turn can still carry a
+      // tool_use block, and a loop that inspected content first would fire a
+      // tool off a response the model declined to stand behind.
+      if (assistant.stop_reason === "refusal") {
+        return {
+          ...base(),
+          status: "refused",
+          refusal: { category: assistant.stop_details?.category ?? null },
+          error: "model refused the request",
+        };
+      }
+
+      messages.push({ role: "assistant", content: assistant.content });
     }
-
-    const turnUsage = toTokenUsage(assistant.usage);
-    const cost = costOf(rates, turnUsage, { cacheTtl: input.cacheTtl });
-    totals = addUsage(totals, turnUsage);
-    accruedNanos += cost.totalNanos;
-    estimated = estimated || cost.estimated;
-
-    await span({
-      type: "llm_call",
-      name: model,
-      input: { messages: messages.length },
-      output: {
-        stop_reason: assistant.stop_reason,
-        blocks: assistant.content.map((b) => b.type),
-      },
-      isError: false,
-      usage: turnUsage,
-      costNanos: cost.totalNanos,
-      estimated: cost.estimated,
-      startedAt: llmStartedAt,
-    });
-
-    // Before `content`, never after. A refused turn can still carry a tool_use
-    // block, and a loop that inspected content first would fire a tool off a
-    // response the model declined to stand behind.
-    if (assistant.stop_reason === "refusal") {
-      return {
-        ...base(),
-        status: "refused",
-        refusal: { category: assistant.stop_details?.category ?? null },
-        error: "model refused the request",
-      };
-    }
-
-    messages.push({ role: "assistant", content: assistant.content });
 
     const toolUses = assistant.content.filter(isToolUse);
 
@@ -435,6 +567,52 @@ export async function runAgentLoop(
           `once with a structured outcome to end this run.`,
       });
       continue;
+    }
+
+    /**
+     * Pause before *anything* in this turn is dispatched.
+     *
+     * FAILURES #23: the pause used to fire mid-dispatch, so a read earlier in
+     * the same turn had already run — its handler fired, its `tool_exec` span
+     * was persisted — and then the pause returned, discarding the local
+     * results array it had written into. The trace claimed a tool ran while
+     * the serialized conversation had no record of it, and resume rebuilt an
+     * assistant turn whose tool_use had no matching tool_result, which the API
+     * rejects.
+     *
+     * Deciding it up front keeps the contract resume depends on trivial:
+     * `serializedMessages` is exactly `[...history, assistant]`, so resume
+     * appends one user message with a result for every tool_use in that turn.
+     *
+     * Validation and preflight still run first (FAILURES #22) — nobody should
+     * be interrupted to approve a call its own schema rejects, or one the
+     * policy engine was always going to refuse. Both are pure, so running them
+     * again below when we do *not* pause is free and keeps span emission in
+     * one place.
+     */
+    const awaiting = await firstCallAwaitingApproval(toolUses);
+    if (awaiting) {
+      await span({
+        type: "approval_wait",
+        name: awaiting.name,
+        input: awaiting.input,
+        output: { toolUseId: awaiting.id },
+        isError: false,
+        usage: null,
+        costNanos: 0,
+        estimated,
+        startedAt: clock(),
+      });
+      return {
+        ...base(),
+        status: "paused_for_approval",
+        serializedMessages: JSON.stringify(messages),
+        pendingApproval: {
+          toolUseId: awaiting.id,
+          toolName: awaiting.name,
+          toolInput: awaiting.input,
+        },
+      };
     }
 
     const results: ToolResultBlock[] = [];
@@ -558,31 +736,70 @@ export async function runAgentLoop(
         }
       }
 
-      // The pause. Everything decided so far is already on `messages`, and the
-      // pending tool_use is the last thing on it — resume injects the matching
-      // tool_result and carries on from exactly here.
+      // The turn was cleared for dispatch before anything ran, so a
+      // confirm-write reaching this point already has an answer. What is left
+      // is applying it.
       if (requiresApproval) {
-        await span({
-          type: "approval_wait",
-          name: call.name,
-          input: call.input,
-          output: { toolUseId: call.id },
-          isError: false,
-          usage: null,
-          costNanos: 0,
-          estimated,
-          startedAt,
-        });
-        return {
-          ...base(),
-          status: "paused_for_approval",
-          serializedMessages: JSON.stringify(messages),
-          pendingApproval: {
-            toolUseId: call.id,
-            toolName: call.name,
-            toolInput: call.input,
-          },
-        };
+        const decision = decisions.get(call.id);
+
+        if (!decision) {
+          // Unreachable: `firstCallAwaitingApproval` pauses the turn before
+          // dispatch begins. Stated as a result rather than a throw so a
+          // future edit that breaks the invariant degrades into a refusal the
+          // agent can escalate, instead of killing the run.
+          const detail =
+            `${call.name} requires human approval and none was recorded ` +
+            `for this call`;
+          results.push({
+            type: "tool_result",
+            tool_use_id: call.id,
+            content: detail,
+            is_error: true,
+          });
+          await span({
+            type: "guardrail",
+            name: call.name,
+            input: call.input,
+            output: { error: detail },
+            isError: true,
+            usage: null,
+            costNanos: 0,
+            estimated,
+            startedAt,
+          });
+          continue;
+        }
+
+        if (!decision.approved) {
+          // Denial adaptation. The reviewer's reason goes back as an
+          // `is_error` tool_result — the same channel the policy guardrail
+          // uses — so the agent adapts and escalates rather than retrying
+          // blindly. PLAN.md lists this as a demo moment; mechanically it is
+          // the preflight path with a human in place of the policy engine.
+          const reason = decision.reason?.trim();
+          const detail = reason
+            ? `refused by a human reviewer: ${reason}`
+            : "refused by a human reviewer, with no reason given";
+          results.push({
+            type: "tool_result",
+            tool_use_id: call.id,
+            content: detail,
+            is_error: true,
+          });
+          await span({
+            type: "guardrail",
+            name: call.name,
+            input: parsed.data,
+            output: { error: detail, decision: "denied" },
+            isError: true,
+            usage: null,
+            costNanos: 0,
+            estimated,
+            startedAt,
+          });
+          continue;
+        }
+        // Approved. Falls through to the handler, which revalidates anyway.
       }
 
       try {
