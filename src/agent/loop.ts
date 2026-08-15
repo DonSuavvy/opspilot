@@ -498,6 +498,66 @@ export async function runAgentLoop(
         continue;
       }
 
+      // Parsed *before* the pause, not after.
+      //
+      // FAILURES #22: this sat below the approval branch, so a confirm-write
+      // call whose input its own schema rejects was still queued for a human —
+      // someone could be asked to approve `amount_cents: -5`. The pause is a
+      // commitment to interrupt a person; nothing unvalidated should reach it.
+      const parsed = definition.input.safeParse(call.input);
+      if (!parsed.success) {
+        const detail = `invalid arguments for ${call.name}: ${parsed.error.issues
+          .map((i) => `${i.path.join(".") || "(root)"} ${i.message}`)
+          .join("; ")}`;
+        results.push({
+          type: "tool_result",
+          tool_use_id: call.id,
+          content: detail,
+          is_error: true,
+        });
+        await span({
+          type: "tool_exec",
+          name: call.name,
+          input: call.input,
+          output: { error: detail },
+          isError: true,
+          usage: null,
+          costNanos: 0,
+          estimated,
+          startedAt,
+        });
+        continue;
+      }
+
+      // The policy gate, for tools that declare one. Runs before the pause for
+      // the same reason: a refund the policy engine refuses must never become a
+      // question someone has to answer.
+      if (requiresApproval && definition.preflight) {
+        try {
+          await definition.preflight(parsed.data, toolContext);
+        } catch (error) {
+          const detail = errorText(error);
+          results.push({
+            type: "tool_result",
+            tool_use_id: call.id,
+            content: detail,
+            is_error: true,
+          });
+          await span({
+            type: "guardrail",
+            name: call.name,
+            input: call.input,
+            output: { error: detail },
+            isError: true,
+            usage: null,
+            costNanos: 0,
+            estimated,
+            startedAt,
+          });
+          continue;
+        }
+      }
+
       // The pause. Everything decided so far is already on `messages`, and the
       // pending tool_use is the last thing on it — resume injects the matching
       // tool_result and carries on from exactly here.
@@ -523,34 +583,6 @@ export async function runAgentLoop(
             toolInput: call.input,
           },
         };
-      }
-
-      // The wire schema was stripped of numeric and string constraints so the
-      // model is told less than the code enforces. Zod is what actually guards
-      // the handler, so parsing happens here and a failure never reaches it.
-      const parsed = definition.input.safeParse(call.input);
-      if (!parsed.success) {
-        const detail = `invalid arguments for ${call.name}: ${parsed.error.issues
-          .map((i) => `${i.path.join(".") || "(root)"} ${i.message}`)
-          .join("; ")}`;
-        results.push({
-          type: "tool_result",
-          tool_use_id: call.id,
-          content: detail,
-          is_error: true,
-        });
-        await span({
-          type: "tool_exec",
-          name: call.name,
-          input: call.input,
-          output: { error: detail },
-          isError: true,
-          usage: null,
-          costNanos: 0,
-          estimated,
-          startedAt,
-        });
-        continue;
       }
 
       try {

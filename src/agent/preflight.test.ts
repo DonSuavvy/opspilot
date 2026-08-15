@@ -5,7 +5,7 @@ import { DEFAULT_POLICY } from "@/policy/refund";
 
 import { runAgentLoop, type AssistantTurn, type SpanEvent } from "./loop";
 import { buildRegistry, type ToolContext } from "./registry";
-import { VERIFIED_RATES } from "./cost";
+import { rateCard } from "./cost";
 
 /**
  * What has to happen *before* a confirm-write call pauses the run.
@@ -69,7 +69,7 @@ function registry(preflight?: (input: unknown, ctx: ToolContext) => Promise<void
   return buildRegistry([
     {
       name: "risky_write",
-      description: "A confirm-write tool.",
+      description: "A confirm-write tool that moves money and pauses for approval.",
       input: z.object({ amount_cents: z.number().int().positive() }),
       safetyClass: "confirm_write" as const,
       idempotent: true,
@@ -80,7 +80,7 @@ function registry(preflight?: (input: unknown, ctx: ToolContext) => Promise<void
     },
     {
       name: "resolve_ticket",
-      description: "Terminal.",
+      description: "The forced terminal tool that ends every run with an outcome.",
       input: z.object({
         action: z.string(),
         refund_amount_cents: z.number(),
@@ -105,7 +105,7 @@ async function run(
     registry: registry(preflight),
     createMessage: async () => turns[i++]!,
     model: "test-model",
-    rates: VERIFIED_RATES,
+    rates: rateCard(1, 5, { verifiedOn: "2026-08-15", source: "test fixture" }),
     system: "You are OpsPilot.",
     messages: [{ role: "user", content: "refund please" }],
     toolContext: ctx(),
@@ -182,7 +182,9 @@ describe("confirm-write validation runs before the pause", () => {
   });
 
   it("passes the run's pinned policy to the preflight", async () => {
-    const seen = vi.fn(async () => {});
+    const seen = vi.fn<(input: unknown, ctx: ToolContext) => Promise<void>>(
+      async () => {},
+    );
     await run([turn({ amount_cents: 4_900 })], seen);
 
     expect(seen).toHaveBeenCalledWith(
@@ -194,9 +196,11 @@ describe("confirm-write validation runs before the pause", () => {
   it("hands the preflight parsed input, not the raw wire object", async () => {
     // Parsing before the preflight is what lets a preflight trust its argument
     // instead of re-validating shape it should already be able to rely on.
-    const seen = vi.fn(async () => {});
+    const seen = vi.fn<(input: unknown, ctx: ToolContext) => Promise<void>>(
+      async () => {},
+    );
     await run([turn({ amount_cents: 4_900, extra: "ignored" })], seen);
 
-    expect(seen.mock.calls[0]![0]).toEqual({ amount_cents: 4_900 });
+    expect(seen.mock.calls[0]?.[0]).toEqual({ amount_cents: 4_900 });
   });
 });
