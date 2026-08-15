@@ -9,6 +9,8 @@
  */
 import { desc, eq } from "drizzle-orm";
 
+import Link from "next/link";
+
 import { RunConsole, type TicketSummary } from "@/components/run-console";
 import { getDb } from "@/db/client";
 import { customers, tickets } from "@/db/schema";
@@ -54,7 +56,12 @@ export default async function Home() {
   return (
     <main className="mx-auto w-full max-w-6xl px-6 py-10">
       <header className="mb-8">
-        <h1 className="text-2xl font-semibold tracking-tight">OpsPilot</h1>
+        <div className="flex items-baseline gap-3">
+          <h1 className="text-2xl font-semibold tracking-tight">OpsPilot</h1>
+          <Link href="/sop" className="text-sm text-zinc-500 underline">
+            edit the SOP
+          </Link>
+        </div>
         <p className="mt-1 max-w-2xl text-sm text-zinc-500">
           Support and billing agent for Beacon Analytics. Pick a ticket and run
           it — the trace below streams in as the agent works, span by span, with

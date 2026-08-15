@@ -13,8 +13,9 @@
  * result attributable: "pinned to (SOP version, model, git SHA)" is only true
  * if the run wrote the version down.
  */
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 
+import { validateSopDraft } from "@/agent/sop-draft";
 import { parsePolicyConfig, type PolicyConfig } from "@/policy/refund";
 
 import type { Db } from "./client";
@@ -84,4 +85,158 @@ export async function loadActiveSop(
     bodyMarkdown: row.bodyMarkdown,
     policyConfig: parsePolicyConfig(row.policyConfig),
   };
+}
+
+/** One row of the version list, for the picker and the diff view. */
+export interface SopVersionSummary {
+  versionId: string;
+  version: number;
+  changelog: string;
+  createdBy: string;
+  createdAt: Date;
+  isActive: boolean;
+}
+
+/** Newest first — the editor opens on the active version and diffs backwards. */
+export async function listSopVersions(
+  db: Db,
+  workspaceId: string,
+  slug: string = SUPPORT_BILLING_SLUG,
+): Promise<SopVersionSummary[]> {
+  const rows = await db
+    .select({
+      versionId: sopVersions.id,
+      version: sopVersions.version,
+      changelog: sopVersions.changelog,
+      createdBy: sopVersions.createdBy,
+      createdAt: sopVersions.createdAt,
+      activeVersionId: sops.activeVersionId,
+    })
+    .from(sops)
+    .innerJoin(sopVersions, eq(sopVersions.sopId, sops.id))
+    .where(and(eq(sops.workspaceId, workspaceId), eq(sops.slug, slug)))
+    .orderBy(desc(sopVersions.version));
+
+  return rows.map((r) => ({
+    versionId: r.versionId,
+    version: r.version,
+    changelog: r.changelog,
+    createdBy: r.createdBy,
+    createdAt: r.createdAt,
+    isActive: r.activeVersionId === r.versionId,
+  }));
+}
+
+/** A single version's full body, for the diff view's left-hand side. */
+export async function getSopVersion(
+  db: Db,
+  workspaceId: string,
+  versionId: string,
+): Promise<ActiveSop> {
+  const [row] = await db
+    .select({
+      versionId: sopVersions.id,
+      version: sopVersions.version,
+      bodyMarkdown: sopVersions.bodyMarkdown,
+      policyConfig: sopVersions.policyConfig,
+    })
+    .from(sopVersions)
+    .where(
+      and(
+        eq(sopVersions.workspaceId, workspaceId),
+        eq(sopVersions.id, versionId),
+      ),
+    )
+    .limit(1);
+
+  if (!row) throw new MissingActiveSopError(workspaceId, versionId);
+
+  return {
+    versionId: row.versionId,
+    version: row.version,
+    bodyMarkdown: row.bodyMarkdown,
+    policyConfig: parsePolicyConfig(row.policyConfig),
+  };
+}
+
+/**
+ * Write an edited SOP as a new version and make it active.
+ *
+ * **Validated before the transaction opens.** `validateSopDraft` is the boot
+ * validator's equivalent for policy: an activated version is the live system
+ * prompt the moment it lands, so a document with a typo'd placeholder or a
+ * policy above the absolute caps must never reach the insert.
+ *
+ * **Append-only.** Editing never mutates a row. Runs already in flight hold a
+ * pinned `sop_version_id`, so they keep reading the exact bytes they were
+ * briefed on, and the diff view has both sides to compare. It is also what
+ * makes a Day 6 eval result attributable after the policy moves on.
+ *
+ * The insert and the pointer update share a transaction. Split, a crash between
+ * them leaves a version nobody points at — invisible in the editor, and
+ * indistinguishable from the save having failed.
+ */
+export async function createSopVersion(
+  db: Db,
+  input: {
+    workspaceId: string;
+    bodyMarkdown: string;
+    policyConfig: unknown;
+    changelog: string;
+    createdBy: string;
+    slug?: string;
+  },
+): Promise<ActiveSop> {
+  const slug = input.slug ?? SUPPORT_BILLING_SLUG;
+  const draft = validateSopDraft({
+    bodyMarkdown: input.bodyMarkdown,
+    policyConfig: input.policyConfig,
+  });
+
+  return db.transaction(async (tx) => {
+    const [sop] = await tx
+      .select({ id: sops.id })
+      .from(sops)
+      .where(and(eq(sops.workspaceId, input.workspaceId), eq(sops.slug, slug)))
+      .limit(1);
+
+    if (!sop) throw new MissingActiveSopError(input.workspaceId, slug);
+
+    // Read inside the transaction: two concurrent saves would otherwise derive
+    // the same number and collide on `sop_versions_sop_version_idx`. The unique
+    // index is the real guarantee — this just makes the common case not race.
+    const [highest] = await tx
+      .select({ version: sopVersions.version })
+      .from(sopVersions)
+      .where(eq(sopVersions.sopId, sop.id))
+      .orderBy(desc(sopVersions.version))
+      .limit(1);
+
+    const [created] = await tx
+      .insert(sopVersions)
+      .values({
+        workspaceId: input.workspaceId,
+        sopId: sop.id,
+        version: (highest?.version ?? 0) + 1,
+        // Stored unsubstituted. Rendering at save time is the drift bug this
+        // whole feature exists to remove.
+        bodyMarkdown: draft.bodyMarkdown,
+        policyConfig: draft.policyConfig,
+        changelog: input.changelog,
+        createdBy: input.createdBy,
+      })
+      .returning({ id: sopVersions.id, version: sopVersions.version });
+
+    await tx
+      .update(sops)
+      .set({ activeVersionId: created!.id })
+      .where(eq(sops.id, sop.id));
+
+    return {
+      versionId: created!.id,
+      version: created!.version,
+      bodyMarkdown: draft.bodyMarkdown,
+      policyConfig: draft.policyConfig,
+    };
+  });
 }
