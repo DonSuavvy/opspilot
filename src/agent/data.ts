@@ -75,6 +75,8 @@ export interface OpsData {
     customerExternalId: string,
     limit: number,
   ): Promise<InvoiceRecord[]>;
+  /** By invoice number. Null is a legitimate answer — the model can invent one. */
+  findInvoice(number: string): Promise<InvoiceRecord | null>;
   searchKb(query: string): Promise<KbHit[]>;
   saveDraft(ticketId: string, body: string): Promise<{ draftId: string }>;
   escalateTicket(

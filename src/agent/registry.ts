@@ -20,6 +20,8 @@
  */
 import { z } from "zod";
 
+import type { PolicyConfig } from "@/policy/refund";
+
 import type { OpsData } from "./data";
 
 export type SafetyClass = "read" | "auto_write" | "confirm_write";
@@ -131,6 +133,16 @@ export interface ToolContext {
    * Postgres.
    */
   data: OpsData;
+  /**
+   * The policy this run was pinned to at start, from `agent_runs.sop_version_id`.
+   *
+   * Passed in rather than re-queried on purpose. `issue_refund` must revalidate
+   * against the *same* version the model was briefed on — re-resolving "what is
+   * active now" would let an edit landing mid-run enforce a policy the model was
+   * never given, which is the drift `compileSop` exists to remove reappearing
+   * one layer up.
+   */
+  policyConfig: PolicyConfig;
 }
 
 export interface ToolDefinition<T extends AnyZodObject = AnyZodObject> {

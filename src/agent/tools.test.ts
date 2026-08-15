@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { DEFAULT_POLICY } from "@/policy/refund";
+
 import { ESCALATION_REASONS } from "../policy/refund";
 import {
   buildRegistry,
@@ -141,9 +143,15 @@ describe("production tool set", () => {
     }
   });
 
+  /**
+   * Repointed from `issue_refund` to `update_subscription`: the refund handler
+   * is implemented as of Day 5, so asserting it still throws would have been a
+   * test pinning the absence of the feature it was meant to guard.
+   * `update_subscription` is the remaining confirm-write stub.
+   */
   it("stubs handlers loudly rather than silently succeeding", async () => {
     await expect(
-      registry.get("issue_refund")!.handler({}, {
+      registry.get("update_subscription")!.handler({}, {
         workspaceId: "w",
         runId: "r",
         ticketId: "t",
@@ -151,6 +159,7 @@ describe("production tool set", () => {
         // Never reached: the stub throws before touching the repository, and
         // the loop pauses before the handler at all.
         data: {} as ToolContext["data"],
+        policyConfig: DEFAULT_POLICY,
       }),
     ).rejects.toBeInstanceOf(NotImplementedError);
   });

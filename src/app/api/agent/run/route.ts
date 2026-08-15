@@ -224,6 +224,9 @@ export async function POST(request: Request) {
             ticketId: ticket.id,
             now,
             data: createOpsData(db, ticket.workspaceId),
+            // The version this run was pinned to, so `issue_refund` revalidates
+            // against what the model was actually briefed on.
+            policyConfig: sop.policyConfig,
           },
           budget: { config: budgetConfig, spentTodayNanos: baseline },
           estimatedCallNanos: ESTIMATED_CALL_NANOS,
