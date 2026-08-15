@@ -141,6 +141,25 @@ export function createOpsData(db: Db, workspaceId: string): OpsData {
      * output — `to_tsquery` would raise a syntax error on an unbalanced quote
      * or a bare `&`, turning a search into a failed tool call.
      */
+    /** By number, scoped to the workspace — the handler has no customer id. */
+    async findInvoice(number: string) {
+      const [row] = await db
+        .select({
+          number: invoices.number,
+          status: invoices.status,
+          amountCents: invoices.amountCents,
+          refundedCents: invoices.refundedCents,
+          paidAt: invoices.paidAt,
+          description: invoices.description,
+        })
+        .from(invoices)
+        .where(
+          and(eq(invoices.workspaceId, workspaceId), eq(invoices.number, number)),
+        )
+        .limit(1);
+      return row ?? null;
+    },
+
     async searchKb(query: string): Promise<KbHit[]> {
       const rows = await db.execute<{
         slug: string;

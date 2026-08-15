@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { DEFAULT_POLICY } from "@/policy/refund";
+
 import { NotImplementedError, TOOLS } from "./tools";
 import { buildRegistry, type ToolContext } from "./registry";
 import type { OpsData } from "./data";
@@ -64,6 +66,7 @@ function fakeData(over: Partial<OpsData> = {}): OpsData {
       currentPeriodEnd: new Date("2026-09-01T00:00:00Z"),
     })),
     listInvoices: vi.fn(async () => [INVOICE]),
+    findInvoice: vi.fn(async () => INVOICE),
     searchKb: vi.fn(async () => [
       { slug: "rotate-api-key", title: "Rotating an API key", body: "…", rank: 0.9 },
     ]),
@@ -81,6 +84,7 @@ function ctx(data: OpsData): ToolContext {
     ticketId: "tkt_1",
     now: new Date("2026-08-13T00:00:00Z"),
     data,
+    policyConfig: DEFAULT_POLICY,
   };
 }
 
@@ -264,12 +268,19 @@ describe("auto-write handlers", () => {
 
 describe("confirm-write handlers stay unimplemented until resume exists", () => {
   /**
-   * Not an oversight. The loop pauses on a confirm-write call and never
-   * invokes the handler, so these bodies are unreachable until
-   * /api/agent/resume lands on Day 5. A handler written now would be
-   * untestable through any real path and would read as shipped capability.
+   * `issue_refund` left this list on Day 5. Its body is the policy
+   * revalidation — the second of the two enforcement points — and it is
+   * reachable and tested independently of the approval queue, because rejecting
+   * an out-of-policy call has to happen *before* anything is queued for a human
+   * to approve. See `refund-handler.test.ts`, and FAILURES #21 for why the
+   * prompt alone was not enough.
+   *
+   * `update_subscription` stays stubbed for the original reason: the loop pauses
+   * on a confirm-write call and never invokes the handler, so a body written now
+   * would be unreachable through any real path and would read as shipped
+   * capability.
    */
-  it.each(["issue_refund", "update_subscription"])(
+  it.each(["update_subscription"])(
     "%s still throws NotImplementedError",
     async (name) => {
       await expect(call(name, {}, fakeData())).rejects.toBeInstanceOf(

@@ -1013,3 +1013,54 @@ measure the rate rather than trust the anecdote in either direction.
 **Kept:** when a gate fails, first prove *which* layer failed. Ten minutes of
 SQL separated "the model disobeyed" from "I wired the wrong version", and those
 two have nothing in common except how they look in a screenshot.
+
+## 22. I built the guard and the guard never runs — 2026-08-15
+
+**Caught by:** the live gate, again. The unit tests were green and said nothing
+about this.
+
+Day 5's first piece was the `issue_refund` revalidation that FAILURES #21 asked
+for: check the requested refund against the run's pinned `policy_config`, throw
+`OutOfPolicyRefundError` when policy denies it. Nine deterministic tests, all
+passing, including the exact case from #21 — 22-day-old invoice, 14-day window,
+rejected.
+
+Re-ran the real ticket. Still `paused for approval`, no rejection.
+
+The span says why, and says it in one field:
+
+```
+type: approval_wait   name: issue_refund   is_error: f
+```
+
+`approval_wait`, not `tool_exec`. `issue_refund` is **confirm-write**, and the
+loop's contract is that a confirm-write call pauses the run *before* dispatching
+the handler — that pause is the approval queue, and the Vercel-timeout answer,
+and the pause/resume story the whole hand-rolled loop exists for. So the
+handler body I had just written and tested was, on the live path, unreachable.
+The 0ms duration on the span was visible in the screenshot before I went looking.
+
+**I had even argued the opposite in the commit message**, claiming the handler is
+"reachable and testable without the approval queue, because rejecting an
+out-of-policy call has to happen before anything is queued for a human". The
+second half of that sentence is a correct statement about how it *should* work.
+The first half asserted it already did. Nothing checked which.
+
+**The design question it surfaces is the useful part.** Where should policy
+revalidation sit relative to the pause? Putting it after — inside the handler,
+on resume — means an out-of-policy refund gets queued, a human is asked to
+approve something the code will refuse anyway, and the rejection arrives after
+someone has already said yes. That is a worse product than either failure mode
+it was meant to prevent. The check belongs **before** the pause: policy denies
+it, the agent is told with `is_error: true`, and no human is ever interrupted
+for a decision that was never available.
+
+So the guard is right and its position is wrong, and #21 stays open.
+
+**Kept, and it is the same lesson as #20 and #21 from a third angle:** green
+unit tests prove a function's behavior, never its reachability. All three of
+this month's real defects were invisible to the suite and obvious within a
+minute of running the thing — a metric that referred to nothing, a model that
+ignored its instructions, and now a guard nothing calls. The suite is not weak.
+It answers "is this correct", and the question that keeps biting is "is this
+wired".

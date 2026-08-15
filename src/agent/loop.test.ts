@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { DEFAULT_POLICY } from "@/policy/refund";
+
 import { checkBudget, type BudgetConfig } from "./budget";
 import { rateCard, type RateCard } from "./cost";
 import {
@@ -178,6 +180,7 @@ function loopInput(
     system: "You are OpsPilot.",
     messages: [{ role: "user" as const, content: "Ticket: where is my refund?" }],
     toolContext: {
+      policyConfig: DEFAULT_POLICY,
       workspaceId: "ws_1",
       runId: "run_1",
       ticketId: "tkt_1",

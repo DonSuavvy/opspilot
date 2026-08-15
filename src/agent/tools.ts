@@ -16,6 +16,8 @@
  */
 import { z } from "zod";
 
+import { evaluateRefund } from "@/policy/refund";
+
 import { ESCALATION_REASONS } from "../policy/refund";
 import type { ToolDefinition } from "./registry";
 
@@ -45,6 +47,29 @@ export class NotImplementedError extends Error {
 const pending = (name: string) => async (): Promise<never> => {
   throw new NotImplementedError(name);
 };
+
+/**
+ * A refund the policy engine refuses.
+ *
+ * Thrown rather than returned so the loop converts it into a `tool_result` with
+ * `is_error: true`, which the model must then handle — typically by escalating.
+ * A silent denial would leave the run believing the refund happened.
+ *
+ * The message names the rule and the numbers behind it. The model is the
+ * audience: "outside the refund window" gives it nothing to tell the customer,
+ * where "paid 22 days ago, window is 14" is a sentence it can escalate with.
+ */
+export class OutOfPolicyRefundError extends Error {
+  readonly violations: readonly string[];
+
+  constructor(message: string, violations: readonly string[] = []) {
+    super(message);
+    this.name = "OutOfPolicyRefundError";
+    this.violations = violations;
+  }
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * The model reads JSON, so every timestamp crosses the boundary as an ISO
@@ -252,7 +277,69 @@ export const TOOLS: ToolDefinition[] = [
     }),
     safetyClass: "confirm_write",
     idempotent: true,
-    handler: pending("issue_refund"),
+    /**
+     * The second of two enforcement points — the one that does not depend on
+     * the model having read its instructions.
+     *
+     * FAILURES #21 is why this is not optional: told a 14-day window, given an
+     * invoice paid 22.2 days earlier, the model requested the full refund. The
+     * prompt is how the model *knows* the policy; this is how the code
+     * *guarantees* it.
+     *
+     * Revalidates against `ctx.policyConfig` — the version pinned to the run,
+     * not whatever is active by the time the tool fires.
+     */
+    handler: async (input, ctx) => {
+      const invoice = await ctx.data.findInvoice(input.invoice_id);
+      if (!invoice) {
+        throw new OutOfPolicyRefundError(
+          `no invoice ${input.invoice_id} in this workspace — do not refund ` +
+            `against an invoice you have not read with get_invoices`,
+        );
+      }
+
+      const decision = evaluateRefund({
+        invoice: {
+          id: invoice.number,
+          status: invoice.status,
+          amountCents: invoice.amountCents,
+          refundedCents: invoice.refundedCents,
+          paidAt: invoice.paidAt,
+        },
+        requestedCents: input.amount_cents,
+        reason: input.reason,
+        now: ctx.now,
+        policy: ctx.policyConfig,
+      });
+
+      if (decision.outcome === "deny") {
+        const ageDays =
+          invoice.paidAt === null
+            ? null
+            : Math.floor((ctx.now.getTime() - invoice.paidAt.getTime()) / DAY_MS);
+
+        throw new OutOfPolicyRefundError(
+          `refund denied by policy: ${decision.violations.join(", ")}. ` +
+            `Invoice ${invoice.number} was ` +
+            (ageDays === null ? "never paid" : `paid ${ageDays} days ago`) +
+            `, the refund window is ${ctx.policyConfig.refund.windowDays} days, ` +
+            `and the ceiling is ${ctx.policyConfig.refund.maxRefundCents} cents. ` +
+            `Do not retry this refund — escalate instead, and tell the customer why.`,
+          decision.violations,
+        );
+      }
+
+      // Both `approve` and `requires_approval` land here. Confirm-write means
+      // the loop pauses before any money moves either way, so the handler's job
+      // ends at "this is allowed" — the approval queue owns what happens next.
+      return {
+        status: "pending_approval",
+        invoice_id: invoice.number,
+        amount_cents: decision.approvedCents,
+        outcome: decision.outcome,
+        idempotency_key: input.idempotency_key,
+      };
+    },
   }),
   defineTool({
     name: "update_subscription",
