@@ -889,3 +889,68 @@ reaches — this one survived four review rounds and 320 green tests. And when a
 provider's error message tells you to simplify something that is already
 minimal, disbelieve the message and go measure: the advice was aimed at a cause
 that was not ours.
+
+## 20. The metric was arithmetically valid and semantically false — 2026-08-15
+
+**Caught by:** clicking the button. Not by 365 green tests, one of which was
+written specifically to prevent this class of error.
+
+Day 4 added a prompt-cache badge to the run console. The whole point of the
+feature is honesty: prompt caching fails *silently* — miss the model's minimum
+prefix and the request still succeeds, reports `cache_creation_input_tokens: 0`,
+and a hit-rate metric reads zero forever, indistinguishable from a caching bug.
+Demo mode runs Haiku 4.5, whose floor is 4096 tokens against 512 on Opus 5, so
+the SOP prefix was the single most likely thing to sit under it.
+
+So `describeCache` was built to report what *happened* rather than predict what
+should have. That part worked, and the reasoning behind it still holds: the
+three token classes are disjoint — the API does not double-count a cached token
+as input — so when nothing caches, `input_tokens` **is** the whole prompt, and
+comparing it to the floor is a measurement rather than a `count_tokens` guess.
+
+Then the first live run rendered this:
+
+```
+cache miss — prefix was eligible but not cached
+  0  model   1755ms  2618/140 tok
+  3  model   2234ms  2946/232 tok
+```
+
+Both statements in that badge are wrong, and the numbers to disprove them are on
+the next line. Neither prompt was ever eligible — 2618 and 2946 are both under
+Haiku's 4096. But the console passed `describeCache` the run's **summed** usage,
+and 2618 + 2946 = 5564 clears the floor. The badge described a prompt that never
+existed, concluded the prefix was eligible, and blamed a cause that was not
+there — in the confident register of a measurement, which is worse than a blank.
+
+The defect is one line of category error:
+
+> **Token counts sum across calls. Eligibility does not.**
+
+Eligibility is a property of each individual prefix. Summing first produces a
+number that is arithmetically impeccable and refers to nothing. The fix,
+`describeRunCache`, combines *verdicts* rather than tokens — precedence
+`hit > write > below_threshold > miss` — and when nothing cached it reports the
+**largest** prompt, because that is the one closest to clearing the floor and so
+names the smallest true shortfall. After the fix, the same run reads:
+
+```
+below cache threshold — prompt is 2,946 tokens, haiku needs 4,096
+```
+
+**Why the tests missed it.** Every one of the eight `describeCache` tests feeds
+a single call, so every one of them passes under either implementation. The
+aggregation was introduced at the call site, in a React component, where no test
+was looking. The suite was not weak; it was aimed one layer below the mistake.
+
+Two things worth keeping. First: a metric that is *plausible* is more dangerous
+than one that is obviously broken, because nobody re-derives a number that looks
+reasonable — this badge would have been screenshotted into a demo. Second: this
+is the second defect this month that only running the real thing caught, after
+the strict-grammar cap in #19. Both were invisible to a green suite, and both
+took under a minute to find once something actually executed.
+
+There is a smaller lesson underneath. The honest-display decision — report the
+shortfall rather than pad the constitution past 4096 — is what made the bug
+*visible at all*. A padded prompt would have cleared the floor, the badge would
+have said "cache hit", and nobody would have looked at it again.
