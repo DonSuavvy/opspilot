@@ -158,6 +158,18 @@ export interface ToolDefinition<T extends AnyZodObject = AnyZodObject> {
   idempotent: boolean;
   /** The forced terminal tool. Exactly one per registry. */
   terminal?: boolean;
+  /**
+   * A check that must pass **before** a confirm-write call pauses for approval.
+   *
+   * Exists because the pause is a commitment: once a call is queued, a human is
+   * asked to decide. Queuing something the code will refuse anyway wastes that
+   * decision and delivers the rejection after they have said yes. Throw here and
+   * the loop never pauses — the model gets `is_error: true` and adapts.
+   *
+   * Receives input already parsed by the tool's own schema, so a preflight can
+   * trust its argument rather than re-validating shape.
+   */
+  preflight?: (input: z.infer<T>, ctx: ToolContext) => Promise<void>;
   handler: (input: z.infer<T>, ctx: ToolContext) => Promise<unknown>;
 }
 

@@ -16,7 +16,9 @@
  */
 import { z } from "zod";
 
-import { evaluateRefund } from "@/policy/refund";
+import { evaluateRefund, type RefundReason } from "@/policy/refund";
+
+import type { ToolContext } from "./registry";
 
 import { ESCALATION_REASONS } from "../policy/refund";
 import type { ToolDefinition } from "./registry";
@@ -70,6 +72,61 @@ export class OutOfPolicyRefundError extends Error {
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Revalidate a refund against the run's pinned policy, or throw.
+ *
+ * Shared by the preflight and the handler on purpose. The preflight is what
+ * actually fires today — the handler's copy is the belt to its braces, and the
+ * one that will still be correct when resume dispatches handlers directly.
+ */
+async function assertRefundInPolicy(
+  input: {
+    invoice_id: string;
+    amount_cents: number;
+    reason: RefundReason;
+  },
+  ctx: ToolContext,
+): Promise<void> {
+  const invoice = await ctx.data.findInvoice(input.invoice_id);
+  if (!invoice) {
+    throw new OutOfPolicyRefundError(
+      `no invoice ${input.invoice_id} in this workspace — do not refund ` +
+        `against an invoice you have not read with get_invoices`,
+    );
+  }
+
+  const decision = evaluateRefund({
+    invoice: {
+      id: invoice.number,
+      status: invoice.status,
+      amountCents: invoice.amountCents,
+      refundedCents: invoice.refundedCents,
+      paidAt: invoice.paidAt,
+    },
+    requestedCents: input.amount_cents,
+    reason: input.reason,
+    now: ctx.now,
+    policy: ctx.policyConfig,
+  });
+
+  if (decision.outcome !== "deny") return;
+
+  const ageDays =
+    invoice.paidAt === null
+      ? null
+      : Math.floor((ctx.now.getTime() - invoice.paidAt.getTime()) / DAY_MS);
+
+  throw new OutOfPolicyRefundError(
+    `refund denied by policy: ${decision.violations.join(", ")}. ` +
+      `Invoice ${invoice.number} was ` +
+      (ageDays === null ? "never paid" : `paid ${ageDays} days ago`) +
+      `, the refund window is ${ctx.policyConfig.refund.windowDays} days, ` +
+      `and the ceiling is ${ctx.policyConfig.refund.maxRefundCents} cents. ` +
+      `Do not retry this refund — escalate instead, and tell the customer why.`,
+    decision.violations,
+  );
+}
 
 /**
  * The model reads JSON, so every timestamp crosses the boundary as an ISO
@@ -289,6 +346,18 @@ export const TOOLS: ToolDefinition[] = [
      * Revalidates against `ctx.policyConfig` — the version pinned to the run,
      * not whatever is active by the time the tool fires.
      */
+    /**
+     * The policy gate, run **before** the run pauses for approval.
+     *
+     * FAILURES #22: putting this only in the handler made it unreachable —
+     * confirm-write pauses before dispatch, so the check would have fired on
+     * resume, after a human had already been asked to approve a refund the code
+     * was always going to refuse. Nobody should be interrupted for a decision
+     * that was never available.
+     */
+    preflight: async (input, ctx) => {
+      await assertRefundInPolicy(input, ctx);
+    },
     handler: async (input, ctx) => {
       const invoice = await ctx.data.findInvoice(input.invoice_id);
       if (!invoice) {
