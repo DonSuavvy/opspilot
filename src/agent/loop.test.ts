@@ -486,6 +486,95 @@ describe("runAgentLoop — confirm-write pause", () => {
 
     expect(spans.map((s) => s.type)).toContain("approval_wait");
   });
+
+  /**
+   * A turn can carry a read *and* a confirm-write. The loop dispatches in
+   * order, so the read runs, its `tool_exec` span is persisted — and then the
+   * pause returns, discarding the local `results` array the read wrote into.
+   *
+   * That leaves the trace claiming a tool ran while the serialized
+   * conversation has no record of it, and resume then rebuilds an assistant
+   * turn whose `tool_use` block has no matching `tool_result`. The API rejects
+   * that outright.
+   *
+   * The pause is a commitment to interrupt a person; nothing in the turn
+   * should have happened yet when it fires.
+   */
+  it("pauses before dispatching anything else in the same turn", async () => {
+    const { input, spans } = loopInput([
+      turn([
+        toolUse("get_customer", { q: "cus_0007" }, "toolu_read"),
+        toolUse(
+          "issue_refund",
+          { invoice_id: "INV-2002", amount_cents: 4900 },
+          "toolu_refund",
+        ),
+      ]),
+    ]);
+
+    const result = await runAgentLoop(input);
+
+    expect(result.status).toBe("paused_for_approval");
+    expect(result.pendingApproval?.toolUseId).toBe("toolu_refund");
+    // The read must not have executed: its result would be thrown away.
+    expect(spans.filter((s) => s.type === "tool_exec")).toHaveLength(0);
+  });
+
+  /**
+   * The corollary, stated as the contract resume depends on:
+   * `serializedMessages` is exactly `[...history, assistant]`. No partial
+   * user turn, no half-populated tool_result message — so resume's job is
+   * unconditional: append one user message carrying a result for every
+   * `tool_use` in that final assistant turn.
+   */
+  it("serializes history plus the assistant turn and nothing else", async () => {
+    const { input } = loopInput([
+      turn([
+        toolUse("get_customer", { q: "cus_0007" }, "toolu_read"),
+        toolUse(
+          "issue_refund",
+          { invoice_id: "INV-2002", amount_cents: 4900 },
+          "toolu_refund",
+        ),
+      ]),
+    ]);
+
+    const result = await runAgentLoop(input);
+    const restored = JSON.parse(result.serializedMessages!);
+
+    expect(restored).toHaveLength(2);
+    expect(restored[1].role).toBe("assistant");
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Span numbering across invocations                                          */
+/* -------------------------------------------------------------------------- */
+
+describe("runAgentLoop — startSeq", () => {
+  /**
+   * `run_spans` has a unique index on `(run_id, seq)`, and a resumed run keeps
+   * its original run row so the trace viewer renders one continuous waterfall.
+   * A second `runAgentLoop` numbering from zero collides with the spans the
+   * paused invocation already wrote — the insert fails and the resumed run
+   * dies on its first span.
+   */
+  it("numbers spans from the offset it is given", async () => {
+    const { input, spans } = loopInput([resolveTurn()], { startSeq: 7 });
+
+    await runAgentLoop(input);
+
+    expect(spans.length).toBeGreaterThan(0);
+    expect(spans.map((s) => s.seq)).toEqual([7, 8]);
+  });
+
+  it("still numbers from zero when no offset is given", async () => {
+    const { input, spans } = loopInput([resolveTurn()]);
+
+    await runAgentLoop(input);
+
+    expect(spans[0]!.seq).toBe(0);
+  });
 });
 
 /* -------------------------------------------------------------------------- */
