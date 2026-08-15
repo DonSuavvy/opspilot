@@ -398,11 +398,29 @@ export const TOOLS: ToolDefinition[] = [
         );
       }
 
-      // Both `approve` and `requires_approval` land here. Confirm-write means
-      // the loop pauses before any money moves either way, so the handler's job
-      // ends at "this is allowed" — the approval queue owns what happens next.
+      /**
+       * This return value is read by the model, so it has to be true.
+       *
+       * It used to say `status: "pending_approval"`, which was accurate while
+       * the handler was unreachable — confirm-write paused before dispatch, so
+       * nothing here ever ran (FAILURES #22). Day 5's resume changed that
+       * without changing this code: `firstCallAwaitingApproval` pauses unless
+       * a decision exists, so if this handler runs, **a human already approved
+       * it**. Telling the model the refund is "pending approval" at that point
+       * is false, and in the first live run the model ignored it and promised
+       * the customer money — correctly, by luck rather than design.
+       *
+       * `recorded: false` is the uncomfortable half, and it is deliberate.
+       * Nothing here writes `refunded_cents` or an audit row, so the honest
+       * report is "authorized, not yet recorded" — see FAILURES #24. A status
+       * that claimed the money had moved would read better in a demo and be a
+       * lie the model repeats to a customer. Same call as the cache badge
+       * (#20): display the uncomfortable number, because a plausible wrong one
+       * never gets checked.
+       */
       return {
-        status: "pending_approval",
+        status: "authorized",
+        recorded: false,
         invoice_id: invoice.number,
         amount_cents: decision.approvedCents,
         outcome: decision.outcome,

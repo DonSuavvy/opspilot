@@ -1188,7 +1188,34 @@ select number, refunded_cents from invoices where number='INV-2001';
  INV-2001 |              0
 ```
 
-`refunded_cents` is zero. There is no `audit_log` row. Nothing happened.
+`refunded_cents` is zero. Nothing happened.
+
+**Correction, and the reason to run the query instead of reading the code.**
+The first draft of this entry said "there is no `audit_log` row", inferred from
+having found no writer. The query says otherwise, and says something worse:
+
+```
+select action, run_id is null, count(*) from audit_log group by 1,2;
+ draft_reply    | t | 4
+ escalate       | t | 4
+ resolve_ticket | t | 7
+```
+
+The audit log is not unbuilt — it has been recording side effects all along.
+Two holes, both invisible until asked directly:
+
+1. **`issue_refund` writes nothing.** Every *auto-write* tool records itself;
+   the one confirm-write that moves money does not. The audit trail is
+   complete except where it matters.
+2. **Every row has `run_id = NULL`** — 15 for 15. `createOpsData(db,
+   workspaceId)` closes over the workspace and never receives the run, so no
+   write *can* populate it. The log records that something happened and never
+   which run did it, which is most of what an audit log is for.
+
+This is the same mistake as this morning's, one level up: `approvals` was
+asserted to have no writer and a grep settled it; `audit_log` was asserted to
+have no row and only a query settled it. Reading code tells you what is
+written. Querying tells you what is there.
 
 `issue_refund`'s handler validates the refund against the pinned policy and
 returns `{ status: "pending_approval", ... }`. Its comment explains why:
@@ -1207,10 +1234,15 @@ decision exists, so if the handler executes, a human said yes. The sentence
 "the approval queue owns what happens next" no longer defers to anything —
 resume *is* the approval queue, and it calls the handler and takes its word.
 
-**Not fixed here, deliberately.** Recording the refund needs an `OpsData`
-method that does not exist and an `audit_log` writer that is the next item on
-Day 5. Bundling it into the resume commit would have hidden a money-moving
-change inside a control-flow change.
+**Partly fixed.** The status string was a lie the model reads, so it is gone:
+the handler now returns `status: "authorized", recorded: false`. That is the
+uncomfortable-number call from #20 again — a status claiming the money moved
+would demo better and would be a falsehood the model repeats to a customer.
+
+**The refund itself is deliberately not fixed here.** Recording it needs an
+`OpsData` method that does not exist, and `run_id` on the audit rows needs
+`createOpsData` to receive the run — both belong to Day 5's audit-log item.
+Bundling a money-moving change into a control-flow commit would hide it.
 
 **The lesson is about comments, not refunds.** The comment was true, and
 became false without being edited, because the code it described did not
