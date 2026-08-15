@@ -5,14 +5,21 @@
  * requires `npm test` to run without Postgres.
  *
  * What this proves and what it does not: it proves the *prompt* tracks
- * `policy_config`. It does not prove the *decision* changes, because
- * `issue_refund`'s handler is still `pending()` and `evaluateRefund` has no
- * production caller until Day 5 wires the approval queue. Extend this script
- * then — the missing assertion is that INV-2002 is approved at 30 days and
- * denied at 14.
+ * `policy_config`. The *decision* side is now enforced by `issue_refund`'s
+ * revalidation against the run's pinned policy (Day 5) and covered
+ * deterministically in `src/agent/refund-handler.test.ts` — which needs no
+ * database, so it belongs in the vitest suite rather than here.
  *
  * The window flip is applied to the real row and restored in a `finally`, so a
  * failure part-way through cannot leave the demo workspace narrowed.
+ *
+ * **Asserts a relationship, not a number.** An earlier version hardcoded "the
+ * active window is 30", which was an invariant only while the SOP was
+ * immutable. Day 4 shipped the editor, someone saved a 14-day version through
+ * it, and the gate went red on a workspace that was working exactly as designed.
+ * A gate that fails when the product is used is worse than no gate: it trains
+ * you to ignore it. So the script now reads whatever is active, flips to a
+ * *different* window, and asserts the prompt follows.
  */
 import { config } from "dotenv";
 
@@ -65,17 +72,21 @@ async function main() {
     policyConfig: before.policyConfig,
   });
 
+  const activeWindow = before.policyConfig.refund.windowDays;
+  // Flip to something that is definitely different from whatever is active.
+  const flipped = activeWindow === 14 ? 30 : 14;
+
   console.log(`${BOLD}1. The active version loads and is pinnable${RESET}`);
   check("a version id exists to pin onto the run", typeof before.versionId, "string");
-  check("policy_config states the shipped window", before.policyConfig.refund.windowDays, 30);
   check(
     "stored markdown keeps its placeholders",
     before.bodyMarkdown.includes("{{refund.windowDays}}"),
     true,
   );
+  console.log(`    active window (whatever was last saved): ${activeWindow} days`);
 
   console.log(`\n${BOLD}2. The compiled prompt renders from policy_config${RESET}`);
-  check("prompt states the window", statedWindow(at30), 30);
+  check("prompt states the active window", statedWindow(at30), activeWindow);
   check("no placeholder survives compilation", at30.includes("{{"), false);
   check("injection framing present", at30.includes("suspected_injection"), true);
 
@@ -85,7 +96,7 @@ async function main() {
       .set({
         policyConfig: {
           ...before.policyConfig,
-          refund: { ...before.policyConfig.refund, windowDays: 14 },
+          refund: { ...before.policyConfig.refund, windowDays: flipped },
         },
       })
       .where(eq(sopVersions.id, before.versionId));
@@ -96,11 +107,17 @@ async function main() {
       policyConfig: after.policyConfig,
     });
 
-    console.log(`\n${BOLD}3. Demo arc step 2 — flip the window 30 -> 14${RESET}`);
-    check("policy_config now states 14", after.policyConfig.refund.windowDays, 14);
-    check("prompt now states 14", statedWindow(at14), 14);
+    console.log(
+      `\n${BOLD}3. Demo arc step 2 — flip the window ${activeWindow} -> ${flipped}${RESET}`,
+    );
+    check("policy_config now states the new window", after.policyConfig.refund.windowDays, flipped);
+    check("prompt now states the new window", statedWindow(at14), flipped);
     check("the prompt actually changed", at30 !== at14, true);
-    check("no stale '30 days' anywhere", /\b30\s+days?\b/.test(at14), false);
+    check(
+      `no stale '${activeWindow} days' anywhere`,
+      new RegExp(`\\b${activeWindow}\\s+days?\\b`).test(at14),
+      false,
+    );
     check("injection framing survives the edit", at14.includes("suspected_injection"), true);
   } finally {
     await db
@@ -111,7 +128,7 @@ async function main() {
 
   const restored = await loadActiveSop(db, ws.id);
   console.log(`\n${BOLD}4. The demo workspace is left as it was found${RESET}`);
-  check("window restored", restored.policyConfig.refund.windowDays, 30);
+  check("window restored", restored.policyConfig.refund.windowDays, activeWindow);
 
   console.log(
     failures === 0
