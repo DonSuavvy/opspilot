@@ -7,6 +7,7 @@ import {
   cachedSystem,
   cacheEligibility,
   describeCache,
+  describeRunCache,
 } from "./cache";
 
 /**
@@ -186,5 +187,97 @@ describe("describeCache", () => {
     expect(report.status).toBe("miss");
     expect(report.readTokens).toBe(0);
     expect(report.writtenTokens).toBe(0);
+  });
+});
+
+/**
+ * Caught in the browser, not by a unit test: the console fed `describeCache`
+ * the run's *summed* usage and rendered "cache miss — prefix was eligible but
+ * not cached" on a Haiku run whose two prompts were 2618 and 2945 tokens.
+ *
+ * Neither was ever eligible — Haiku's floor is 4096 — but 2618 + 2945 = 5563
+ * clears it arithmetically. The sum describes a prompt that never existed, and
+ * the badge blamed the wrong thing in the confident voice of a measurement.
+ *
+ * Token counts sum across calls. Eligibility does not: it is a property of each
+ * individual prefix, so the aggregate has to combine *verdicts*, never tokens.
+ */
+describe("describeRunCache", () => {
+  const belowFloor = usage({ inputTokens: 2_618 });
+  const alsoBelowFloor = usage({ inputTokens: 2_945 });
+
+  it("reports below-threshold when no single prompt cleared the floor", () => {
+    const report = describeRunCache({
+      model: "haiku",
+      usages: [belowFloor, alsoBelowFloor],
+    });
+
+    expect(report?.status).toBe("below_threshold");
+  });
+
+  it("reports the largest prompt, since that is the one closest to clearing", () => {
+    const report = describeRunCache({
+      model: "haiku",
+      usages: [belowFloor, alsoBelowFloor],
+    });
+
+    expect(report?.promptTokens).toBe(2_945);
+    expect(report?.shortfallTokens).toBe(4_096 - 2_945);
+  });
+
+  it("never sums token counts across calls into one prompt", () => {
+    const report = describeRunCache({
+      model: "haiku",
+      usages: [belowFloor, alsoBelowFloor],
+    });
+
+    expect(report?.promptTokens).not.toBe(2_618 + 2_945);
+  });
+
+  it("reports a hit when any call read from cache", () => {
+    const report = describeRunCache({
+      model: "haiku",
+      usages: [
+        usage({ inputTokens: 200, cacheCreationInputTokens: 5_000 }),
+        usage({ inputTokens: 200, cacheReadInputTokens: 5_000 }),
+      ],
+    });
+
+    expect(report?.status).toBe("hit");
+    expect(report?.readTokens).toBe(5_000);
+  });
+
+  it("reports a write when the prefix was cached but never read back", () => {
+    const report = describeRunCache({
+      model: "haiku",
+      usages: [usage({ inputTokens: 200, cacheCreationInputTokens: 5_000 })],
+    });
+
+    expect(report?.status).toBe("write");
+  });
+
+  it("sums read tokens across every call that hit", () => {
+    const report = describeRunCache({
+      model: "haiku",
+      usages: [
+        usage({ cacheReadInputTokens: 4_000 }),
+        usage({ cacheReadInputTokens: 4_500 }),
+      ],
+    });
+
+    expect(report?.readTokens).toBe(8_500);
+  });
+
+  it("distinguishes an eligible miss from a below-threshold run", () => {
+    const report = describeRunCache({
+      model: "opus",
+      usages: [belowFloor, alsoBelowFloor],
+    });
+
+    expect(report?.status).toBe("miss");
+  });
+
+  it("returns null when the run made no model calls", () => {
+    expect(describeRunCache({ model: "haiku", usages: [] })).toBeNull();
   });
 });
