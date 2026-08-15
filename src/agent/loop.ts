@@ -23,6 +23,7 @@
  * without a database and deterministic in the eval suite.
  */
 import { checkBudget, type BudgetConfig, type BudgetRefusal } from "./budget";
+import type { SystemBlock } from "./cache";
 import {
   costOf,
   type CacheTtl,
@@ -95,7 +96,15 @@ export interface AssistantTurn {
 export interface MessageCreateParams {
   model: string;
   max_tokens: number;
-  system: string;
+  /**
+   * A bare string, or blocks when the prefix is marked cacheable.
+   *
+   * Both shapes reach the API unchanged; the loop never inspects or rebuilds
+   * this. Prompt caching is a byte-level prefix match, so anything that
+   * normalised the text in passing would change the cache key and drop the hit
+   * rate for a reason nothing in the trace would explain.
+   */
+  system: string | SystemBlock[];
   messages: MessageParam[];
   tools: unknown[];
 }
@@ -141,7 +150,8 @@ export interface AgentLoopInput {
   /** The provider's wire id. Logical names are resolved in provider.ts. */
   model: string;
   rates: RateCard;
-  system: string;
+  /** Pass `cachedSystem(prompt)` to mark the prefix cacheable. */
+  system: string | SystemBlock[];
   messages: MessageParam[];
   toolContext: ToolContext;
   budget: { config: BudgetConfig; spentTodayNanos: number };

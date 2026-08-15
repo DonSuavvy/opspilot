@@ -14,6 +14,9 @@
  */
 import { useCallback, useRef, useState } from "react";
 
+import { describeRunCache, type CacheStatus } from "@/agent/cache";
+import type { TokenUsage } from "@/agent/cost";
+import type { LogicalModel } from "@/agent/provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { createSseParser } from "@/lib/sse";
@@ -32,7 +35,8 @@ interface Span {
   isError: boolean;
   costNanos: number;
   latencyMs: number;
-  usage: { inputTokens: number; outputTokens: number } | null;
+  /** All four token classes — the cache counters drive the badge. */
+  usage: TokenUsage | null;
 }
 
 interface Done {
@@ -42,7 +46,28 @@ interface Done {
   costNanos: number;
   estimated: boolean;
   error: string | null;
+  /** Logical name, not the wire id — the cache floor is per model. */
+  model: LogicalModel;
+  /**
+   * All four token classes, not just input/output. The cache counters are what
+   * make the badge below a measurement rather than a guess.
+   */
+  usage: TokenUsage | null;
 }
+
+/**
+ * Tone by what actually happened. `below_threshold` is deliberately neutral
+ * rather than red: a prefix under the model's floor is a fact about the prompt,
+ * not a fault, and colouring it as an error would push whoever reads this
+ * toward padding the SOP to turn the badge green — which is exactly the theatre
+ * the honest-display decision rejected.
+ */
+const CACHE_TONE: Record<CacheStatus, string> = {
+  hit: "bg-emerald-100 text-emerald-900",
+  write: "bg-sky-100 text-sky-900",
+  below_threshold: "bg-zinc-100 text-zinc-600",
+  miss: "bg-zinc-100 text-zinc-600",
+};
 
 const usd = (nanos: number) => `$${(nanos / 1_000_000_000).toFixed(6)}`;
 
@@ -132,6 +157,24 @@ export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
   // Cost ticks up live rather than landing at the end — the demo's whole claim
   // is that this is observable while it happens.
   const liveCost = spans.reduce((total, s) => total + s.costNanos, 0);
+
+  /**
+   * Measured, and computed **per model call** rather than from the run total.
+   *
+   * Summing first was a real bug: a Haiku run with prompts of 2618 and 2945
+   * tokens reported "prefix was eligible but not cached", because 5563 clears
+   * the 4096 floor even though neither prompt ever did. Token counts sum across
+   * calls; eligibility does not.
+   */
+  const cache = done
+    ? describeRunCache({
+        model: done.model,
+        usages: spans
+          .filter((s) => s.type === "llm_call")
+          .map((s) => s.usage)
+          .filter((u): u is TokenUsage => u != null),
+      })
+    : null;
   const slowest = spans.reduce((max, s) => Math.max(max, s.latencyMs), 0);
 
   return (
@@ -190,6 +233,14 @@ export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
               }`}
             >
               {done.status.replaceAll("_", " ")} · {done.iterations} iterations
+            </span>
+          ) : null}
+          {cache ? (
+            <span
+              className={`rounded px-2 py-0.5 text-xs font-medium ${CACHE_TONE[cache.status]}`}
+              title={cache.label}
+            >
+              {cache.label}
             </span>
           ) : null}
         </div>

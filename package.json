@@ -21,7 +21,8 @@
     "db:up": "docker compose up -d && sleep 3",
     "db:down": "docker compose down -v",
     "verify:boot": "tsx scripts/verify-boot.ts",
-    "verify:seed": "tsx scripts/verify-seed.ts"
+    "verify:seed": "tsx scripts/verify-seed.ts",
+    "verify:sop": "tsx scripts/verify-sop.ts"
   },
   "dependencies": {
     "@anthropic-ai/bedrock-sdk": "^0.32.1",
