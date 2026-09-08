@@ -236,7 +236,8 @@ IDs and API shapes changed in 2025–26; do not code from memory.
 docs/PLAN.md            authoritative build plan
 src/policy/             pure policy engine (refund limits, escalation)
 src/agent/registry.ts   tool registry: Zod -> strict JSON Schema, boot validation
-src/agent/tools.ts      the 9 tools — 7 handlers live, confirm-write pair Day 5
+src/agent/tools.ts      the 9 tools — 8 handlers live; update_subscription is a
+                        deliberate stub
 src/agent/loop.ts       the hand-rolled tool loop (MessageCreator seam)
 src/agent/data.ts       OpsData — the workspace-bound seam handlers run against
 src/agent/trace.ts      span -> run_spans row, and SSE framing
