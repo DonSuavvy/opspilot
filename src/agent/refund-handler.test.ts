@@ -208,17 +208,39 @@ describe("issue_refund recording", () => {
     });
   });
 
+  /**
+   * Four fields, three different sources: `status` is the handler's own word
+   * for "the refund happened"; `amount_cents` is this refund, from the policy
+   * decision; `refunded_cents_total` and `invoice_status` describe the invoice
+   * afterwards and come from the seam. The fixture makes all four disagree on
+   * purpose — a partly refunded invoice topped up by 3,000 to 4,000 of its
+   * 4,900, so it is still only partly refunded. With the obvious full-refund
+   * fixture the four collapse to two values and the test passes even if the
+   * handler reports the request where the row belongs, or hardcodes the
+   * invoice status it hopes for.
+   */
   it("reports what the seam recorded, not what the model asked for", async () => {
-    const result = await issueRefund(validCall, withWindow(30));
+    const data = fakeData({ ...INV_2002, refundedCents: 1_000 });
+    vi.mocked(data.recordRefund).mockResolvedValue({
+      refundedCents: 4_000,
+      status: "partially_refunded",
+      duplicate: false,
+    });
+
+    const result = await issueRefund(
+      { ...validCall, amount_cents: 3_000 },
+      withWindow(30),
+      data,
+    );
 
     expect(result).toMatchObject({
       status: "refunded",
       recorded: true,
       duplicate: false,
       invoice_id: "INV-2002",
-      amount_cents: 4_900,
-      refunded_cents_total: 4_900,
-      invoice_status: "refunded",
+      amount_cents: 3_000,
+      refunded_cents_total: 4_000,
+      invoice_status: "partially_refunded",
       idempotency_key: "tkt_1-INV-2002",
     });
   });
