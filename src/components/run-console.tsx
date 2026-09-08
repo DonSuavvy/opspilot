@@ -12,6 +12,7 @@
  * controls so a resumed run renders through the same code path as the first
  * half of its own trace.
  */
+import Link from "next/link";
 import { useCallback, useRef, useState } from "react";
 
 import { describeRunCache, type CacheStatus } from "@/agent/cache";
@@ -310,6 +311,24 @@ export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
               }}
             />
           </div>
+        ) : null}
+
+        {/*
+          Paused, but the stream never handed back a run id, so there is
+          nothing to resume in place. Without this the panel above is skipped
+          and the fallback below excludes the status, which left the run
+          looking finished and silent — the worst reading of a pause, because
+          the money is still waiting on a decision somewhere.
+        */}
+        {done?.status === "paused_for_approval" && !runId ? (
+          <p className="text-sm text-zinc-500">
+            Paused for approval, but this trace lost its run id. Decide it from
+            the{" "}
+            <Link href="/approvals" className="underline">
+              approval queue
+            </Link>
+            .
+          </p>
         ) : null}
 
         {done && !done.outcome && done.status !== "paused_for_approval" ? (
