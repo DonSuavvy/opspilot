@@ -52,6 +52,43 @@ import type { Assertion } from "./types";
  */
 const ESTIMATED_CALL_NANOS = 20_000_000; // $0.02
 
+/**
+ * Every side effect the suite has, in one injectable bag.
+ *
+ * Not ceremony: the two bugs this seam exists for are both in the *failure*
+ * path — a case that throws after its `agent_runs` row is open must still be
+ * finished and must be counted exactly once — and there is no way to provoke a
+ * throw from `insertEvalResult` against a real database without breaking it.
+ * The default is the real module, so no caller changes.
+ */
+export interface EvalPersistence {
+  upsertEvalCases: typeof upsertEvalCases;
+  createEvalRun: typeof createEvalRun;
+  insertEvalResult: typeof insertEvalResult;
+  finishEvalRun: typeof finishEvalRun;
+  startRun: typeof startRun;
+  finishRun: typeof finishRun;
+  writeSpan: typeof writeSpan;
+  spentTodayNanos: typeof spentTodayNanos;
+  createOpsData: typeof createOpsData;
+  getSopVersion: typeof getSopVersion;
+  loadActiveSop: typeof loadActiveSop;
+}
+
+const DB_PERSISTENCE: EvalPersistence = {
+  upsertEvalCases,
+  createEvalRun,
+  insertEvalResult,
+  finishEvalRun,
+  startRun,
+  finishRun,
+  writeSpan,
+  spentTodayNanos,
+  createOpsData,
+  getSopVersion,
+  loadActiveSop,
+};
+
 /** Emitted once the run row exists, so the client can name what it is watching. */
 export interface EvalRunStartedEvent {
   type: "run";
@@ -104,6 +141,8 @@ export interface RunEvalSuiteInput {
   /** Frozen for the whole suite. Never `Date.now()` inside a case. */
   now: Date;
   emit: (event: EvalSuiteEvent) => void | Promise<void>;
+  /** Defaults to the real `src/db` functions; injected in tests. */
+  persist?: EvalPersistence;
 }
 
 export interface EvalSuiteSummary {
@@ -145,17 +184,18 @@ export async function runEvalSuite(
   input: RunEvalSuiteInput,
 ): Promise<EvalSuiteSummary> {
   const { db, workspaceId, model, now, emit } = input;
+  const persist = input.persist ?? DB_PERSISTENCE;
 
   const enabled = input.cases.filter((c) => c.enabled);
-  const caseIds = await upsertEvalCases(db, enabled);
+  const caseIds = await persist.upsertEvalCases(db, enabled);
 
   // Pinned once. A version id resolves that exact document; without one the
   // run takes whatever is active *at the start* and records which it was, so
   // an edit landing mid-suite cannot change what half the cases were scored
   // against.
   const sop = input.sopVersionId
-    ? await getSopVersion(db, workspaceId, input.sopVersionId)
-    : await loadActiveSop(db, workspaceId);
+    ? await persist.getSopVersion(db, workspaceId, input.sopVersionId)
+    : await persist.loadActiveSop(db, workspaceId);
 
   const system = cachedSystem(
     compileSop({
@@ -165,7 +205,7 @@ export async function runEvalSuite(
   );
   const pin = promptVersion(system);
 
-  const evalRunId = await createEvalRun(db, {
+  const evalRunId = await persist.createEvalRun(db, {
     workspaceId,
     sopVersionId: sop.versionId,
     // The logical name, per CLAUDE.md — the wire id belongs on the spans.
@@ -200,7 +240,7 @@ export async function runEvalSuite(
     let agentRunId: string | null = null;
 
     try {
-      agentRunId = await startRun(db, {
+      agentRunId = await persist.startRun(db, {
         workspaceId,
         // An eval case is not a ticket. `eval_results.eval_case_id` is what
         // points back at what was run.
@@ -212,7 +252,7 @@ export async function runEvalSuite(
       // Re-read per case rather than once before the loop: the previous case's
       // `finishRun` has landed by now, so this baseline includes it. That is
       // the whole reason the suite is sequential.
-      const baseline = await spentTodayNanos(db, workspaceId, now);
+      const baseline = await persist.spentTodayNanos(db, workspaceId, now);
 
       const run = await runCase(c, {
         registry,
@@ -221,7 +261,7 @@ export async function runEvalSuite(
         rates,
         system,
         policyConfig: sop.policyConfig,
-        data: createOpsData(db, { workspaceId, runId: agentRunId }),
+        data: persist.createOpsData(db, { workspaceId, runId: agentRunId }),
         workspaceId,
         runId: agentRunId,
         now,
@@ -229,7 +269,7 @@ export async function runEvalSuite(
         estimatedCallNanos: ESTIMATED_CALL_NANOS,
         clock: () => new Date(),
         emit: async (span) => {
-          await writeSpan(
+          await persist.writeSpan(
             db,
             spanToRow({ workspaceId, runId: agentRunId! }, span),
           );
@@ -237,7 +277,7 @@ export async function runEvalSuite(
       });
 
       const endedAt = new Date();
-      await finishRun(db, agentRunId, run.result, endedAt);
+      await persist.finishRun(db, agentRunId, run.result, endedAt);
 
       costNanos += run.result.costNanos;
       if (run.score.passed) passed += 1;
@@ -260,7 +300,7 @@ export async function runEvalSuite(
           ? `${run.score.failureReason} — the run did not finish: ${run.result.error}`
           : run.score.failureReason;
 
-      await insertEvalResult(db, {
+      await persist.insertEvalResult(db, {
         workspaceId,
         evalRunId,
         evalCaseId: caseIds.get(c.slug)!,
@@ -297,7 +337,7 @@ export async function runEvalSuite(
       const failureReason = `case threw: ${errorText(error)}`;
       const latencyMs = Date.now() - startedAt.getTime();
 
-      await insertEvalResult(db, {
+      await persist.insertEvalResult(db, {
         workspaceId,
         evalRunId,
         evalCaseId: caseIds.get(c.slug)!,
@@ -325,7 +365,7 @@ export async function runEvalSuite(
     }
   }
 
-  await finishEvalRun(db, evalRunId, {
+  await persist.finishEvalRun(db, evalRunId, {
     status: threw ? "failed" : "completed",
     passedCases: passed,
     failedCases: failed,
