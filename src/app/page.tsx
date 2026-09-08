@@ -7,13 +7,13 @@
  * part — running a ticket and watching the trace build — is the one client
  * island below.
  */
-import { desc, eq } from "drizzle-orm";
+import { count, desc, eq } from "drizzle-orm";
 
 import Link from "next/link";
 
 import { RunConsole, type TicketSummary } from "@/components/run-console";
 import { getDb } from "@/db/client";
-import { customers, tickets } from "@/db/schema";
+import { approvals, customers, tickets } from "@/db/schema";
 
 // The inbox reflects run state, which changes underneath any cache.
 export const dynamic = "force-dynamic";
@@ -41,12 +41,33 @@ async function loadTickets(): Promise<TicketSummary[]> {
   }));
 }
 
+/**
+ * How many calls are waiting on a person, for the header link.
+ *
+ * Unfiltered by workspace, exactly as `loadTickets` above is: this page shows
+ * one demo tenant, and a count scoped differently from the list beside it
+ * would be the more confusing of the two answers.
+ */
+async function countPendingApprovals(): Promise<number> {
+  const db = getDb();
+  const [row] = await db
+    .select({ pending: count() })
+    .from(approvals)
+    .where(eq(approvals.status, "pending"));
+
+  return row?.pending ?? 0;
+}
+
 export default async function Home() {
   let ticketList: TicketSummary[] = [];
+  let pendingApprovals = 0;
   let loadError: string | null = null;
 
   try {
-    ticketList = await loadTickets();
+    [ticketList, pendingApprovals] = await Promise.all([
+      loadTickets(),
+      countPendingApprovals(),
+    ]);
   } catch (error) {
     // The most likely cause by far is an unseeded or unreachable database, and
     // a stack trace in the browser is a worse answer than the command to fix it.
@@ -60,6 +81,11 @@ export default async function Home() {
           <h1 className="text-2xl font-semibold tracking-tight">OpsPilot</h1>
           <Link href="/sop" className="text-sm text-zinc-500 underline">
             edit the SOP
+          </Link>
+          <Link href="/approvals" className="text-sm text-zinc-500 underline">
+            {pendingApprovals > 0
+              ? `approvals (${pendingApprovals})`
+              : "approvals"}
           </Link>
         </div>
         <p className="mt-1 max-w-2xl text-sm text-zinc-500">

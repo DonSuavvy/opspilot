@@ -247,7 +247,12 @@ src/db/client.ts        lazy getDb()
 src/db/ops-data.ts      Drizzle OpsData, scoped to one workspace
 src/db/runs.ts          run + span persistence, today's spend
 src/db/seed.ts          deterministic Beacon Analytics seed
+src/lib/agent-stream.ts   SSE trace reader, shared by both islands that start a run
+src/lib/approval-copy.ts  describeApproval — the sentence a reviewer decides on
+src/components/approval-decision.tsx  approve or deny one paused run, in place
+src/components/approval-queue.tsx     the pending rows, each decided on its own
 src/app/api/agent/run/  POST a ticket id, stream the trace back as SSE
+src/app/approvals/      the queue page, server-rendered from listPendingApprovals
 scripts/verify-*.ts     gate evidence that needs a database
 scripts/probe-grammar.ts  which tool set blows the strict grammar cap
 ```
