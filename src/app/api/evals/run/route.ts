@@ -94,7 +94,11 @@ export async function POST(request: Request) {
     workspaceId = await demoWorkspaceId(db);
     budgetConfig = budgetConfigSchema.parse(process.env);
     provider = providerFromEnv(process.env);
-    client = createClient(provider, process.env);
+    // A burst, unlike the demo's single-ticket path: eight runs back to back
+    // is roughly 25 model calls in under a minute, which exhausted the SDK's
+    // default two retries on covara and killed the last three cases of the
+    // first calibration run with a Bedrock 429. See `ClientTuning`.
+    client = createClient(provider, process.env, { maxRetries: 8 });
   } catch (error) {
     return Response.json(
       { error: error instanceof Error ? error.message : String(error) },

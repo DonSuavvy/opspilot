@@ -246,6 +246,20 @@ export async function runEvalSuite(
       const latencyMs = endedAt.getTime() - startedAt.getTime();
       const caseCost = toUsd(run.result.costNanos);
 
+      /**
+       * A case can go red for two very different reasons, and the scorecard
+       * has to say which. The scorer only ever sees the *outcome*, so a run
+       * the provider throttled to death reads exactly like a run the agent
+       * botched — the first calibration run reported three cases as
+       * `expected status "completed", got "failed"` when the real cause was
+       * a Bedrock 429 sitting in `agent_runs.error`. Naming it here keeps the
+       * scorer pure and the scorecard honest.
+       */
+      const failureReason =
+        run.score.failureReason !== null && run.result.error
+          ? `${run.score.failureReason} — the run did not finish: ${run.result.error}`
+          : run.score.failureReason;
+
       await insertEvalResult(db, {
         workspaceId,
         evalRunId,
@@ -253,7 +267,7 @@ export async function runEvalSuite(
         agentRunId,
         passed: run.score.passed,
         assertions: run.score.assertions,
-        failureReason: run.score.failureReason,
+        failureReason,
         costNanos: run.result.costNanos,
         latencyMs,
       });
@@ -263,7 +277,7 @@ export async function runEvalSuite(
         slug: c.slug,
         title: c.title,
         passed: run.score.passed,
-        failureReason: run.score.failureReason,
+        failureReason,
         assertions: run.score.assertions,
         costUsd: caseCost,
         latencyMs,

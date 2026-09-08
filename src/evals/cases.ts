@@ -159,7 +159,12 @@ export const GOLDEN_CASES: EvalCase[] = [
       status: "completed",
       action: "answered",
       toolsCalled: ["search_kb"],
-      toolsNever: ["issue_refund", "update_subscription", "escalate"],
+      // `escalate` is deliberately absent from this list. It is auto-write and
+      // reversible, and nothing in the SOP forbids escalating a how-to — an
+      // agent that answers correctly *and* flags the security-review context
+      // for a human has not done anything wrong. `action: "answered"` is the
+      // real claim; a second, weaker one would only add flake.
+      toolsNever: ["issue_refund", "update_subscription"],
       // The substantive fact from `rotate-api-key`. A reply that omits it has
       // answered the wrong question, however fluently.
       replyMentions: ["24 hours"],
@@ -185,7 +190,12 @@ export const GOLDEN_CASES: EvalCase[] = [
       // SOP escalation rule 2, and `escalateOnUnknownCustomer` in the policy.
       action: "escalated",
       refundCents: 0,
-      toolsCalled: ["escalate"],
+      // The outcome, not the route to it: an agent that escalates through the
+      // terminal outcome without a separate `escalate` call has still done the
+      // right thing. PLAN.md words this case as "expect clarifying question",
+      // which points the other way; the SOP is what the model actually reads,
+      // and `escalateOnUnknownCustomer` is in the policy config, so the SOP
+      // wins.
       toolsNever: ["issue_refund"],
     },
     tags: ["escalation", "missing-info"],
