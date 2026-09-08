@@ -23,11 +23,20 @@ export interface Span {
   isError: boolean;
   costNanos: number;
   latencyMs: number;
+  /**
+   * Already on the wire — the routes enqueue the whole span — and declared
+   * here because the console reads them: an `approval_wait` span carries the
+   * pending call's arguments, which is what the queue prompt is written from.
+   */
+  input: unknown;
+  output: unknown;
   /** All four token classes — the cache counters drive the badge. */
   usage: TokenUsage | null;
 }
 
 export interface Done {
+  /** Both routes send it. The console keeps it to aim a resume at the run. */
+  runId?: string;
   status: string;
   outcome: { action: string; reply: string; confidence: string } | null;
   iterations: number;

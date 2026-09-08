@@ -16,8 +16,10 @@ import { useCallback, useRef, useState } from "react";
 
 import { describeRunCache, type CacheStatus } from "@/agent/cache";
 import type { TokenUsage } from "@/agent/cost";
+import { ApprovalDecision } from "@/components/approval-decision";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { describeApproval } from "@/lib/approval-copy";
 import { readAgentStream, type Done, type Span } from "@/lib/agent-stream";
 
 export interface TicketSummary {
@@ -70,6 +72,9 @@ export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
   );
   const [spans, setSpans] = useState<Span[]>([]);
   const [done, setDone] = useState<Done | null>(null);
+  // Kept so the decision controls below can aim a resume at this run. The
+  // `run` event carries it from the first byte; `done` repeats it.
+  const [runId, setRunId] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abort = useRef<AbortController | null>(null);
@@ -81,6 +86,7 @@ export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
 
     setSpans([]);
     setDone(null);
+    setRunId(null);
     setError(null);
     setRunning(true);
 
@@ -100,8 +106,12 @@ export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
       }
 
       await readAgentStream(response, {
+        onRun: (started) => setRunId(started.runId),
         onSpan: (span) => setSpans((prev) => [...prev, span]),
-        onDone: setDone,
+        onDone: (finished) => {
+          if (finished.runId) setRunId(finished.runId);
+          setDone(finished);
+        },
         onError: setError,
       });
     } catch (caught) {
@@ -135,6 +145,19 @@ export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
       })
     : null;
   const slowest = spans.reduce((max, s) => Math.max(max, s.latencyMs), 0);
+
+  /**
+   * The **last** approval wait, not the first. A resumed run can pause again
+   * on a second confirm-write in the same turn, and the question on screen has
+   * to be the one still unanswered.
+   */
+  const waits = spans.filter((s) => s.type === "approval_wait");
+  const awaiting = waits.length > 0 ? waits[waits.length - 1] : undefined;
+  const asking = awaiting
+    ? describeApproval({ toolName: awaiting.name, toolInput: awaiting.input })
+    : "A confirm-write tool is waiting for a decision.";
+  const pausedRunId =
+    done?.status === "paused_for_approval" ? runId : null;
 
   return (
     // Two columns from `md`, not `lg`: the trace is the thing being
@@ -260,11 +283,38 @@ export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
           </div>
         ) : null}
 
-        {done && !done.outcome ? (
+        {pausedRunId ? (
+          <div className="flex flex-col gap-3 rounded-lg border border-sky-300 bg-sky-50 p-4 dark:border-sky-900 dark:bg-sky-950">
+            <div>
+              <p className="text-sm font-medium">
+                Paused for human approval — nothing has run yet.
+              </p>
+              <p className="mt-1 font-mono text-sm text-zinc-600 dark:text-zinc-300">
+                {asking}
+              </p>
+            </div>
+            <ApprovalDecision
+              runId={pausedRunId}
+              onStart={() => {
+                setError(null);
+                setRunning(true);
+              }}
+              onSpan={(span) => setSpans((prev) => [...prev, span])}
+              onDone={(finished) => {
+                setDone(finished);
+                setRunning(false);
+              }}
+              onError={(message) => {
+                setError(message);
+                setRunning(false);
+              }}
+            />
+          </div>
+        ) : null}
+
+        {done && !done.outcome && done.status !== "paused_for_approval" ? (
           <p className="text-sm text-zinc-500">
-            {done.status === "paused_for_approval"
-              ? "Paused for human approval — a confirm-write tool was called, so the run stopped before it executed. Resume lands on Day 5."
-              : (done.error ?? "No structured outcome.")}
+            {done.error ?? "No structured outcome."}
           </p>
         ) : null}
       </section>
