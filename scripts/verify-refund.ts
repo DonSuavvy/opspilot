@@ -27,7 +27,7 @@ import { and, eq } from "drizzle-orm";
 
 import { closeDb, getDb } from "../src/db/client";
 import { createOpsData } from "../src/db/ops-data";
-import { agentRuns, auditLog, workspaces } from "../src/db/schema";
+import { agentRuns, auditLog, invoices, workspaces } from "../src/db/schema";
 
 const GREEN = "\x1b[32m";
 const RED = "\x1b[31m";
@@ -35,6 +35,16 @@ const BOLD = "\x1b[1m";
 const RESET = "\x1b[0m";
 
 let failures = 0;
+
+/**
+ * `INV-2005`, the second half of the seeded duplicate charge. Chosen because
+ * the demo arc never refunds it — `INV-2001` through `INV-2003` carry the
+ * refund-window story and must keep the ages and balances `verify:seed`
+ * asserts. It is restored on the way out regardless.
+ */
+const TARGET = "INV-2005";
+const REFUND_CENTS = 1_000;
+const KEY = "verify-refund-fixture";
 
 function check(label: string, actual: unknown, expected: unknown) {
   const ok = actual === expected;
@@ -71,11 +81,23 @@ async function main() {
 
   const runId = run!.id;
 
+  const [before] = await db
+    .select({
+      amountCents: invoices.amountCents,
+      refundedCents: invoices.refundedCents,
+      status: invoices.status,
+    })
+    .from(invoices)
+    .where(and(eq(invoices.workspaceId, ws.id), eq(invoices.number, TARGET)))
+    .limit(1);
+  if (!before) throw new Error(`no ${TARGET} — run \`npm run db:seed\``);
+
   try {
+    const data = createOpsData(db, { workspaceId: ws.id, runId });
+
     console.log(
       `${BOLD}1. An audit row written through the seam carries the run id${RESET}`,
     );
-    const data = createOpsData(db, { workspaceId: ws.id, runId });
     await data.saveDraft("tkt_verify_refund", "gate fixture");
 
     const [draftRow] = await db
@@ -90,6 +112,107 @@ async function main() {
       .limit(1);
 
     check("the draft's audit row names the run", draftRow?.runId, runId);
+
+    console.log(`\n${BOLD}2. The refund lands on the invoice${RESET}`);
+    const result = await data.recordRefund({
+      invoiceNumber: TARGET,
+      amountCents: REFUND_CENTS,
+      reason: "duplicate_charge",
+      idempotencyKey: KEY,
+    });
+
+    const expectedTotal = before.refundedCents + REFUND_CENTS;
+    const expectedStatus =
+      expectedTotal === before.amountCents ? "refunded" : "partially_refunded";
+
+    check("the seam reports the new running total", result.refundedCents, expectedTotal);
+    check("and the new invoice status", result.status, expectedStatus);
+    check("it is not reported as a duplicate", result.duplicate, false);
+
+    const after = async () =>
+      (
+        await db
+          .select({
+            refundedCents: invoices.refundedCents,
+            status: invoices.status,
+          })
+          .from(invoices)
+          .where(
+            and(eq(invoices.workspaceId, ws.id), eq(invoices.number, TARGET)),
+          )
+          .limit(1)
+      )[0];
+
+    // The query FAILURES #24 was closed by. Everything above is what the code
+    // says happened; this is the row.
+    const row = await after();
+    check("refunded_cents on the row itself", row?.refundedCents, expectedTotal);
+    check("status on the row itself", row?.status, expectedStatus);
+
+    console.log(
+      `\n${BOLD}3. Exactly one audit row, and it says what changed${RESET}`,
+    );
+    const refundRows = async () =>
+      db
+        .select({
+          runId: auditLog.runId,
+          entityId: auditLog.entityId,
+          entityType: auditLog.entityType,
+          before: auditLog.before,
+          after: auditLog.after,
+        })
+        .from(auditLog)
+        .where(
+          and(eq(auditLog.runId, runId), eq(auditLog.action, "issue_refund")),
+        );
+
+    const audit = await refundRows();
+    check("one issue_refund row", audit.length, 1);
+    check("attributed to the run", audit[0]?.runId, runId);
+    check("against the invoice", audit[0]?.entityType, "invoice");
+    check("named by number", audit[0]?.entityId, TARGET);
+
+    const auditBefore = audit[0]?.before as Record<string, unknown> | undefined;
+    const auditAfter = audit[0]?.after as Record<string, unknown> | undefined;
+    check("before: the balance it started from", auditBefore?.refundedCents, before.refundedCents);
+    check("before: the status it started from", auditBefore?.status, before.status);
+    check("after: the new running total", auditAfter?.refundedCents, expectedTotal);
+    check("after: the new status", auditAfter?.status, expectedStatus);
+    check("after: this refund's own amount", auditAfter?.amountCents, REFUND_CENTS);
+    check("after: the reason", auditAfter?.reason, "duplicate_charge");
+    check("after: the idempotency key", auditAfter?.idempotency_key, KEY);
+
+    console.log(
+      `\n${BOLD}4. The same key again moves no money${RESET}`,
+    );
+    const replay = await data.recordRefund({
+      invoiceNumber: TARGET,
+      amountCents: REFUND_CENTS,
+      reason: "duplicate_charge",
+      idempotencyKey: KEY,
+    });
+
+    check("reported as a duplicate", replay.duplicate, true);
+    check("with the total from the first call", replay.refundedCents, expectedTotal);
+    check("and its status", replay.status, expectedStatus);
+
+    const replayed = await after();
+    check("the invoice did not move again", replayed?.refundedCents, expectedTotal);
+    check("still one audit row", (await refundRows()).length, 1);
+
+    console.log(`\n${BOLD}5. An invoice this workspace does not have${RESET}`);
+    let threw = false;
+    try {
+      await data.recordRefund({
+        invoiceNumber: "INV-DOES-NOT-EXIST",
+        amountCents: 100,
+        reason: "other",
+        idempotencyKey: "verify-refund-missing",
+      });
+    } catch {
+      threw = true;
+    }
+    check("throws rather than writing nothing quietly", threw, true);
   } finally {
     // `audit_log.run_id` is `set null` on delete, so these rows must go first
     // or they survive the run as untraceable orphans in the demo workspace.
@@ -103,6 +226,14 @@ async function main() {
         ),
       );
     await db.delete(agentRuns).where(eq(agentRuns.id, runId));
+
+    // The seed is a fixture the demo arc depends on, so this script must be a
+    // no-op against it once it exits — `verify:seed` asserts INV-2005's
+    // balance and it is not this script's to change.
+    await db
+      .update(invoices)
+      .set({ refundedCents: before.refundedCents, status: before.status })
+      .where(and(eq(invoices.workspaceId, ws.id), eq(invoices.number, TARGET)));
   }
 
   console.log(
