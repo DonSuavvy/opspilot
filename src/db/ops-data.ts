@@ -10,6 +10,12 @@
  * workspace id and no method exposes one, so a handler cannot read across a
  * sandbox boundary by forgetting a `where` clause — every query below carries
  * the scope because there is no other way to build one.
+ *
+ * **The run is bound the same way, and for the same reason.** Every write here
+ * lands in `audit_log`, and an audit row that cannot say which run made the
+ * change is most of the way to no audit row at all — FAILURES #24 found 15 of
+ * them. Passing the run per call would make forgetting it possible; closing
+ * over it means no write below *can* omit it.
  */
 import { and, desc, eq, or, sql } from "drizzle-orm";
 
@@ -33,7 +39,15 @@ import {
 /** Ranked KB hits returned to the model. Small on purpose: the corpus is ~20 */
 const KB_LIMIT = 5;
 
-export function createOpsData(db: Db, workspaceId: string): OpsData {
+export interface OpsDataScope {
+  workspaceId: string;
+  /** The run every write below is attributed to. */
+  runId: string;
+}
+
+export function createOpsData(db: Db, scope: OpsDataScope): OpsData {
+  const { workspaceId, runId } = scope;
+
   /**
    * External id → internal uuid. Every tool addresses customers by the
    * external id the model saw in the ticket, never by a uuid it would have to
@@ -187,6 +201,7 @@ export function createOpsData(db: Db, workspaceId: string): OpsData {
         .insert(auditLog)
         .values({
           workspaceId,
+          runId,
           actorType: "agent",
           action: "draft_reply",
           entityType: "ticket",
@@ -207,6 +222,7 @@ export function createOpsData(db: Db, workspaceId: string): OpsData {
 
       await db.insert(auditLog).values({
         workspaceId,
+        runId,
         actorType: "agent",
         action: "escalate",
         entityType: "ticket",
@@ -231,6 +247,7 @@ export function createOpsData(db: Db, workspaceId: string): OpsData {
 
       await db.insert(auditLog).values({
         workspaceId,
+        runId,
         actorType: "agent",
         action: "resolve_ticket",
         entityType: "ticket",

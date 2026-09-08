@@ -237,7 +237,7 @@ export async function POST(request: Request) {
             runId,
             ticketId,
             now,
-            data: createOpsData(db, run.workspaceId),
+            data: createOpsData(db, { workspaceId: run.workspaceId, runId }),
             policyConfig: sop.policyConfig,
           },
           budget: { config: budgetConfig, spentTodayNanos: baseline },

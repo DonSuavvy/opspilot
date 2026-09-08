@@ -75,7 +75,7 @@ async function main() {
     console.log(
       `${BOLD}1. An audit row written through the seam carries the run id${RESET}`,
     );
-    const data = createOpsData(db, ws.id);
+    const data = createOpsData(db, { workspaceId: ws.id, runId });
     await data.saveDraft("tkt_verify_refund", "gate fixture");
 
     const [draftRow] = await db
