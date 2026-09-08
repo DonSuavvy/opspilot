@@ -67,6 +67,17 @@ async function main() {
 
   console.log(`\n${BOLD}Refund recording — workspace ${ws.slug}${RESET}\n`);
 
+  const [before] = await db
+    .select({
+      amountCents: invoices.amountCents,
+      refundedCents: invoices.refundedCents,
+      status: invoices.status,
+    })
+    .from(invoices)
+    .where(and(eq(invoices.workspaceId, ws.id), eq(invoices.number, TARGET)))
+    .limit(1);
+  if (!before) throw new Error(`no ${TARGET} — run \`npm run db:seed\``);
+
   // A throwaway run to attribute the writes to. It never goes near the agent
   // loop; it exists so `audit_log.run_id` has something to point at.
   const [run] = await db
@@ -80,17 +91,6 @@ async function main() {
     .returning({ id: agentRuns.id });
 
   const runId = run!.id;
-
-  const [before] = await db
-    .select({
-      amountCents: invoices.amountCents,
-      refundedCents: invoices.refundedCents,
-      status: invoices.status,
-    })
-    .from(invoices)
-    .where(and(eq(invoices.workspaceId, ws.id), eq(invoices.number, TARGET)))
-    .limit(1);
-  if (!before) throw new Error(`no ${TARGET} — run \`npm run db:seed\``);
 
   try {
     const data = createOpsData(db, { workspaceId: ws.id, runId });
