@@ -1319,7 +1319,7 @@ The `for update` on the invoice belongs in the same paragraph, for the same
 reason. It is there so two refunds against one invoice cannot both read the
 same `refunded_cents` and both write their own total, and that is a property of
 the SQL rather than a hope — but nothing exercises it. Removing the clause
-leaves all 23 gate checks and all 419 tests green, because every one of them
+leaves all 32 gate checks and all 419 tests green, because every one of them
 takes the sequential path. Reasoned, not measured, and written down as such.
 
 **The lesson is that nothing was broken.** The column existed and had a default.
