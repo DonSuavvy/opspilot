@@ -419,11 +419,13 @@ export const TOOLS: ToolDefinition[] = [
        * idempotency key returns the first call's totals and writes nothing, so
        * the model can tell the customer about one refund instead of two.
        *
-       * The status was `"authorized"` with `recorded: false` up to this
-       * commit, which was the honest report while nothing wrote — the same
-       * call as the cache badge in #20, an uncomfortable number in preference
-       * to a plausible wrong one. It is now `"refunded"` because the row says
-       * so, not because it demos better.
+       * The status was `"authorized"` with `recorded: false` while nothing
+       * wrote, which was the honest report then — the same call as the cache
+       * badge in #20, an uncomfortable number in preference to a plausible
+       * wrong one. It is now whatever the row says, which on a top-up of a
+       * partly refunded invoice is `partially_refunded`. It was hardcoded to
+       * `"refunded"` for one commit, sitting beside an `invoice_status` that
+       * could disagree with it — the model reads both, and repeats the first.
        */
       const result = await ctx.data.recordRefund({
         invoiceNumber: invoice.number,
@@ -433,7 +435,7 @@ export const TOOLS: ToolDefinition[] = [
       });
 
       return {
-        status: "refunded",
+        status: result.status,
         recorded: true,
         duplicate: result.duplicate,
         invoice_id: invoice.number,
