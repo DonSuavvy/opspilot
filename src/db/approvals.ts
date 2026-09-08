@@ -7,11 +7,17 @@
  * same shape of defect as `sop_version_id` (Day 4) and the revalidation guard
  * (FAILURES #22): a column with an FK and no writer.
  */
-import { and, eq, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 
 import type { ResumeDecision } from "../agent/loop";
 import type { Db } from "./client";
-import { agentRuns, approvals, runSpans } from "./schema";
+import {
+  agentRuns,
+  approvals,
+  customers,
+  runSpans,
+  tickets,
+} from "./schema";
 
 /** The columns the resume path actually reads. */
 export interface ApprovalRow {
@@ -152,6 +158,59 @@ export async function listApprovals(
     })
     .from(approvals)
     .where(eq(approvals.runId, runId));
+}
+
+/** One row of the approval queue, with enough context to decide it. */
+export interface PendingApproval {
+  id: string;
+  runId: string;
+  /** Null for an eval run, which has no inbox ticket behind it. */
+  ticketId: string | null;
+  ticketSubject: string | null;
+  customer: string | null;
+  toolName: string;
+  toolInput: unknown;
+  createdAt: Date;
+}
+
+/**
+ * Everything still waiting on a human, oldest first.
+ *
+ * Three left joins, not inner ones. A run without a ticket and a ticket
+ * without a customer are both legal in the schema — eval runs have no inbox
+ * row, and `tickets.customer_id` is `on delete set null` — and an inner join
+ * would drop exactly those from the queue. A pending decision that renders
+ * nowhere is worse than one that renders with a blank subject: it is a refund
+ * nobody is ever asked about.
+ */
+export async function listPendingApprovals(
+  db: Db,
+  workspaceId: string,
+): Promise<PendingApproval[]> {
+  return db
+    .select({
+      id: approvals.id,
+      runId: approvals.runId,
+      ticketId: agentRuns.ticketId,
+      ticketSubject: tickets.subject,
+      customer: customers.externalId,
+      toolName: approvals.toolName,
+      toolInput: approvals.toolInput,
+      createdAt: approvals.createdAt,
+    })
+    .from(approvals)
+    .leftJoin(agentRuns, eq(agentRuns.id, approvals.runId))
+    .leftJoin(tickets, eq(tickets.id, agentRuns.ticketId))
+    .leftJoin(customers, eq(customers.id, tickets.customerId))
+    .where(
+      and(
+        eq(approvals.workspaceId, workspaceId),
+        eq(approvals.status, "pending"),
+      ),
+    )
+    // Oldest first: the queue is a backlog, and the question that has been
+    // waiting longest is the one holding up a customer.
+    .orderBy(asc(approvals.createdAt));
 }
 
 export class ApprovalNotPendingError extends Error {
