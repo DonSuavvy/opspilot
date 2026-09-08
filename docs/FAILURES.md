@@ -1309,7 +1309,11 @@ safe: two simultaneous resumes both find no prior row and both write. What
 stops that is the `status = 'pending'` predicate on the approval decision,
 which `verify-resume` proves by racing two approvals. The key is the belt to
 that pair of braces. Calling the refund flatly "idempotent" would be the same
-species of overclaim this file exists to record.
+species of overclaim this file exists to record. And because the key is
+written by the model rather than by us, the lookup is scoped to the invoice as
+well: nothing stops a model reusing one string across two invoices, and a
+match on the key alone would swallow the second refund and report the first
+invoice's totals for it.
 
 The `for update` on the invoice belongs in the same paragraph, for the same
 reason. It is there so two refunds against one invoice cannot both read the

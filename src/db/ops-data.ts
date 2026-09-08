@@ -267,6 +267,12 @@ export function createOpsData(db: Db, scope: OpsDataScope): OpsData {
             and(
               eq(auditLog.workspaceId, workspaceId),
               eq(auditLog.action, "issue_refund"),
+              // Scoped to the invoice, not just the key. The key is written by
+              // the model, so two refunds can carry the same string — a
+              // customer charged twice, one key reused across both invoices —
+              // and matching on the key alone would swallow the second refund
+              // and report the first invoice's totals for it.
+              eq(auditLog.entityId, input.invoiceNumber),
               sql`${auditLog.after}->>'idempotency_key' = ${input.idempotencyKey}`,
             ),
           )
