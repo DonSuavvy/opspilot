@@ -19,7 +19,13 @@ Assertions read structure, never prose. Three sources:
 - the forced terminal `resolve_ticket` outcome (`action`,
   `refund_amount_cents`, `reply`, `confidence`),
 - the run's tool and guardrail spans in `run_spans`,
-- the pending row in `approvals` when the run paused.
+- the pause the loop reports when a confirm-write tool stopped the run —
+  its tool name and arguments, off the loop's own result.
+
+A suite run therefore leaves paused `agent_runs` rows with no matching row
+in `approvals`, by design: the pause is scored from the loop's result, and
+the write barrier means nothing an eval case asks for is ever queued for a
+human to approve.
 
 No LLM judge: that puts a second sampled model between a prompt change and the
 verdict on it, so a red case cannot say which of the two moved.
@@ -31,9 +37,9 @@ time passes.
 
 ## What the runner does not do
 
-**It never resumes a paused run.** When a case expects `issue_refund` to pause
-into the approval queue, the pause *is* the observation: the run's status and
-the pending approval row are what the assertion reads.
+**It never resumes a paused run.** When a case expects `issue_refund` to pause,
+the pause *is* the observation: the run's status and the pause the loop reports
+are what the assertion reads.
 
 **It never writes to the workspace.** Writes go through a recording wrapper that
 captures what the handler was asked to do and returns what it would have
