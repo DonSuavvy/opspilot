@@ -183,3 +183,70 @@ describe("issue_refund revalidation", () => {
     ).resolves.toMatchObject({ status: "authorized", recorded: false });
   });
 });
+
+/**
+ * FAILURES #24: the approval worked, the trace was green, the customer was
+ * told the money was on its way, and `refunded_cents` stayed at zero. The
+ * handler validated the refund and returned; nothing wrote anything.
+ *
+ * Confirm-write means this handler runs only after a human said yes, so by the
+ * time it is reached "authorized" is not the answer any more — recording it is.
+ */
+describe("issue_refund recording", () => {
+  it("records the approved refund through the seam, exactly once", async () => {
+    const data = fakeData();
+    await issueRefund(validCall, withWindow(30), data);
+
+    expect(data.recordRefund).toHaveBeenCalledTimes(1);
+    expect(data.recordRefund).toHaveBeenCalledWith({
+      invoiceNumber: "INV-2002",
+      // The *approved* amount, not the requested one. They agree here and
+      // the distinction is the point: the policy decision is what moves.
+      amountCents: 4_900,
+      reason: "service_issue",
+      idempotencyKey: "tkt_1-INV-2002",
+    });
+  });
+
+  it("reports what the seam recorded, not what the model asked for", async () => {
+    const result = await issueRefund(validCall, withWindow(30));
+
+    expect(result).toMatchObject({
+      status: "refunded",
+      recorded: true,
+      duplicate: false,
+      invoice_id: "INV-2002",
+      amount_cents: 4_900,
+      refunded_cents_total: 4_900,
+      invoice_status: "refunded",
+      idempotency_key: "tkt_1-INV-2002",
+    });
+  });
+
+  /**
+   * The whole reason the key exists. A resume retried after a timeout must
+   * tell the model the money already moved, not move it again — and not claim
+   * a second refund happened either.
+   */
+  it("surfaces a duplicate from the seam rather than hiding it", async () => {
+    const data = fakeData();
+    vi.mocked(data.recordRefund).mockResolvedValue({
+      refundedCents: 4_900,
+      status: "refunded",
+      duplicate: true,
+    });
+
+    const result = await issueRefund(validCall, withWindow(30), data);
+
+    expect(result).toMatchObject({ recorded: true, duplicate: true });
+  });
+
+  it("never records a refund the policy denied", async () => {
+    const data = fakeData();
+
+    await expect(issueRefund(validCall, withWindow(14), data)).rejects.toThrow(
+      OutOfPolicyRefundError,
+    );
+    expect(data.recordRefund).not.toHaveBeenCalled();
+  });
+});
