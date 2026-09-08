@@ -1117,3 +1117,137 @@ ignored its instructions, a guard nothing called — cost about an hour between
 them and none were reachable from the test suite. Every one surfaced within a
 minute of running the product. The suite answers "is this correct". Running it
 answers "is this wired", and that has been the more expensive question.
+
+---
+
+## 23. The pause did work, then threw the work away — 2026-08-15
+
+**Caught by:** reading the loop in order to build `/api/agent/resume`. Not by
+the 397 tests that were green at the time, and not by running the product —
+the model happens to call reads and refunds in separate turns, so the demo
+arc never triggered it.
+
+A confirm-write pause returned the moment the loop reached the call needing
+approval. But the loop dispatches a turn's tool calls in order, and a turn can
+carry more than one. Given `[get_customer, issue_refund]`, `get_customer` ran:
+its handler fired, its `tool_exec` span was written to the database. Then
+`issue_refund` paused and returned — discarding the local `results` array
+`get_customer` had just written into.
+
+Two things were then true at once. The trace showed a tool that ran, and the
+serialized conversation had no record of it. And the serialized array ended
+with an assistant turn holding two `tool_use` blocks, one of which could never
+receive a `tool_result` — a shape the Anthropic API rejects outright. Resume
+would have failed on its first call, on a conversation that looked complete.
+
+The test that found it is three lines:
+
+```
+expect(spans.filter((s) => s.type === "tool_exec")).toHaveLength(0);
+```
+
+Observed: 1.
+
+**The fix is positional, again.** `firstCallAwaitingApproval` now walks the
+turn *before* anything is dispatched; a confirm-write that clears its own
+schema and its preflight pauses with zero side effects. Validation and
+preflight still run before the pause — FAILURES #22 is unchanged — and both
+are pure, so the dispatch loop re-runs them and every span is still emitted
+from one place.
+
+**Kept because of what it says about the fix to #22.** That fix moved the
+policy check above the pause and was right. This is the same insight applied
+one level up: *the pause is a commitment to interrupt a person, so nothing
+should have happened yet when it fires* — not an unvalidated argument, and not
+a side effect either. #22 got the check into the right place; #23 is the rest
+of that sentence.
+
+**And a counterpoint worth recording.** The last three defects all argued for
+live gates over suites. This one was invisible to *both* — green tests and a
+working demo — and only fell out of reading the code with a specific question
+in hand: what exactly does resume receive? Running the product answers "is this
+wired". It does not answer "is this wired for the case the model has not
+happened to produce yet."
+
+---
+
+## 24. The refund was approved, and no money moved — 2026-08-15
+
+**Caught by:** the live gate, one query after it appeared to pass.
+
+The pause/resume round-trip worked end to end on the first real run: paused at
+span 4, approved through `/api/agent/resume`, `issue_refund` dispatched at span
+5, run completed with a structured outcome. The agent then wrote to the
+customer:
+
+> "We've approved a refund of $49.00 against INV-2001. You should see it back
+> in your account within 3–5 business days."
+
+```
+select number, refunded_cents from invoices where number='INV-2001';
+ INV-2001 |              0
+```
+
+`refunded_cents` is zero. Nothing happened.
+
+**Correction, and the reason to run the query instead of reading the code.**
+The first draft of this entry said "there is no `audit_log` row", inferred from
+having found no writer. The query says otherwise, and says something worse:
+
+```
+select action, run_id is null, count(*) from audit_log group by 1,2;
+ draft_reply    | t | 4
+ escalate       | t | 4
+ resolve_ticket | t | 7
+```
+
+The audit log is not unbuilt — it has been recording side effects all along.
+Two holes, both invisible until asked directly:
+
+1. **`issue_refund` writes nothing.** Every *auto-write* tool records itself;
+   the one confirm-write that moves money does not. The audit trail is
+   complete except where it matters.
+2. **Every row has `run_id = NULL`** — 15 for 15. `createOpsData(db,
+   workspaceId)` closes over the workspace and never receives the run, so no
+   write *can* populate it. The log records that something happened and never
+   which run did it, which is most of what an audit log is for.
+
+This is the same mistake as this morning's, one level up: `approvals` was
+asserted to have no writer and a grep settled it; `audit_log` was asserted to
+have no row and only a query settled it. Reading code tells you what is
+written. Querying tells you what is there.
+
+`issue_refund`'s handler validates the refund against the pinned policy and
+returns `{ status: "pending_approval", ... }`. Its comment explains why:
+
+> Both `approve` and `requires_approval` land here. Confirm-write means the
+> loop pauses before any money moves either way, so the handler's job ends at
+> "this is allowed" — the approval queue owns what happens next.
+
+That was accurate when it was written. Confirm-write paused *before* dispatch,
+so the handler was unreachable — it was FAILURES #22's whole subject. The
+deferral pointed at an approval queue that did not exist yet.
+
+Building resume made the handler reachable and changed what it means. It now
+runs **only** on the approved path: `firstCallAwaitingApproval` pauses unless a
+decision exists, so if the handler executes, a human said yes. The sentence
+"the approval queue owns what happens next" no longer defers to anything —
+resume *is* the approval queue, and it calls the handler and takes its word.
+
+**Partly fixed.** The status string was a lie the model reads, so it is gone:
+the handler now returns `status: "authorized", recorded: false`. That is the
+uncomfortable-number call from #20 again — a status claiming the money moved
+would demo better and would be a falsehood the model repeats to a customer.
+
+**The refund itself is deliberately not fixed here.** Recording it needs an
+`OpsData` method that does not exist, and `run_id` on the audit rows needs
+`createOpsData` to receive the run — both belong to Day 5's audit-log item.
+Bundling a money-moving change into a control-flow commit would hide it.
+
+**The lesson is about comments, not refunds.** The comment was true, and
+became false without being edited, because the code it described did not
+change — its *reachability* did. A stub that is unreachable and a stub that is
+live look identical in a diff. What made it visible was checking the database
+instead of the response: the round-trip reported success, the trace showed a
+green `tool_exec`, and the customer reply was fluent and specific. Every
+observable said it worked except the one that was load-bearing.

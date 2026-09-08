@@ -9,6 +9,7 @@ import {
   type AssistantTurn,
   type ContentBlock,
   type MessageCreator,
+  type MessageParam,
   type SpanEvent,
 } from "./loop";
 import {
@@ -131,16 +132,27 @@ function tool(
 }
 
 /** A registry mirroring the real safety-class mix, with handlers that work. */
-function testRegistry(over: { handler?: ToolDefinition["handler"] } = {}) {
+function testRegistry(
+  over: {
+    handler?: ToolDefinition["handler"];
+    refundHandler?: ToolDefinition["handler"];
+  } = {},
+) {
   return buildRegistry([
     tool("get_customer", over.handler ? { handler: over.handler } : {}),
     tool("search_kb"),
     tool("issue_refund", {
       safetyClass: "confirm_write",
       input: z.object({ invoice_id: z.string(), amount_cents: z.number() }),
-      handler: async () => {
-        throw new Error("confirm_write handler must never run before approval");
-      },
+      // Throws unless a test opts in, so any run that dispatches a
+      // confirm-write without an approval fails loudly rather than passing.
+      handler:
+        over.refundHandler ??
+        (async () => {
+          throw new Error(
+            "confirm_write handler must never run before approval",
+          );
+        }),
     }),
     tool("resolve_ticket", {
       safetyClass: "auto_write",
@@ -485,6 +497,253 @@ describe("runAgentLoop — confirm-write pause", () => {
     await runAgentLoop(input);
 
     expect(spans.map((s) => s.type)).toContain("approval_wait");
+  });
+
+  /**
+   * A turn can carry a read *and* a confirm-write. The loop dispatches in
+   * order, so the read runs, its `tool_exec` span is persisted — and then the
+   * pause returns, discarding the local `results` array the read wrote into.
+   *
+   * That leaves the trace claiming a tool ran while the serialized
+   * conversation has no record of it, and resume then rebuilds an assistant
+   * turn whose `tool_use` block has no matching `tool_result`. The API rejects
+   * that outright.
+   *
+   * The pause is a commitment to interrupt a person; nothing in the turn
+   * should have happened yet when it fires.
+   */
+  it("pauses before dispatching anything else in the same turn", async () => {
+    const { input, spans } = loopInput([
+      turn([
+        toolUse("get_customer", { q: "cus_0007" }, "toolu_read"),
+        toolUse(
+          "issue_refund",
+          { invoice_id: "INV-2002", amount_cents: 4900 },
+          "toolu_refund",
+        ),
+      ]),
+    ]);
+
+    const result = await runAgentLoop(input);
+
+    expect(result.status).toBe("paused_for_approval");
+    expect(result.pendingApproval?.toolUseId).toBe("toolu_refund");
+    // The read must not have executed: its result would be thrown away.
+    expect(spans.filter((s) => s.type === "tool_exec")).toHaveLength(0);
+  });
+
+  /**
+   * The corollary, stated as the contract resume depends on:
+   * `serializedMessages` is exactly `[...history, assistant]`. No partial
+   * user turn, no half-populated tool_result message — so resume's job is
+   * unconditional: append one user message carrying a result for every
+   * `tool_use` in that final assistant turn.
+   */
+  it("serializes history plus the assistant turn and nothing else", async () => {
+    const { input } = loopInput([
+      turn([
+        toolUse("get_customer", { q: "cus_0007" }, "toolu_read"),
+        toolUse(
+          "issue_refund",
+          { invoice_id: "INV-2002", amount_cents: 4900 },
+          "toolu_refund",
+        ),
+      ]),
+    ]);
+
+    const result = await runAgentLoop(input);
+    const restored = JSON.parse(result.serializedMessages!);
+
+    expect(restored).toHaveLength(2);
+    expect(restored[1].role).toBe("assistant");
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Span numbering across invocations                                          */
+/* -------------------------------------------------------------------------- */
+
+describe("runAgentLoop — startSeq", () => {
+  /**
+   * `run_spans` has a unique index on `(run_id, seq)`, and a resumed run keeps
+   * its original run row so the trace viewer renders one continuous waterfall.
+   * A second `runAgentLoop` numbering from zero collides with the spans the
+   * paused invocation already wrote — the insert fails and the resumed run
+   * dies on its first span.
+   */
+  it("numbers spans from the offset it is given", async () => {
+    const { input, spans } = loopInput([resolveTurn()], { startSeq: 7 });
+
+    await runAgentLoop(input);
+
+    expect(spans.length).toBeGreaterThan(0);
+    expect(spans.map((s) => s.seq)).toEqual([7, 8]);
+  });
+
+  it("still numbers from zero when no offset is given", async () => {
+    const { input, spans } = loopInput([resolveTurn()]);
+
+    await runAgentLoop(input);
+
+    expect(spans[0]!.seq).toBe(0);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Resuming a decided approval                                                */
+/* -------------------------------------------------------------------------- */
+
+describe("runAgentLoop — resuming a decided approval", () => {
+  /**
+   * Drive a real loop to its pause and hand back exactly what
+   * `/api/agent/resume` would read out of the database. Building the paused
+   * state by hand would let these tests agree with a fiction — the pause is
+   * the thing whose output resume has to consume.
+   */
+  async function pausedAt(turns: AssistantTurn[]) {
+    const { input } = loopInput(turns);
+    const paused = await runAgentLoop(input);
+    expect(paused.status).toBe("paused_for_approval");
+    return {
+      messages: JSON.parse(paused.serializedMessages!) as MessageParam[],
+      pending: paused.pendingApproval!,
+    };
+  }
+
+  const refundTurn = () =>
+    turn([
+      toolUse(
+        "issue_refund",
+        { invoice_id: "INV-2002", amount_cents: 4900 },
+        "toolu_refund",
+      ),
+    ]);
+
+  it("dispatches an approved call and runs on to the terminal tool", async () => {
+    const { messages, pending } = await pausedAt([refundTurn()]);
+    const refunded = vi.fn(async () => ({ refunded: true }));
+
+    const { input, client } = loopInput([resolveTurn("refunded")], {
+      messages,
+      registry: testRegistry({ refundHandler: refunded }),
+      resumeDecisions: [
+        { toolUseId: pending.toolUseId, approved: true, reason: null },
+      ],
+    });
+
+    const result = await runAgentLoop(input);
+
+    expect(refunded).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("completed");
+    expect(result.outcome).toMatchObject({ action: "refunded" });
+    // One model call: the turn being resumed was already paid for.
+    expect(client.create).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * Denial adaptation. The reviewer's reason has to reach the model as an
+   * `is_error` tool_result — the same channel the policy guardrail uses — or
+   * the agent has no way to know why it was stopped and cannot escalate.
+   */
+  it("answers a denied call with is_error carrying the reviewer's reason", async () => {
+    const { messages, pending } = await pausedAt([refundTurn()]);
+    const refunded = vi.fn(async () => ({ refunded: true }));
+
+    const { input, client } = loopInput([resolveTurn("escalated")], {
+      messages,
+      registry: testRegistry({ refundHandler: refunded }),
+      resumeDecisions: [
+        {
+          toolUseId: pending.toolUseId,
+          approved: false,
+          reason: "Outside the refund window — send to management.",
+        },
+      ],
+    });
+
+    const result = await runAgentLoop(input);
+
+    expect(refunded).not.toHaveBeenCalled();
+    expect(result.status).toBe("completed");
+
+    const blocks = client.calls[0]!.messages.at(-1)!.content as ContentBlock[];
+    const denial = blocks[0] as {
+      is_error?: boolean;
+      content: string;
+      tool_use_id: string;
+    };
+    expect(denial.tool_use_id).toBe("toolu_refund");
+    expect(denial.is_error).toBe(true);
+    expect(denial.content).toContain("Outside the refund window");
+  });
+
+  it("records the denial as a guardrail span so the trace shows the refusal", async () => {
+    const { messages, pending } = await pausedAt([refundTurn()]);
+
+    const { input, spans } = loopInput([resolveTurn("escalated")], {
+      messages,
+      resumeDecisions: [
+        { toolUseId: pending.toolUseId, approved: false, reason: "No." },
+      ],
+    });
+
+    await runAgentLoop(input);
+
+    const guardrail = spans.find(
+      (s) => s.type === "guardrail" && s.name === "issue_refund",
+    );
+    expect(guardrail?.isError).toBe(true);
+  });
+
+  /**
+   * The mixed turn, end to end. `issue_refund` is decided; `get_customer`
+   * shares the turn and was never dispatched, because the pause is decided
+   * before anything runs. Both need a `tool_result` in the single user message
+   * resume appends — a turn with an unanswered tool_use is rejected by the API.
+   */
+  it("returns a result for every tool_use in the resumed turn", async () => {
+    const mixed = turn([
+      toolUse("get_customer", { q: "cus_0007" }, "toolu_read"),
+      toolUse(
+        "issue_refund",
+        { invoice_id: "INV-2002", amount_cents: 4900 },
+        "toolu_refund",
+      ),
+    ]);
+    const { messages, pending } = await pausedAt([mixed]);
+
+    const { input, client } = loopInput([resolveTurn("refunded")], {
+      messages,
+      registry: testRegistry({ refundHandler: async () => ({ ok: true }) }),
+      resumeDecisions: [
+        { toolUseId: pending.toolUseId, approved: true, reason: null },
+      ],
+    });
+
+    await runAgentLoop(input);
+
+    const blocks = client.calls[0]!.messages.at(-1)!.content as ContentBlock[];
+    const ids = blocks.map((b) => (b as { tool_use_id: string }).tool_use_id);
+    expect(ids).toEqual(["toolu_read", "toolu_refund"]);
+  });
+
+  /**
+   * Resume is handed a conversation, not asked to invent one. If the trailing
+   * message is not an assistant turn the serialized state is not a pause, and
+   * guessing would mean applying a human's decision to the wrong call.
+   */
+  it("fails cleanly when the serialized state does not end mid-turn", async () => {
+    const { input } = loopInput([resolveTurn()], {
+      messages: [{ role: "user", content: "not a paused conversation" }],
+      resumeDecisions: [
+        { toolUseId: "toolu_refund", approved: true, reason: null },
+      ],
+    });
+
+    const result = await runAgentLoop(input);
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("assistant turn");
   });
 });
 
