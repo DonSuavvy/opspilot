@@ -38,6 +38,7 @@ import {
   tickets,
   workspaces,
 } from "../src/db/schema";
+import { loadActiveSop } from "../src/db/sops";
 import { GOLDEN_CASES } from "../src/evals/cases";
 import { runEvalSuite, type EvalSuiteEvent } from "../src/evals/suite";
 
@@ -155,6 +156,12 @@ async function main() {
   );
   if (cases.length !== 2) throw new Error("expected two golden cases by slug");
 
+  // The suite below runs with `sopVersionId: null`, so it is scored against
+  // whatever is active. Read that here rather than hardcoding a version: the
+  // SOP editor is a demo feature, and a v1 written into this script fails the
+  // moment someone uses it.
+  const activeSop = await loadActiveSop(db, ws.id);
+
   const events: EvalSuiteEvent[] = [];
   let evalRunId = "";
   const agentRunIds: string[] = [];
@@ -256,11 +263,11 @@ async function main() {
 
     check(listed[0]?.id === evalRunId, "the newest run is listed first");
     check(
-      mine?.sopVersion === 1,
+      mine?.sopVersion === activeSop.version,
       `the SOP version number is joined in (v${mine?.sopVersion})`,
     );
     check(
-      mine?.refundWindowDays === 30,
+      mine?.refundWindowDays === activeSop.policyConfig.refund.windowDays,
       `the refund window is joined in (${mine?.refundWindowDays}-day)`,
     );
 
