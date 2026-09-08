@@ -1311,6 +1311,13 @@ which `verify-resume` proves by racing two approvals. The key is the belt to
 that pair of braces. Calling the refund flatly "idempotent" would be the same
 species of overclaim this file exists to record.
 
+The `for update` on the invoice belongs in the same paragraph, for the same
+reason. It is there so two refunds against one invoice cannot both read the
+same `refunded_cents` and both write their own total, and that is a property of
+the SQL rather than a hope — but nothing exercises it. Removing the clause
+leaves all 23 gate checks and all 419 tests green, because every one of them
+takes the sequential path. Reasoned, not measured, and written down as such.
+
 **The lesson is that nothing was broken.** The column existed and had a default.
 The handler was reachable and ran. The audit log had been recording side
 effects for weeks. `evaluateRefund` was correct, the approval queue worked, the
