@@ -25,7 +25,7 @@
 import { cachedSystem } from "@/agent/cache";
 import { compileSop } from "@/agent/sop";
 import type { BudgetConfig } from "@/agent/budget";
-import type { MessageCreator } from "@/agent/loop";
+import type { AgentLoopResult, MessageCreator } from "@/agent/loop";
 import type { LogicalModel, Provider } from "@/agent/provider";
 import { buildRegistry } from "@/agent/registry";
 import { spanToRow } from "@/agent/trace";
@@ -158,6 +158,36 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * What `finishRun` is told about a case that threw before the loop returned.
+ *
+ * A whole `AgentLoopResult` rather than a cast: `finishRun` writes every field
+ * of it, `runStatus` branches on `status`, and `agent_runs.error` is the only
+ * place the reason survives once the suite has moved on. Zeroed usage and cost
+ * are honest — the throw happened before the loop reported either.
+ */
+function threwResult(message: string): AgentLoopResult {
+  return {
+    status: "failed",
+    outcome: null,
+    iterations: 0,
+    usage: {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0,
+    },
+    costNanos: 0,
+    estimated: false,
+    messages: [],
+    serializedMessages: null,
+    pendingApproval: null,
+    refusal: null,
+    budgetReason: null,
+    error: message,
+  };
+}
+
 /** Reuse the span mapper, so a run total and its spans convert identically. */
 function toUsd(costNanos: number): string {
   const at = new Date(0);
@@ -238,6 +268,11 @@ export async function runEvalSuite(
   for (const c of enabled) {
     const startedAt = new Date();
     let agentRunId: string | null = null;
+    // Whether the `agent_runs` row is already closed. The catch below has to
+    // tell a run that never finished from one that finished fine and then hit
+    // a bookkeeping failure — re-finishing the second as failed would replace
+    // a true row with a false one.
+    let runFinished = false;
 
     try {
       agentRunId = await persist.startRun(db, {
@@ -278,10 +313,13 @@ export async function runEvalSuite(
 
       const endedAt = new Date();
       await persist.finishRun(db, agentRunId, run.result, endedAt);
+      runFinished = true;
 
+      // Charged as soon as it is known, so the next case's baseline sees it
+      // even if the bookkeeping below throws. The counters are not: they move
+      // only once the case is recorded and announced, or the catch would count
+      // it a second time.
       costNanos += run.result.costNanos;
-      if (run.score.passed) passed += 1;
-      else failed += 1;
 
       const latencyMs = endedAt.getTime() - startedAt.getTime();
       const caseCost = toUsd(run.result.costNanos);
@@ -323,6 +361,9 @@ export async function runEvalSuite(
         latencyMs,
         agentRunId,
       });
+
+      if (run.score.passed) passed += 1;
+      else failed += 1;
     } catch (error) {
       /**
        * A case that throws is a failed case, not a failed suite. The other
@@ -336,6 +377,21 @@ export async function runEvalSuite(
 
       const failureReason = `case threw: ${errorText(error)}`;
       const latencyMs = Date.now() - startedAt.getTime();
+
+      /**
+       * Close the row the case opened. A `running` row with a null cost is
+       * invisible to `spentTodayNanos`, so leaving one here would hand every
+       * later case a baseline that under-reports the day's spend — the one
+       * thing the sequential ordering above exists to prevent.
+       *
+       * Swallowed on purpose: this is recovery, and a failure to record the
+       * failure must not replace the error that caused it.
+       */
+      if (agentRunId !== null && !runFinished) {
+        await persist
+          .finishRun(db, agentRunId, threwResult(failureReason), new Date())
+          .catch(() => {});
+      }
 
       await persist.insertEvalResult(db, {
         workspaceId,
