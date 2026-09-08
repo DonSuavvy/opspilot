@@ -107,7 +107,7 @@ describe("issue_refund revalidation", () => {
   it("accepts the same call under the wider window that was active before", async () => {
     const result = await issueRefund(validCall, withWindow(30));
 
-    expect(result).toMatchObject({ status: "authorized", recorded: false });
+    expect(result).toMatchObject({ status: "refunded", recorded: true });
   });
 
   /**
@@ -153,7 +153,7 @@ describe("issue_refund revalidation", () => {
       withWindow(14),
     );
 
-    expect(result).toMatchObject({ status: "authorized", recorded: false });
+    expect(result).toMatchObject({ status: "refunded", recorded: true });
   });
 
   it("rejects a refund against an invoice that was never paid", async () => {
@@ -180,7 +180,7 @@ describe("issue_refund revalidation", () => {
 
     await expect(
       issueRefund(validCall, withWindow(14), data),
-    ).resolves.toMatchObject({ status: "authorized", recorded: false });
+    ).resolves.toMatchObject({ status: "refunded", recorded: true });
   });
 });
 
