@@ -43,6 +43,13 @@ let failures = 0;
  * asserts. It is restored on the way out regardless.
  */
 const TARGET = "INV-2005";
+/**
+ * `INV-2004`, the other half of the same duplicate charge. It exists here only
+ * to be a *second* invoice the same idempotency key can be aimed at, which is
+ * the one thing a single-invoice fixture cannot show. Restored on the way out
+ * exactly like `TARGET`.
+ */
+const OTHER = "INV-2004";
 const REFUND_CENTS = 1_000;
 const KEY = "verify-refund-fixture";
 
@@ -67,16 +74,26 @@ async function main() {
 
   console.log(`\n${BOLD}Refund recording — workspace ${ws.slug}${RESET}\n`);
 
-  const [before] = await db
-    .select({
-      amountCents: invoices.amountCents,
-      refundedCents: invoices.refundedCents,
-      status: invoices.status,
-    })
-    .from(invoices)
-    .where(and(eq(invoices.workspaceId, ws.id), eq(invoices.number, TARGET)))
-    .limit(1);
+  const read = async (number: string) =>
+    (
+      await db
+        .select({
+          amountCents: invoices.amountCents,
+          refundedCents: invoices.refundedCents,
+          status: invoices.status,
+        })
+        .from(invoices)
+        .where(and(eq(invoices.workspaceId, ws.id), eq(invoices.number, number)))
+        .limit(1)
+    )[0];
+
+  const before = await read(TARGET);
   if (!before) throw new Error(`no ${TARGET} — run \`npm run db:seed\``);
+
+  // Read before the try, so the `finally` can put both invoices back even if
+  // the script dies on the first check.
+  const beforeOther = await read(OTHER);
+  if (!beforeOther) throw new Error(`no ${OTHER} — run \`npm run db:seed\``);
 
   // A throwaway run to attribute the writes to. It never goes near the agent
   // loop; it exists so `audit_log.run_id` has something to point at.
@@ -129,19 +146,7 @@ async function main() {
     check("and the new invoice status", result.status, expectedStatus);
     check("it is not reported as a duplicate", result.duplicate, false);
 
-    const after = async () =>
-      (
-        await db
-          .select({
-            refundedCents: invoices.refundedCents,
-            status: invoices.status,
-          })
-          .from(invoices)
-          .where(
-            and(eq(invoices.workspaceId, ws.id), eq(invoices.number, TARGET)),
-          )
-          .limit(1)
-      )[0];
+    const after = () => read(TARGET);
 
     // The query FAILURES #24 was closed by. Everything above is what the code
     // says happened; this is the row.
@@ -200,7 +205,43 @@ async function main() {
     check("the invoice did not move again", replayed?.refundedCents, expectedTotal);
     check("still one audit row", (await refundRows()).length, 1);
 
-    console.log(`\n${BOLD}5. An invoice this workspace does not have${RESET}`);
+    /**
+     * The key is written by the model, in `issue_refund`'s arguments. Nothing
+     * stops it reusing one string across two invoices — a model that settles
+     * on `"tkt_1-refund"` for a customer charged twice will send it twice —
+     * and if the lookup matches on the key alone, the second refund is
+     * swallowed and reported as a duplicate carrying the *first* invoice's
+     * totals. Money the customer is owed, and a reply that says it moved.
+     */
+    console.log(
+      `\n${BOLD}5. The same key against a different invoice is a different refund${RESET}`,
+    );
+    const other = await data.recordRefund({
+      invoiceNumber: OTHER,
+      amountCents: REFUND_CENTS,
+      reason: "duplicate_charge",
+      idempotencyKey: KEY,
+    });
+
+    const expectedOtherTotal = beforeOther.refundedCents + REFUND_CENTS;
+    const expectedOtherStatus =
+      expectedOtherTotal === beforeOther.amountCents
+        ? "refunded"
+        : "partially_refunded";
+
+    check("not reported as a duplicate", other.duplicate, false);
+    check("the other invoice's own total", other.refundedCents, expectedOtherTotal);
+    check("and its own status", other.status, expectedOtherStatus);
+
+    const otherRow = await read(OTHER);
+    check(
+      `refunded_cents on ${OTHER} itself`,
+      otherRow?.refundedCents,
+      expectedOtherTotal,
+    );
+    check("a second issue_refund audit row", (await refundRows()).length, 2);
+
+    console.log(`\n${BOLD}6. An invoice this workspace does not have${RESET}`);
     let threw = false;
     try {
       await data.recordRefund({
@@ -228,12 +269,19 @@ async function main() {
     await db.delete(agentRuns).where(eq(agentRuns.id, runId));
 
     // The seed is a fixture the demo arc depends on, so this script must be a
-    // no-op against it once it exits — `verify:seed` asserts INV-2005's
-    // balance and it is not this script's to change.
+    // no-op against it once it exits — `verify:seed` asserts the duplicate
+    // charge's invoices and they are not this script's to change.
     await db
       .update(invoices)
       .set({ refundedCents: before.refundedCents, status: before.status })
       .where(and(eq(invoices.workspaceId, ws.id), eq(invoices.number, TARGET)));
+    await db
+      .update(invoices)
+      .set({
+        refundedCents: beforeOther.refundedCents,
+        status: beforeOther.status,
+      })
+      .where(and(eq(invoices.workspaceId, ws.id), eq(invoices.number, OTHER)));
   }
 
   console.log(
