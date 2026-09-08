@@ -206,6 +206,33 @@ async function main() {
     check("still one audit row", (await refundRows()).length, 1);
 
     /**
+     * And the replay describes the invoice as it is *now*. A second refund
+     * under its own key moves the total after the first key was recorded, so
+     * a duplicate answered from the first call's audit snapshot reports a
+     * balance that was true once — the number a customer would be told.
+     */
+    await data.recordRefund({
+      invoiceNumber: TARGET,
+      amountCents: REFUND_CENTS,
+      reason: "duplicate_charge",
+      idempotencyKey: `${KEY}-b`,
+    });
+
+    const movedOn = await after();
+    check("a second refund moved the total", movedOn?.refundedCents, expectedTotal + REFUND_CENTS);
+
+    const stale = await data.recordRefund({
+      invoiceNumber: TARGET,
+      amountCents: REFUND_CENTS,
+      reason: "duplicate_charge",
+      idempotencyKey: KEY,
+    });
+
+    check("the old key is still a duplicate", stale.duplicate, true);
+    check("reporting the row's total now", stale.refundedCents, movedOn?.refundedCents);
+    check("and the row's status now", stale.status, movedOn?.status);
+
+    /**
      * The key is written by the model, in `issue_refund`'s arguments. Nothing
      * stops it reusing one string across two invoices — a model that settles
      * on `"tkt_1-refund"` for a customer charged twice will send it twice —
@@ -239,7 +266,11 @@ async function main() {
       otherRow?.refundedCents,
       expectedOtherTotal,
     );
-    check("a second issue_refund audit row", (await refundRows()).length, 2);
+    // Counted by invoice rather than in total: the section above writes rows
+    // against TARGET too, and the fact being checked is that INV-2004 got one
+    // of its own.
+    const otherRows = (await refundRows()).filter((r) => r.entityId === OTHER);
+    check(`an issue_refund row for ${OTHER}`, otherRows.length, 1);
 
     console.log(`\n${BOLD}6. An invoice this workspace does not have${RESET}`);
     let threw = false;

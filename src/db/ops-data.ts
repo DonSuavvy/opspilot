@@ -257,39 +257,12 @@ export function createOpsData(db: Db, scope: OpsDataScope): OpsData {
       idempotencyKey: string;
     }) {
       return db.transaction(async (tx) => {
-        // Asked first, so a replay never reaches the arithmetic — an already
-        // fully-refunded invoice would otherwise throw out of `applyRefund`
-        // on the retry that should have been a no-op.
-        const [seen] = await tx
-          .select({ after: auditLog.after })
-          .from(auditLog)
-          .where(
-            and(
-              eq(auditLog.workspaceId, workspaceId),
-              eq(auditLog.action, "issue_refund"),
-              // Scoped to the invoice, not just the key. The key is written by
-              // the model, so two refunds can carry the same string — a
-              // customer charged twice, one key reused across both invoices —
-              // and matching on the key alone would swallow the second refund
-              // and report the first invoice's totals for it.
-              eq(auditLog.entityId, input.invoiceNumber),
-              sql`${auditLog.after}->>'idempotency_key' = ${input.idempotencyKey}`,
-            ),
-          )
-          .limit(1);
-
-        if (seen) {
-          const recorded = seen.after as {
-            refundedCents: number;
-            status: string;
-          };
-          return {
-            refundedCents: recorded.refundedCents,
-            status: recorded.status,
-            duplicate: true,
-          };
-        }
-
+        // Locked first, so both the duplicate answer and the arithmetic below
+        // read the same row under the same lock. One behaviour changed with
+        // this order: a replayed key whose invoice has since gone now throws
+        // rather than answering from the audit row. Refusing beats reporting
+        // numbers for a row that no longer exists, and nothing in the gate or
+        // the suite reaches it — said here rather than left to be discovered.
         const [invoice] = await tx
           .select({
             id: invoices.id,
@@ -312,6 +285,41 @@ export function createOpsData(db: Db, scope: OpsDataScope): OpsData {
             `no invoice ${input.invoiceNumber} in this workspace — refused ` +
               `rather than recording a refund against nothing`,
           );
+        }
+
+        // Asked before the arithmetic, so a replay never reaches it — an
+        // already fully-refunded invoice would otherwise throw out of
+        // `applyRefund` on the retry that should have been a no-op.
+        const [seen] = await tx
+          .select({ after: auditLog.after })
+          .from(auditLog)
+          .where(
+            and(
+              eq(auditLog.workspaceId, workspaceId),
+              eq(auditLog.action, "issue_refund"),
+              // Scoped to the invoice, not just the key. The key is written by
+              // the model, so two refunds can carry the same string — a
+              // customer charged twice, one key reused across both invoices —
+              // and matching on the key alone would swallow the second refund
+              // and report the first invoice's totals for it.
+              eq(auditLog.entityId, input.invoiceNumber),
+              sql`${auditLog.after}->>'idempotency_key' = ${input.idempotencyKey}`,
+            ),
+          )
+          .limit(1);
+
+        if (seen) {
+          // The invoice as it is *now*, not the snapshot the first call wrote.
+          // A second refund under a different key moves the total after this
+          // key was recorded, and replaying the old key then reported figures
+          // that were true once — the model would tell a customer the balance
+          // was 1,000 when the row said 2,000. Reading the row also drops a
+          // cast over `after`, which is nullable and would have thrown.
+          return {
+            refundedCents: invoice.refundedCents,
+            status: invoice.status,
+            duplicate: true,
+          };
         }
 
         // The second guard. `evaluateRefund` already rejected an over-refund
