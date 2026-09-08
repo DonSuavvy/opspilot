@@ -234,7 +234,11 @@ describe("issue_refund recording", () => {
     );
 
     expect(result).toMatchObject({
-      status: "refunded",
+      // The invoice is still only partly refunded, so `status` cannot say
+      // "refunded" while `invoice_status` beside it says otherwise. Both are
+      // read by the model, and the first one is the one it repeats to the
+      // customer.
+      status: "partially_refunded",
       recorded: true,
       duplicate: false,
       invoice_id: "INV-2002",
