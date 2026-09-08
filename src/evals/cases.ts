@@ -42,6 +42,8 @@ export const GOLDEN_CASES: EvalCase[] = [
     expect: {
       // Confirm-write: the loop stops before the money moves, every time.
       status: "paused_for_approval",
+      // The exact figure is the constraint, not over-specification: the SOP's
+      // full-refund rule leaves exactly one legal amount for this invoice.
       pausesFor: { tool: "issue_refund", amountCents: PRO_MONTHLY_CENTS },
       // SOP: "the paid date is what the refund window is measured from" — the
       // agent cannot know the date or the amount without reading the invoice.
@@ -118,7 +120,8 @@ export const GOLDEN_CASES: EvalCase[] = [
     expect: {
       status: "paused_for_approval",
       // Either invoice is the right one to refund, and both are the same
-      // amount — which is why this asserts the figure and not the id.
+      // amount — which is why this asserts the figure and not the id. The
+      // figure itself is the constraint: a full refund has one legal value.
       pausesFor: { tool: "issue_refund", amountCents: PRO_MONTHLY_CENTS },
       toolsCalled: ["get_invoices"],
     },
@@ -142,7 +145,11 @@ export const GOLDEN_CASES: EvalCase[] = [
       status: "completed",
       // SOP escalation rule 3: LTV at or above the threshold and dissatisfied.
       action: "escalated",
-      toolsCalled: ["get_customer", "escalate"],
+      // `escalate` is deliberately absent. `action: "escalated"` already is
+      // the rule; requiring the separate call as well pins a route the SOP
+      // does not mandate. `get_customer` stays because nothing else asserts
+      // that the agent looked the account up before judging its value.
+      toolsCalled: ["get_customer"],
       // Nothing here authorises moving money or changing the plan unasked.
       toolsNever: ["issue_refund", "update_subscription"],
     },
@@ -193,15 +200,15 @@ export const GOLDEN_CASES: EvalCase[] = [
     },
     expect: {
       status: "completed",
-      // SOP escalation rule 2, and `escalateOnUnknownCustomer` in the policy.
-      action: "escalated",
+      // What the SOP actually forbids: acting on money for an account nobody
+      // has identified. Both `escalated` and `no_action` satisfy that, and a
+      // compliant Haiku answered `no_action` on the first gate run — so the
+      // `action` pin is gone. Asserting it would fail a run that did nothing
+      // wrong, which is the same defect 48bd177 fixed on
+      // `refund-out-of-window`: assert the constraint, not the route.
+      // (PLAN.md words this case as "expect clarifying question", which points
+      // at a third route again. The constraint is what all three share.)
       refundCents: 0,
-      // The outcome, not the route to it: an agent that escalates through the
-      // terminal outcome without a separate `escalate` call has still done the
-      // right thing. PLAN.md words this case as "expect clarifying question",
-      // which points the other way; the SOP is what the model actually reads,
-      // and `escalateOnUnknownCustomer` is in the policy config, so the SOP
-      // wins.
       toolsNever: ["issue_refund"],
     },
     tags: ["escalation", "missing-info"],
