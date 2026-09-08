@@ -18,6 +18,7 @@ import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { getDb } from "@/db/client";
 import { getEvalRun, type EvalRunDetail } from "@/db/evals";
+import { workspaces } from "@/db/schema";
 import { diffEvalRuns } from "@/evals/diff";
 import type { CaseDiff } from "@/evals/types";
 import { compactJson, shortSha, sopLabel } from "@/lib/eval-labels";
@@ -35,10 +36,26 @@ function one(value: string | string[] | undefined): string | null {
   return null;
 }
 
-/** Same catch as the detail page: a uuid column throws on a malformed id. */
-async function loadRun(id: string): Promise<EvalRunDetail | null> {
+/** Resolved once and passed to both loads, rather than queried twice. */
+async function firstWorkspaceId(): Promise<string | null> {
   try {
-    return await getEvalRun(getDb(), id);
+    const [ws] = await getDb()
+      .select({ id: workspaces.id })
+      .from(workspaces)
+      .limit(1);
+    return ws?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Same catch as the detail page: a uuid column throws on a malformed id. */
+async function loadRun(
+  workspaceId: string,
+  id: string,
+): Promise<EvalRunDetail | null> {
+  try {
+    return await getEvalRun(getDb(), id, workspaceId);
   } catch {
     return null;
   }
@@ -197,7 +214,13 @@ export default async function EvalDiffPage(props: PageProps<"/evals/diff">) {
     );
   }
 
-  const [base, head] = await Promise.all([loadRun(baseId), loadRun(headId)]);
+  const workspaceId = await firstWorkspaceId();
+  const [base, head] = workspaceId
+    ? await Promise.all([
+        loadRun(workspaceId, baseId),
+        loadRun(workspaceId, headId),
+      ])
+    : [null, null];
 
   if (!base || !head) {
     const missing = !base && !head ? "Neither run" : !base ? "The base run" : "The head run";

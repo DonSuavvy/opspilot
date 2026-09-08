@@ -12,7 +12,7 @@
  * and the difference would surface as a `costSane` CHECK violation three layers
  * from the arithmetic that caused it.
  */
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 
 import { microsToUsdString, nanosToMicros } from "@/agent/cost";
 import type { EvalCase } from "@/evals/case";
@@ -261,9 +261,19 @@ export interface EvalRunDetail {
   results: CaseResultRow[];
 }
 
+/**
+ * One run, or null — including a run that exists but belongs elsewhere.
+ *
+ * The workspace is part of the lookup, not a check afterwards. `eval_runs.id`
+ * is a uuid a URL carries, and every other read in this module is scoped, so
+ * an unscoped one here would be the single place a run id from one workspace
+ * renders another workspace's results. The results query below needs no scope
+ * of its own: it is only reached once the run has matched.
+ */
 export async function getEvalRun(
   db: Db,
   id: string,
+  workspaceId: string,
 ): Promise<EvalRunDetail | null> {
   const [run] = await db
     .select({
@@ -284,7 +294,7 @@ export async function getEvalRun(
     })
     .from(evalRuns)
     .leftJoin(sopVersions, eq(evalRuns.sopVersionId, sopVersions.id))
-    .where(eq(evalRuns.id, id))
+    .where(and(eq(evalRuns.id, id), eq(evalRuns.workspaceId, workspaceId)))
     .limit(1);
 
   if (!run) return null;

@@ -23,6 +23,8 @@ config({ path: ".env.local" });
 
 import { eq, inArray } from "drizzle-orm";
 
+import { randomUUID } from "node:crypto";
+
 import { budgetConfigSchema } from "../src/agent/budget";
 import type { AssistantTurn, ContentBlock, MessageCreator } from "../src/agent/loop";
 import { providerFromEnv } from "../src/agent/provider";
@@ -262,7 +264,7 @@ async function main() {
       `the refund window is joined in (${mine?.refundWindowDays}-day)`,
     );
 
-    const detail = await getEvalRun(db, evalRunId);
+    const detail = await getEvalRun(db, evalRunId, ws.id);
     const slugs = (detail?.results ?? []).map((r) => r.slug).sort();
 
     check(detail !== null, "getEvalRun returns the run");
@@ -293,6 +295,15 @@ async function main() {
     check(
       typeof refundCase?.latencyMs === "number",
       "latency is recorded per case",
+    );
+
+    // A real uuid, not a garbage string: `eval_runs.workspace_id` is a uuid
+    // column, so a malformed id would throw and the check would pass for the
+    // wrong reason.
+    const elsewhere = await getEvalRun(db, evalRunId, randomUUID());
+    check(
+      elsewhere === null,
+      "the same run looked up under another workspace is not found",
     );
 
     /* --- and the demo is intact --- */

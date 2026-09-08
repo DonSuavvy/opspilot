@@ -13,6 +13,7 @@ import { notFound } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { getDb } from "@/db/client";
 import { getEvalRun, type EvalRunDetail } from "@/db/evals";
+import { workspaces } from "@/db/schema";
 import { compactJson, shortSha, sopLabel } from "@/lib/eval-labels";
 
 export const dynamic = "force-dynamic";
@@ -28,7 +29,14 @@ export const dynamic = "force-dynamic";
  */
 async function loadRun(id: string): Promise<EvalRunDetail | null> {
   try {
-    return await getEvalRun(getDb(), id);
+    const db = getDb();
+    // The demo has one workspace, and the lookup is scoped to it rather than
+    // trusting the id in the URL: a run belonging elsewhere is a 404 here,
+    // which is what it is.
+    const [ws] = await db.select({ id: workspaces.id }).from(workspaces).limit(1);
+    if (!ws) return null;
+
+    return await getEvalRun(db, id, ws.id);
   } catch {
     return null;
   }
