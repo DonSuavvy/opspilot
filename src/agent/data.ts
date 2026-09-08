@@ -88,4 +88,25 @@ export interface OpsData {
     ticketId: string,
     outcome: TicketOutcome,
   ): Promise<{ ticketId: string; status: string }>;
+  /**
+   * Move the money. Called by `issue_refund` only after a human approved,
+   * because confirm-write pauses the loop before dispatch.
+   *
+   * `idempotencyKey` is what makes a *retried* resume safe: the same key twice
+   * returns the first call's numbers with `duplicate: true` and writes
+   * nothing. It is not what makes a *concurrent* one safe — two simultaneous
+   * resumes both find no prior row and both write. The guard against that is
+   * the `status = 'pending'` predicate on the approval decision, which
+   * `scripts/verify-resume.ts` proves; this is the belt to that pair of
+   * braces, not a substitute for it.
+   *
+   * Throws when the invoice is not in this workspace, rather than reporting a
+   * refund that had nothing to land on.
+   */
+  recordRefund(input: {
+    invoiceNumber: string;
+    amountCents: number;
+    reason: string;
+    idempotencyKey: string;
+  }): Promise<{ refundedCents: number; status: string; duplicate: boolean }>;
 }

@@ -19,6 +19,8 @@
  */
 import { and, desc, eq, or, sql } from "drizzle-orm";
 
+import { applyRefund } from "../policy/refund";
+
 import type {
   CustomerRecord,
   InvoiceRecord,
@@ -231,6 +233,131 @@ export function createOpsData(db: Db, scope: OpsDataScope): OpsData {
       });
 
       return { ticketId, status: "escalated" };
+    },
+
+    /**
+     * The write FAILURES #24 was about: a refund a human approved, actually
+     * landing on the invoice and in the audit log.
+     *
+     * One transaction, and the invoice row is locked for the length of it.
+     * Without the lock two refunds against the same invoice can both read the
+     * same `refunded_cents` and both write their own total, so the second
+     * silently erases the first — an invoice refunded twice that reads as
+     * refunded once.
+     *
+     * The idempotency key is looked up in `audit_log` rather than in a table
+     * of its own. The audit row is already the record that the refund
+     * happened, so a second store would be a second source of truth about the
+     * same fact, and the one that could drift is the one money is decided on.
+     */
+    async recordRefund(input: {
+      invoiceNumber: string;
+      amountCents: number;
+      reason: string;
+      idempotencyKey: string;
+    }) {
+      return db.transaction(async (tx) => {
+        // Asked first, so a replay never reaches the arithmetic — an already
+        // fully-refunded invoice would otherwise throw out of `applyRefund`
+        // on the retry that should have been a no-op.
+        const [seen] = await tx
+          .select({ after: auditLog.after })
+          .from(auditLog)
+          .where(
+            and(
+              eq(auditLog.workspaceId, workspaceId),
+              eq(auditLog.action, "issue_refund"),
+              sql`${auditLog.after}->>'idempotency_key' = ${input.idempotencyKey}`,
+            ),
+          )
+          .limit(1);
+
+        if (seen) {
+          const recorded = seen.after as {
+            refundedCents: number;
+            status: string;
+          };
+          return {
+            refundedCents: recorded.refundedCents,
+            status: recorded.status,
+            duplicate: true,
+          };
+        }
+
+        const [invoice] = await tx
+          .select({
+            id: invoices.id,
+            amountCents: invoices.amountCents,
+            refundedCents: invoices.refundedCents,
+            status: invoices.status,
+          })
+          .from(invoices)
+          .where(
+            and(
+              eq(invoices.workspaceId, workspaceId),
+              eq(invoices.number, input.invoiceNumber),
+            ),
+          )
+          .limit(1)
+          .for("update");
+
+        if (!invoice) {
+          throw new Error(
+            `no invoice ${input.invoiceNumber} in this workspace — refused ` +
+              `rather than recording a refund against nothing`,
+          );
+        }
+
+        // The second guard. `evaluateRefund` already rejected an over-refund
+        // upstream; this one runs against the row as it is *now*, inside the
+        // lock, which is the only place the check can be true when it matters.
+        const ledger = applyRefund(
+          {
+            amountCents: invoice.amountCents,
+            refundedCents: invoice.refundedCents,
+          },
+          input.amountCents,
+        );
+
+        await tx
+          .update(invoices)
+          .set({
+            refundedCents: ledger.refundedCents,
+            status: ledger.status,
+          })
+          .where(eq(invoices.id, invoice.id));
+
+        await tx.insert(auditLog).values({
+          workspaceId,
+          runId,
+          actorType: "agent",
+          action: "issue_refund",
+          entityType: "invoice",
+          entityId: input.invoiceNumber,
+          before: {
+            refundedCents: invoice.refundedCents,
+            status: invoice.status,
+          },
+          after: {
+            refundedCents: ledger.refundedCents,
+            status: ledger.status,
+            // This refund's own amount, not the invoice's — the running
+            // total lives in `refundedCents` beside it.
+            amountCents: input.amountCents,
+            reason: input.reason,
+            // Snake case on purpose: the duplicate lookup above reads
+            // `after->>'idempotency_key'` and tidying one spelling without
+            // the other turns idempotency off in silence.
+            idempotency_key: input.idempotencyKey,
+          },
+        });
+
+        return {
+          refundedCents: ledger.refundedCents,
+          status: ledger.status,
+          duplicate: false,
+        };
+      });
     },
 
     async resolveTicket(ticketId: string, outcome: TicketOutcome) {

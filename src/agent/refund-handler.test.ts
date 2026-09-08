@@ -50,6 +50,11 @@ function fakeData(invoice: InvoiceRecord | null = INV_2002): OpsData {
     saveDraft: vi.fn(async () => ({ draftId: "draft_1" })),
     escalateTicket: vi.fn(async () => ({ ticketId: "tkt_1", status: "escalated" })),
     resolveTicket: vi.fn(async () => ({ ticketId: "tkt_1", status: "resolved" })),
+    recordRefund: vi.fn(async () => ({
+      refundedCents: 4_900,
+      status: "refunded",
+      duplicate: false,
+    })),
   };
 }
 
