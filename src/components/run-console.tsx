@@ -8,51 +8,23 @@
  * the end. That difference is the entire point of the feature: anyone can show
  * a finished transcript, and almost nobody can show the agent thinking.
  *
- * `EventSource` cannot be used — starting a run is a POST — so the body is read
- * with a stream reader and reassembled by `createSseParser`, which is unit
- * tested against every possible chunk boundary.
+ * The stream itself is read by `readAgentStream`, shared with the approval
+ * controls so a resumed run renders through the same code path as the first
+ * half of its own trace.
  */
 import { useCallback, useRef, useState } from "react";
 
 import { describeRunCache, type CacheStatus } from "@/agent/cache";
 import type { TokenUsage } from "@/agent/cost";
-import type { LogicalModel } from "@/agent/provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { createSseParser } from "@/lib/sse";
+import { readAgentStream, type Done, type Span } from "@/lib/agent-stream";
 
 export interface TicketSummary {
   id: string;
   subject: string;
   customer: string | null;
   suspectedInjection: boolean;
-}
-
-interface Span {
-  seq: number;
-  type: "llm_call" | "tool_exec" | "guardrail" | "approval_wait";
-  name: string;
-  isError: boolean;
-  costNanos: number;
-  latencyMs: number;
-  /** All four token classes — the cache counters drive the badge. */
-  usage: TokenUsage | null;
-}
-
-interface Done {
-  status: string;
-  outcome: { action: string; reply: string; confidence: string } | null;
-  iterations: number;
-  costNanos: number;
-  estimated: boolean;
-  error: string | null;
-  /** Logical name, not the wire id — the cache floor is per model. */
-  model: LogicalModel;
-  /**
-   * All four token classes, not just input/output. The cache counters are what
-   * make the badge below a measurement rather than a guess.
-   */
-  usage: TokenUsage | null;
 }
 
 /**
@@ -127,24 +99,11 @@ export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
         throw new Error(detail.error ?? `run failed (${response.status})`);
       }
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      const parse = createSseParser();
-
-      for (;;) {
-        const { done: finished, value } = await reader.read();
-        if (finished) break;
-
-        for (const frame of parse(decoder.decode(value, { stream: true }))) {
-          if (frame.event === "span") {
-            setSpans((prev) => [...prev, frame.data as Span]);
-          } else if (frame.event === "done") {
-            setDone(frame.data as Done);
-          } else if (frame.event === "error") {
-            setError((frame.data as { error: string }).error);
-          }
-        }
-      }
+      await readAgentStream(response, {
+        onSpan: (span) => setSpans((prev) => [...prev, span]),
+        onDone: setDone,
+        onError: setError,
+      });
     } catch (caught) {
       if ((caught as Error).name !== "AbortError") {
         setError(caught instanceof Error ? caught.message : String(caught));
