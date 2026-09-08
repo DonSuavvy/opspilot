@@ -224,7 +224,7 @@ export async function POST(request: Request) {
             runId,
             ticketId: ticket.id,
             now,
-            data: createOpsData(db, ticket.workspaceId),
+            data: createOpsData(db, { workspaceId: ticket.workspaceId, runId }),
             // The version this run was pinned to, so `issue_refund` revalidates
             // against what the model was actually briefed on.
             policyConfig: sop.policyConfig,

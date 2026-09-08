@@ -8,51 +8,26 @@
  * the end. That difference is the entire point of the feature: anyone can show
  * a finished transcript, and almost nobody can show the agent thinking.
  *
- * `EventSource` cannot be used — starting a run is a POST — so the body is read
- * with a stream reader and reassembled by `createSseParser`, which is unit
- * tested against every possible chunk boundary.
+ * The stream itself is read by `readAgentStream`, shared with the approval
+ * controls so a resumed run renders through the same code path as the first
+ * half of its own trace.
  */
+import Link from "next/link";
 import { useCallback, useRef, useState } from "react";
 
 import { describeRunCache, type CacheStatus } from "@/agent/cache";
 import type { TokenUsage } from "@/agent/cost";
-import type { LogicalModel } from "@/agent/provider";
+import { ApprovalDecision } from "@/components/approval-decision";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { createSseParser } from "@/lib/sse";
+import { describeApproval } from "@/lib/approval-copy";
+import { readAgentStream, type Done, type Span } from "@/lib/agent-stream";
 
 export interface TicketSummary {
   id: string;
   subject: string;
   customer: string | null;
   suspectedInjection: boolean;
-}
-
-interface Span {
-  seq: number;
-  type: "llm_call" | "tool_exec" | "guardrail" | "approval_wait";
-  name: string;
-  isError: boolean;
-  costNanos: number;
-  latencyMs: number;
-  /** All four token classes — the cache counters drive the badge. */
-  usage: TokenUsage | null;
-}
-
-interface Done {
-  status: string;
-  outcome: { action: string; reply: string; confidence: string } | null;
-  iterations: number;
-  costNanos: number;
-  estimated: boolean;
-  error: string | null;
-  /** Logical name, not the wire id — the cache floor is per model. */
-  model: LogicalModel;
-  /**
-   * All four token classes, not just input/output. The cache counters are what
-   * make the badge below a measurement rather than a guess.
-   */
-  usage: TokenUsage | null;
 }
 
 /**
@@ -98,6 +73,9 @@ export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
   );
   const [spans, setSpans] = useState<Span[]>([]);
   const [done, setDone] = useState<Done | null>(null);
+  // Kept so the decision controls below can aim a resume at this run. The
+  // `run` event carries it from the first byte; `done` repeats it.
+  const [runId, setRunId] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abort = useRef<AbortController | null>(null);
@@ -109,6 +87,7 @@ export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
 
     setSpans([]);
     setDone(null);
+    setRunId(null);
     setError(null);
     setRunning(true);
 
@@ -127,24 +106,15 @@ export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
         throw new Error(detail.error ?? `run failed (${response.status})`);
       }
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      const parse = createSseParser();
-
-      for (;;) {
-        const { done: finished, value } = await reader.read();
-        if (finished) break;
-
-        for (const frame of parse(decoder.decode(value, { stream: true }))) {
-          if (frame.event === "span") {
-            setSpans((prev) => [...prev, frame.data as Span]);
-          } else if (frame.event === "done") {
-            setDone(frame.data as Done);
-          } else if (frame.event === "error") {
-            setError((frame.data as { error: string }).error);
-          }
-        }
-      }
+      await readAgentStream(response, {
+        onRun: (started) => setRunId(started.runId),
+        onSpan: (span) => setSpans((prev) => [...prev, span]),
+        onDone: (finished) => {
+          if (finished.runId) setRunId(finished.runId);
+          setDone(finished);
+        },
+        onError: setError,
+      });
     } catch (caught) {
       if ((caught as Error).name !== "AbortError") {
         setError(caught instanceof Error ? caught.message : String(caught));
@@ -176,6 +146,19 @@ export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
       })
     : null;
   const slowest = spans.reduce((max, s) => Math.max(max, s.latencyMs), 0);
+
+  /**
+   * The **last** approval wait, not the first. A resumed run can pause again
+   * on a second confirm-write in the same turn, and the question on screen has
+   * to be the one still unanswered.
+   */
+  const waits = spans.filter((s) => s.type === "approval_wait");
+  const awaiting = waits.length > 0 ? waits[waits.length - 1] : undefined;
+  const asking = awaiting
+    ? describeApproval({ toolName: awaiting.name, toolInput: awaiting.input })
+    : "A confirm-write tool is waiting for a decision.";
+  const pausedRunId =
+    done?.status === "paused_for_approval" ? runId : null;
 
   return (
     // Two columns from `md`, not `lg`: the trace is the thing being
@@ -301,11 +284,56 @@ export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
           </div>
         ) : null}
 
-        {done && !done.outcome ? (
+        {pausedRunId ? (
+          <div className="flex flex-col gap-3 rounded-lg border border-sky-300 bg-sky-50 p-4 dark:border-sky-900 dark:bg-sky-950">
+            <div>
+              <p className="text-sm font-medium">
+                Paused for human approval — nothing has run yet.
+              </p>
+              <p className="mt-1 font-mono text-sm text-zinc-600 dark:text-zinc-300">
+                {asking}
+              </p>
+            </div>
+            <ApprovalDecision
+              runId={pausedRunId}
+              onStart={() => {
+                setError(null);
+                setRunning(true);
+              }}
+              onSpan={(span) => setSpans((prev) => [...prev, span])}
+              onDone={(finished) => {
+                setDone(finished);
+                setRunning(false);
+              }}
+              onError={(message) => {
+                setError(message);
+                setRunning(false);
+              }}
+            />
+          </div>
+        ) : null}
+
+        {/*
+          Paused, but the stream never handed back a run id, so there is
+          nothing to resume in place. Without this the panel above is skipped
+          and the fallback below excludes the status, which left the run
+          looking finished and silent — the worst reading of a pause, because
+          the money is still waiting on a decision somewhere.
+        */}
+        {done?.status === "paused_for_approval" && !runId ? (
           <p className="text-sm text-zinc-500">
-            {done.status === "paused_for_approval"
-              ? "Paused for human approval — a confirm-write tool was called, so the run stopped before it executed. Resume lands on Day 5."
-              : (done.error ?? "No structured outcome.")}
+            Paused for approval, but this trace lost its run id. Decide it from
+            the{" "}
+            <Link href="/approvals" className="underline">
+              approval queue
+            </Link>
+            .
+          </p>
+        ) : null}
+
+        {done && !done.outcome && done.status !== "paused_for_approval" ? (
+          <p className="text-sm text-zinc-500">
+            {done.error ?? "No structured outcome."}
           </p>
         ) : null}
       </section>

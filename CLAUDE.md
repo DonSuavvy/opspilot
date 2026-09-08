@@ -236,7 +236,8 @@ IDs and API shapes changed in 2025–26; do not code from memory.
 docs/PLAN.md            authoritative build plan
 src/policy/             pure policy engine (refund limits, escalation)
 src/agent/registry.ts   tool registry: Zod -> strict JSON Schema, boot validation
-src/agent/tools.ts      the 9 tools — 7 handlers live, confirm-write pair Day 5
+src/agent/tools.ts      the 9 tools — 8 handlers live; update_subscription is a
+                        deliberate stub
 src/agent/loop.ts       the hand-rolled tool loop (MessageCreator seam)
 src/agent/data.ts       OpsData — the workspace-bound seam handlers run against
 src/agent/trace.ts      span -> run_spans row, and SSE framing
@@ -246,7 +247,12 @@ src/db/client.ts        lazy getDb()
 src/db/ops-data.ts      Drizzle OpsData, scoped to one workspace
 src/db/runs.ts          run + span persistence, today's spend
 src/db/seed.ts          deterministic Beacon Analytics seed
+src/lib/agent-stream.ts   SSE trace reader, shared by both islands that start a run
+src/lib/approval-copy.ts  describeApproval — the sentence a reviewer decides on
+src/components/approval-decision.tsx  approve or deny one paused run, in place
+src/components/approval-queue.tsx     the pending rows, each decided on its own
 src/app/api/agent/run/  POST a ticket id, stream the trace back as SSE
+src/app/approvals/      the queue page, server-rendered from listPendingApprovals
 scripts/verify-*.ts     gate evidence that needs a database
 scripts/probe-grammar.ts  which tool set blows the strict grammar cap
 ```

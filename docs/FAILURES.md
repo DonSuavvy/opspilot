@@ -1251,3 +1251,85 @@ live look identical in a diff. What made it visible was checking the database
 instead of the response: the round-trip reported success, the trace showed a
 green `tool_exec`, and the customer reply was fluent and specific. Every
 observable said it worked except the one that was load-bearing.
+
+---
+
+## Closing #24 — 2026-09-08
+
+Four things were missing, and none of them was hard. `applyRefund` in
+`src/policy/refund.ts` does the arithmetic — running total in, running total
+out, `refunded` only when the total reaches the invoice amount, and a throw
+rather than a clamp on an over-refund. `OpsData.recordRefund` is the seam
+method that did not exist: one transaction that locks the invoice `for
+update`, writes `refunded_cents` and `status`, and inserts the `issue_refund`
+audit row beside them. `createOpsData` now takes `{ workspaceId, runId }`
+instead of a bare workspace, so every audit row the seam writes names the run —
+bound once, closed over, the same way the workspace is, because a run passed
+per call is a run some future write forgets. And `issue_refund`'s handler
+calls the seam instead of ending at "this is allowed."
+
+The idempotency key is stored in the audit row's `after` payload and looked up
+there, rather than in a table of its own: the audit row already is the record
+that the refund happened, and a second store would be a second source of truth
+about the same fact.
+
+The live gate. Same shape as the run in #24 — the duplicate-charge ticket,
+paused at span 4 on `issue_refund`, approved through `/api/agent/resume`,
+dispatched at span 5:
+
+```
+tool_exec | issue_refund | INV-2005 | 4900 | duplicate_charge
+  {"status":"refunded","recorded":true,"duplicate":false,
+   "refunded_cents_total":4900,"invoice_status":"refunded"}
+completed · refunded · 4900
+```
+
+And the query that closed it, the one #24 was found by:
+
+```
+  number  | amount_cents | refunded_cents |  status
+----------+--------------+----------------+----------
+ INV-2005 |         4900 |           4900 | refunded
+
+     action     | has_run |              entity_id
+----------------+---------+--------------------------------------
+ issue_refund   | t       | INV-2005
+ draft_reply    | t       | 40c38bd2-5e51-4178-a742-6e7faad85171
+ resolve_ticket | t       | 40c38bd2-5e51-4178-a742-6e7faad85171
+```
+
+Three rows, all naming the run, and one of them for the money. Against the
+same query in #24: `refunded_cents` 0, no `issue_refund` row at all, and
+`run_id` null 15 times out of 15.
+
+One bound worth stating rather than leaving implied. The idempotency key makes
+a **retried** resume safe — the same key returns the first call's totals with
+`duplicate: true` and writes nothing. It does not make a **concurrent** one
+safe: two simultaneous resumes both find no prior row and both write. What
+stops that is the `status = 'pending'` predicate on the approval decision,
+which `verify-resume` proves by racing two approvals. The key is the belt to
+that pair of braces. Calling the refund flatly "idempotent" would be the same
+species of overclaim this file exists to record. And because the key is
+written by the model rather than by us, the lookup is scoped to the invoice as
+well: nothing stops a model reusing one string across two invoices, and a
+match on the key alone would swallow the second refund and report the first
+invoice's totals for it.
+
+The `for update` on the invoice belongs in the same paragraph, for the same
+reason. It is there so two refunds against one invoice cannot both read the
+same `refunded_cents` and both write their own total, and that is a property of
+the SQL rather than a hope — but nothing exercises it. Removing the clause
+left all 23 gate checks and all 419 tests green when it was measured (the script has grown since), because every one of them
+takes the sequential path. Reasoned, not measured, and written down as such.
+
+**The lesson is that nothing was broken.** The column existed and had a default.
+The handler was reachable and ran. The audit log had been recording side
+effects for weeks. `evaluateRefund` was correct, the approval queue worked, the
+trace was green and the customer reply was accurate prose about a refund that
+had not happened. Every part was present and no line of code joined them, which
+is the failure mode that survives review longest, because a reviewer checks
+whether each piece is right and a missing edge is not a piece. The suite could
+not see it — every seam was faked and every fake behaved. What saw it was one
+`select` against the row the feature is supposed to change. That is now check 2
+of `npm run verify:refund`, so the next time it will be a red line rather than
+a hunch.

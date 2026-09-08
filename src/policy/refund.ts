@@ -448,6 +448,55 @@ export function evaluateRefund(input: RefundEvaluationInput): RefundDecision {
   };
 }
 
+/** What an invoice looks like once a refund has been applied to it. */
+export interface RefundLedgerEntry {
+  /** The running total refunded against the invoice, not this refund's share. */
+  refundedCents: number;
+  status: "refunded" | "partially_refunded";
+}
+
+/**
+ * The ledger half of a refund: `evaluateRefund` decides whether money may
+ * move, this decides what the invoice reads afterwards.
+ *
+ * Kept here, in the pure module, rather than inline in the `UPDATE` that
+ * persists it. Two reasons. The arithmetic is money and gets literal-valued
+ * unit tests without Postgres; and it is the last guard before a write, so it
+ * throws rather than clamps. `evaluateRefund` already rejects a non-positive
+ * amount and one larger than the remaining balance, so reaching either throw
+ * below means something upstream is broken — and a silent clamp would turn
+ * that into a plausible wrong number nobody ever checks, which is the failure
+ * mode FAILURES #20 and #24 are both about.
+ *
+ * Cumulative by construction: `refundedCents` in and out are both running
+ * totals, so a second partial that happens to close the balance lands on
+ * `refunded` rather than reporting `partially_refunded` forever.
+ */
+export function applyRefund(
+  invoice: { amountCents: number; refundedCents: number },
+  cents: number,
+): RefundLedgerEntry {
+  if (!Number.isInteger(cents) || cents <= 0) {
+    throw new Error(
+      `refund amount must be a positive integer number of cents, got ${cents}`,
+    );
+  }
+
+  const refundedCents = invoice.refundedCents + cents;
+  if (refundedCents > invoice.amountCents) {
+    throw new Error(
+      `refund of ${cents} cents would exceed the invoice: ${invoice.refundedCents} ` +
+        `of ${invoice.amountCents} cents is already refunded`,
+    );
+  }
+
+  return {
+    refundedCents,
+    status:
+      refundedCents === invoice.amountCents ? "refunded" : "partially_refunded",
+  };
+}
+
 export interface EscalationEvaluationInput {
   /**
    * Whether the ticket body is suspected of carrying a prompt injection.

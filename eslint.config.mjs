@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Nested worktrees of this repo. A clean CI clone has none.
+    ".claude/**",
   ]),
 ]);
 

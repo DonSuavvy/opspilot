@@ -399,31 +399,49 @@ export const TOOLS: ToolDefinition[] = [
       }
 
       /**
-       * This return value is read by the model, so it has to be true.
+       * Past the policy gate, so the money moves here.
        *
-       * It used to say `status: "pending_approval"`, which was accurate while
-       * the handler was unreachable — confirm-write paused before dispatch, so
-       * nothing here ever ran (FAILURES #22). Day 5's resume changed that
-       * without changing this code: `firstCallAwaitingApproval` pauses unless
-       * a decision exists, so if this handler runs, **a human already approved
-       * it**. Telling the model the refund is "pending approval" at that point
-       * is false, and in the first live run the model ignored it and promised
-       * the customer money — correctly, by luck rather than design.
+       * This code runs **only** on the approved path. Confirm-write pauses the
+       * loop before dispatch, and `firstCallAwaitingApproval` keeps it paused
+       * until a decision exists, so reaching this line means a human said yes
+       * and `/api/agent/resume` dispatched the call.
        *
-       * `recorded: false` is the uncomfortable half, and it is deliberate.
-       * Nothing here writes `refunded_cents` or an audit row, so the honest
-       * report is "authorized, not yet recorded" — see FAILURES #24. A status
-       * that claimed the money had moved would read better in a demo and be a
-       * lie the model repeats to a customer. Same call as the cache badge
-       * (#20): display the uncomfortable number, because a plausible wrong one
-       * never gets checked.
+       * FAILURES #24 is the run where that was true and nothing happened
+       * anyway: the trace was green, the customer was told the refund was on
+       * its way, and `refunded_cents` was zero, because the handler ended at
+       * "this is allowed" and no code existed on the other side of it. The
+       * `recordRefund` call below is that missing side — one transaction that
+       * writes the invoice and the audit row together.
+       *
+       * The return value is read by the model, so it has to be true, and it
+       * reports the seam's numbers rather than the request's. `duplicate` is
+       * how a *retried* resume says the money already moved: the same
+       * idempotency key returns the first call's totals and writes nothing, so
+       * the model can tell the customer about one refund instead of two.
+       *
+       * The status was `"authorized"` with `recorded: false` while nothing
+       * wrote, which was the honest report then — the same call as the cache
+       * badge in #20, an uncomfortable number in preference to a plausible
+       * wrong one. It is now whatever the row says, which on a top-up of a
+       * partly refunded invoice is `partially_refunded`. It was hardcoded to
+       * `"refunded"` for one commit, sitting beside an `invoice_status` that
+       * could disagree with it — the model reads both, and repeats the first.
        */
+      const result = await ctx.data.recordRefund({
+        invoiceNumber: invoice.number,
+        amountCents: decision.approvedCents,
+        reason: input.reason,
+        idempotencyKey: input.idempotency_key,
+      });
+
       return {
-        status: "authorized",
-        recorded: false,
+        status: result.status,
+        recorded: true,
+        duplicate: result.duplicate,
         invoice_id: invoice.number,
         amount_cents: decision.approvedCents,
-        outcome: decision.outcome,
+        refunded_cents_total: result.refundedCents,
+        invoice_status: result.status,
         idempotency_key: input.idempotency_key,
       };
     },

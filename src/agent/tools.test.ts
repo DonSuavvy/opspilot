@@ -102,7 +102,11 @@ describe("production tool set", () => {
     ]);
   });
 
-  it("declares every write tool idempotent so a resumed run cannot double-apply", () => {
+  // The flag is boot-validated and read nowhere at dispatch, so this proves
+  // every write tool *declares* idempotency and nothing more. What actually
+  // stops a resumed run double-applying is the idempotency key `issue_refund`
+  // carries, and the `status = 'pending'` predicate on the approval decision.
+  it("declares the idempotent flag on every write tool", () => {
     const writes = registry
       .list()
       .filter((t) => t.safetyClass !== "read");

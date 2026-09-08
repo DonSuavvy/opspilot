@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  applyRefund,
   DEFAULT_POLICY,
   evaluateEscalation,
   evaluateRefund,
@@ -1301,5 +1302,75 @@ describe("the injection guard is not an operator setting", () => {
 
     expect(decision.escalate).toBe(false);
     expect(decision.reasons).toEqual([]);
+  });
+});
+
+/**
+ * The ledger side of a refund, as opposed to the permission side.
+ *
+ * `evaluateRefund` answers "is this allowed"; this answers "what does the
+ * invoice look like afterwards". Splitting them keeps the arithmetic pure and
+ * testable without Postgres, and puts a second guard between an approved
+ * decision and the `UPDATE` that acts on it — FAILURES #24 is what happens
+ * when nothing sits in that gap at all.
+ *
+ * Every expected value below is a literal. Recomputing them from the inputs
+ * would make the test agree with the implementation by construction, which is
+ * the one thing arithmetic tests must not do.
+ */
+describe("applyRefund", () => {
+  it("adds a partial refund to the running total and marks the invoice partial", () => {
+    expect(applyRefund({ amountCents: 4_900, refundedCents: 0 }, 1_000)).toEqual({
+      refundedCents: 1_000,
+      status: "partially_refunded",
+    });
+  });
+
+  it("marks the invoice refunded when the refund covers the whole amount", () => {
+    expect(applyRefund({ amountCents: 4_900, refundedCents: 0 }, 4_900)).toEqual({
+      refundedCents: 4_900,
+      status: "refunded",
+    });
+  });
+
+  /**
+   * The cumulative case, and the reason `refundedCents` is a running total
+   * rather than this refund's amount: a second partial that happens to close
+   * the balance must land on `refunded`, not on `partially_refunded` again.
+   */
+  it("completes an already partly refunded invoice", () => {
+    expect(
+      applyRefund({ amountCents: 4_900, refundedCents: 1_000 }, 3_900),
+    ).toEqual({ refundedCents: 4_900, status: "refunded" });
+  });
+
+  it("keeps a second partial partial when a balance remains", () => {
+    expect(
+      applyRefund({ amountCents: 4_900, refundedCents: 1_000 }, 500),
+    ).toEqual({ refundedCents: 1_500, status: "partially_refunded" });
+  });
+
+  /**
+   * The policy engine already rejects an over-refund, so reaching this throw
+   * means something upstream is wrong. Throwing anyway is the point: this is
+   * the last thing between an approval and money leaving, and a silent clamp
+   * would turn a bug into a quiet, plausible number.
+   */
+  it("refuses to refund more than the invoice is worth", () => {
+    // Matched on the message, not on `toThrow()` alone: a bare `toThrow()`
+    // here passes while `applyRefund` does not exist at all, which is a
+    // vacuous RED and exactly the trap FAILURES' preamble warns about.
+    expect(() =>
+      applyRefund({ amountCents: 4_900, refundedCents: 1_000 }, 4_000),
+    ).toThrow(/exceed/i);
+  });
+
+  it("refuses a zero or negative refund", () => {
+    expect(() =>
+      applyRefund({ amountCents: 4_900, refundedCents: 0 }, 0),
+    ).toThrow(/positive/i);
+    expect(() =>
+      applyRefund({ amountCents: 4_900, refundedCents: 0 }, -100),
+    ).toThrow(/positive/i);
   });
 });

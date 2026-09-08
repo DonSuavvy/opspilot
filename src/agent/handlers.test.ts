@@ -73,6 +73,11 @@ function fakeData(over: Partial<OpsData> = {}): OpsData {
     saveDraft: vi.fn(async () => ({ draftId: "draft_1" })),
     escalateTicket: vi.fn(async () => ({ ticketId: "tkt_1", status: "escalated" })),
     resolveTicket: vi.fn(async () => ({ ticketId: "tkt_1", status: "resolved" })),
+    recordRefund: vi.fn(async () => ({
+      refundedCents: 0,
+      status: "partially_refunded",
+      duplicate: false,
+    })),
     ...over,
   };
 }

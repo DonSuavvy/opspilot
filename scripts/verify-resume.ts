@@ -34,7 +34,9 @@ import { closeDb, getDb } from "../src/db/client";
 import {
   ApprovalNotPendingError,
   decidePendingApproval,
+  describeApproval,
   listApprovals,
+  listPendingApprovals,
   nextSpanSeq,
   recordPendingApproval,
   toResumeDecisions,
@@ -180,6 +182,54 @@ async function main() {
       collided = true;
     }
     check("restarting from 0 is rejected by the unique index", collided, true);
+
+    console.log(
+      `\n${BOLD}5. The queue lists what is pending and forgets what is decided${RESET}`,
+    );
+    // A second question on the same run: `recordPendingApproval` is idempotent
+    // on (runId, toolUseId), and section 3 already consumed the first row.
+    await recordPendingApproval(db, {
+      workspaceId: ws.id,
+      runId,
+      toolUseId: "toolu_verify_queue",
+      toolName: "issue_refund",
+      toolInput: {
+        invoice_id: "INV-0000",
+        amount_cents: 100,
+        reason: "duplicate_charge",
+      },
+      safetyClass: "confirm_write",
+    });
+
+    // Keyed on the fixture's id rather than on the list length: the demo
+    // workspace can hold real pending approvals from earlier runs, and a
+    // length assertion would fail for reasons that are not about this code.
+    const queued = await listPendingApprovals(db, ws.id);
+    const mine = queued.find((a) => a.runId === runId);
+    check("the pending row is in the queue", mine !== undefined, true);
+    check("it carries no ticket, and still lists", mine?.ticketSubject, null);
+    check("its customer is null too", mine?.customer, null);
+    check(
+      "and its input survives jsonb well enough to describe",
+      mine ? describeApproval(mine) : null,
+      "Refund $1.00 against INV-0000 (duplicate_charge)",
+    );
+    check("it is dated", mine?.createdAt instanceof Date, true);
+
+    await decidePendingApproval(db, {
+      runId,
+      approved: false,
+      reason: "fixture",
+      decidedBy: "verify-resume",
+      now: new Date(),
+    });
+
+    const afterDecision = await listPendingApprovals(db, ws.id);
+    check(
+      "a decided row leaves the queue",
+      afterDecision.some((a) => a.runId === runId),
+      false,
+    );
   } finally {
     // Cascades to run_spans and approvals via their FKs.
     await db.delete(agentRuns).where(eq(agentRuns.id, runId));

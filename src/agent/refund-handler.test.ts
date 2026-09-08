@@ -50,6 +50,11 @@ function fakeData(invoice: InvoiceRecord | null = INV_2002): OpsData {
     saveDraft: vi.fn(async () => ({ draftId: "draft_1" })),
     escalateTicket: vi.fn(async () => ({ ticketId: "tkt_1", status: "escalated" })),
     resolveTicket: vi.fn(async () => ({ ticketId: "tkt_1", status: "resolved" })),
+    recordRefund: vi.fn(async () => ({
+      refundedCents: 4_900,
+      status: "refunded",
+      duplicate: false,
+    })),
   };
 }
 
@@ -102,7 +107,7 @@ describe("issue_refund revalidation", () => {
   it("accepts the same call under the wider window that was active before", async () => {
     const result = await issueRefund(validCall, withWindow(30));
 
-    expect(result).toMatchObject({ status: "authorized", recorded: false });
+    expect(result).toMatchObject({ status: "refunded", recorded: true });
   });
 
   /**
@@ -148,7 +153,7 @@ describe("issue_refund revalidation", () => {
       withWindow(14),
     );
 
-    expect(result).toMatchObject({ status: "authorized", recorded: false });
+    expect(result).toMatchObject({ status: "refunded", recorded: true });
   });
 
   it("rejects a refund against an invoice that was never paid", async () => {
@@ -175,6 +180,99 @@ describe("issue_refund revalidation", () => {
 
     await expect(
       issueRefund(validCall, withWindow(14), data),
-    ).resolves.toMatchObject({ status: "authorized", recorded: false });
+    ).resolves.toMatchObject({ status: "refunded", recorded: true });
+  });
+});
+
+/**
+ * FAILURES #24: the approval worked, the trace was green, the customer was
+ * told the money was on its way, and `refunded_cents` stayed at zero. The
+ * handler validated the refund and returned; nothing wrote anything.
+ *
+ * Confirm-write means this handler runs only after a human said yes, so by the
+ * time it is reached "authorized" is not the answer any more — recording it is.
+ */
+describe("issue_refund recording", () => {
+  it("records the approved refund through the seam, exactly once", async () => {
+    const data = fakeData();
+    await issueRefund(validCall, withWindow(30), data);
+
+    expect(data.recordRefund).toHaveBeenCalledTimes(1);
+    expect(data.recordRefund).toHaveBeenCalledWith({
+      invoiceNumber: "INV-2002",
+      // The *approved* amount, not the requested one. They agree here and
+      // the distinction is the point: the policy decision is what moves.
+      amountCents: 4_900,
+      reason: "service_issue",
+      idempotencyKey: "tkt_1-INV-2002",
+    });
+  });
+
+  /**
+   * Four fields, three different sources: `status` is the handler's own word
+   * for "the refund happened"; `amount_cents` is this refund, from the policy
+   * decision; `refunded_cents_total` and `invoice_status` describe the invoice
+   * afterwards and come from the seam. The fixture makes all four disagree on
+   * purpose — a partly refunded invoice topped up by 3,000 to 4,000 of its
+   * 4,900, so it is still only partly refunded. With the obvious full-refund
+   * fixture the four collapse to two values and the test passes even if the
+   * handler reports the request where the row belongs, or hardcodes the
+   * invoice status it hopes for.
+   */
+  it("reports what the seam recorded, not what the model asked for", async () => {
+    const data = fakeData({ ...INV_2002, refundedCents: 1_000 });
+    vi.mocked(data.recordRefund).mockResolvedValue({
+      refundedCents: 4_000,
+      status: "partially_refunded",
+      duplicate: false,
+    });
+
+    const result = await issueRefund(
+      { ...validCall, amount_cents: 3_000 },
+      withWindow(30),
+      data,
+    );
+
+    expect(result).toMatchObject({
+      // The invoice is still only partly refunded, so `status` cannot say
+      // "refunded" while `invoice_status` beside it says otherwise. Both are
+      // read by the model, and the first one is the one it repeats to the
+      // customer.
+      status: "partially_refunded",
+      recorded: true,
+      duplicate: false,
+      invoice_id: "INV-2002",
+      amount_cents: 3_000,
+      refunded_cents_total: 4_000,
+      invoice_status: "partially_refunded",
+      idempotency_key: "tkt_1-INV-2002",
+    });
+  });
+
+  /**
+   * The whole reason the key exists. A resume retried after a timeout must
+   * tell the model the money already moved, not move it again — and not claim
+   * a second refund happened either.
+   */
+  it("surfaces a duplicate from the seam rather than hiding it", async () => {
+    const data = fakeData();
+    vi.mocked(data.recordRefund).mockResolvedValue({
+      refundedCents: 4_900,
+      status: "refunded",
+      duplicate: true,
+    });
+
+    const result = await issueRefund(validCall, withWindow(30), data);
+
+    expect(result).toMatchObject({ recorded: true, duplicate: true });
+  });
+
+  it("never records a refund the policy denied", async () => {
+    const data = fakeData();
+
+    await expect(issueRefund(validCall, withWindow(14), data)).rejects.toThrow(
+      OutOfPolicyRefundError,
+    );
+    expect(data.recordRefund).not.toHaveBeenCalled();
   });
 });
