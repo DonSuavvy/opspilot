@@ -280,11 +280,16 @@ src/evals/runner.ts     one case: loop + barrier + scorer
 src/evals/suite.ts      the whole suite, sequentially, into one pinned eval_runs row
 src/lib/agent-stream.ts   SSE trace reader, shared by both islands that start a run
 src/lib/approval-copy.ts  describeApproval — the sentence a reviewer decides on
+src/lib/eval-labels.ts    sopLabel, shortSha, compactJson — total over every null
 src/components/approval-decision.tsx  approve or deny one paused run, in place
 src/components/approval-queue.tsx     the pending rows, each decided on its own
+src/components/eval-lab.tsx           the streaming scorecard and the run history
 src/app/api/agent/run/  POST a ticket id, stream the trace back as SSE
 src/app/api/evals/run/  POST to run the golden suite, streamed as a scorecard
 src/app/approvals/      the queue page, server-rendered from listPendingApprovals
+src/app/evals/          run the suite, and the history with a diff link per row
+src/app/evals/[id]/     one run: the pin, then every assertion it made
+src/app/evals/diff/     ?base=&head= — regressed, fixed, added, removed, unchanged
 scripts/verify-*.ts     gate evidence that needs a database
 scripts/probe-grammar.ts  which tool set blows the strict grammar cap
 ```

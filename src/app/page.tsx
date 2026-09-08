@@ -87,6 +87,9 @@ export default async function Home() {
               ? `approvals (${pendingApprovals})`
               : "approvals"}
           </Link>
+          <Link href="/evals" className="text-sm text-zinc-500 underline">
+            eval lab
+          </Link>
         </div>
         <p className="mt-1 max-w-2xl text-sm text-zinc-500">
           Support and billing agent for Beacon Analytics. Pick a ticket and run
