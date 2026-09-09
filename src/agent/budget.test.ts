@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   budgetConfigSchema,
   checkBudget,
+  decideReservation,
+  ESTIMATED_RUN_NANOS,
   UNVERIFIED_RATE_SAFETY_FACTOR,
   type BudgetConfig,
 } from "./budget";
@@ -27,7 +29,13 @@ import {
  * clock or a database, and the decision is a value rather than a side effect.
  */
 function config(over: Partial<BudgetConfig> = {}): BudgetConfig {
-  return { dailyCapNanos: 5_000_000_000, killSwitch: false, ...over }; // $5.00
+  // $5.00 a day, ten runs a minute.
+  return {
+    dailyCapNanos: 5_000_000_000,
+    killSwitch: false,
+    runsPerMinute: 10,
+    ...over,
+  };
 }
 
 describe("checkBudget", () => {
@@ -193,6 +201,132 @@ describe("checkBudget", () => {
 });
 
 /**
+ * The reservation decision — what a *starting* run is asked, as opposed to
+ * what an in-flight one is asked before each call.
+ *
+ * `checkBudget` answers "can this call be afforded". It cannot answer "should
+ * this run start at all", because the thing that makes a burst dangerous is
+ * not its price: ten cheap runs fired at once against a shared Bedrock account
+ * trip a 429 that stalls someone else's production traffic long before they
+ * trouble the daily cap. So the per-minute count is a second, independent
+ * axis, and it is checked here rather than inside the loop — a run refused for
+ * arriving too fast should never have opened a row.
+ */
+describe("decideReservation", () => {
+  it("defers to checkBudget when the arrival rate is fine", () => {
+    const d = decideReservation({
+      spentTodayNanos: 0,
+      runsInLastMinute: 0,
+      estimatedRunNanos: ESTIMATED_RUN_NANOS,
+      rateVerified: true,
+      config: config(),
+    });
+
+    expect(d.allowed).toBe(true);
+    expect(d.reason).toBeNull();
+    expect(d.retryAfterSeconds).toBeUndefined();
+  });
+
+  it("refuses once the last minute already holds the allowance", () => {
+    const d = decideReservation({
+      spentTodayNanos: 0,
+      runsInLastMinute: 10,
+      estimatedRunNanos: 1,
+      rateVerified: true,
+      config: config({ runsPerMinute: 10 }),
+    });
+
+    expect(d.allowed).toBe(false);
+    expect(d.reason).toBe("rate_limited");
+  });
+
+  it("allows the last run of the allowance, and refuses the next", () => {
+    const at = (runsInLastMinute: number) =>
+      decideReservation({
+        spentTodayNanos: 0,
+        runsInLastMinute,
+        estimatedRunNanos: 1,
+        rateVerified: true,
+        config: config({ runsPerMinute: 3 }),
+      });
+
+    expect(at(2).allowed).toBe(true);
+    expect(at(3).allowed).toBe(false);
+  });
+
+  /**
+   * A refusal a caller cannot act on is just a 429 with no advice. Sixty
+   * seconds is the window itself, so it is the longest a caller could ever
+   * need to wait — over-stating it is the polite direction against an account
+   * shared with production.
+   */
+  it("tells the caller how long to wait", () => {
+    const d = decideReservation({
+      spentTodayNanos: 0,
+      runsInLastMinute: 99,
+      estimatedRunNanos: 1,
+      rateVerified: true,
+      config: config({ runsPerMinute: 1 }),
+    });
+
+    expect(d.retryAfterSeconds).toBe(60);
+  });
+
+  /**
+   * The kill switch is an operator saying "stop everything". A run that is
+   * also arriving too fast, and would also cross the cap, must still be told
+   * about the switch — that is the one refusal a human can do something about.
+   */
+  it("reports the kill switch ahead of the rate limit", () => {
+    const d = decideReservation({
+      spentTodayNanos: 9_000_000_000,
+      runsInLastMinute: 500,
+      estimatedRunNanos: ESTIMATED_RUN_NANOS,
+      rateVerified: false,
+      config: config({ killSwitch: true, runsPerMinute: 1 }),
+    });
+
+    expect(d.reason).toBe("kill_switch");
+  });
+
+  it("still refuses a run that would cross the cap", () => {
+    const d = decideReservation({
+      spentTodayNanos: 4_900_000_000,
+      runsInLastMinute: 0,
+      estimatedRunNanos: 200_000_000,
+      rateVerified: true,
+      config: config(),
+    });
+
+    expect(d.reason).toBe("run_would_exceed_cap");
+  });
+
+  it("throws rather than allowing on a poisoned count", () => {
+    expect(() =>
+      decideReservation({
+        spentTodayNanos: 0,
+        runsInLastMinute: Number.NaN,
+        estimatedRunNanos: 1,
+        rateVerified: true,
+        config: config(),
+      }),
+    ).toThrow();
+  });
+});
+
+/**
+ * The reservation is a *per-run* charge taken before the run starts, and the
+ * same figure the loop uses per call. Measured Haiku runs land between $0.004
+ * and $0.018, so one call's estimate covers a whole run with room to spare —
+ * and erring high is the cheap direction against a shared account.
+ */
+describe("ESTIMATED_RUN_NANOS", () => {
+  it("is $0.02, comfortably above a measured run", () => {
+    expect(ESTIMATED_RUN_NANOS).toBe(20_000_000);
+  });
+});
+
+/**
  * `OPSPILOT_DAILY_BUDGET_USD` and `OPSPILOT_KILL_SWITCH` have existed in
  * `.env.local` since Day 1 with no code reading them. Parsing them rather than
  * trusting them is the same call the policy engine made about
@@ -204,10 +338,41 @@ describe("budgetConfigSchema", () => {
     const c = budgetConfigSchema.parse({
       OPSPILOT_DAILY_BUDGET_USD: "5",
       OPSPILOT_KILL_SWITCH: "false",
+      OPSPILOT_RUNS_PER_MINUTE: "4",
     });
 
     expect(c.dailyCapNanos).toBe(5_000_000_000);
     expect(c.killSwitch).toBe(false);
+    expect(c.runsPerMinute).toBe(4);
+  });
+
+  /**
+   * The rate limit defaults rather than failing closed, and that asymmetry
+   * with the daily cap is deliberate. An absent cap means *unlimited money*,
+   * which is the failure this module exists to prevent. An absent rate limit
+   * means a default that already holds — ten runs a minute is well inside what
+   * the demo does — so refusing to boot over it would be theatre.
+   */
+  it("defaults the rate limit to ten runs a minute", () => {
+    expect(
+      budgetConfigSchema.parse({ OPSPILOT_DAILY_BUDGET_USD: "5" })
+        .runsPerMinute,
+    ).toBe(10);
+  });
+
+  it.each([
+    ["empty", ""],
+    ["not a number", "ten"],
+    ["zero", "0"],
+    ["negative", "-1"],
+    ["fractional", "2.5"],
+  ])("refuses a %s runs-per-minute rather than ignoring it", (_l, v) => {
+    expect(() =>
+      budgetConfigSchema.parse({
+        OPSPILOT_DAILY_BUDGET_USD: "5",
+        OPSPILOT_RUNS_PER_MINUTE: v,
+      }),
+    ).toThrow();
   });
 
   it.each(["true", "1", "yes", "TRUE"])("treats %s as engaged", (v) => {
