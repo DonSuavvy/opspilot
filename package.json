@@ -23,6 +23,7 @@
     "verify:boot": "tsx scripts/verify-boot.ts",
     "verify:seed": "tsx scripts/verify-seed.ts",
     "verify:sop": "tsx scripts/verify-sop.ts",
+    "verify:budget": "tsx scripts/verify-budget.ts",
     "verify:resume": "tsx scripts/verify-resume.ts",
     "verify:refund": "tsx scripts/verify-refund.ts",
     "verify:evals": "tsx scripts/verify-evals.ts"
