@@ -16,6 +16,7 @@ import { compileSop } from "@/agent/sop";
 import { createOpsData } from "@/db/ops-data";
 import { getDb } from "@/db/client";
 import { loadActiveSop } from "@/db/sops";
+import { ticketMessage } from "@/agent/prompt";
 import { runAgentLoop, type SpanEvent } from "@/agent/loop";
 import { buildRegistry } from "@/agent/registry";
 import {
@@ -213,10 +214,12 @@ export async function POST(request: Request) {
           messages: [
             {
               role: "user",
-              content:
-                `Ticket ${ticket.id}\nSubject: ${ticket.subject}\n` +
-                (customer ? `Customer: ${customer.externalId}\n` : "") +
-                `\n<ticket_body>\n${ticket.body}\n</ticket_body>`,
+              content: ticketMessage({
+                id: ticket.id,
+                subject: ticket.subject,
+                customer: customer?.externalId ?? null,
+                body: ticket.body,
+              }),
             },
           ],
           toolContext: {

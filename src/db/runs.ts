@@ -58,7 +58,13 @@ export async function startRun(
   db: Db,
   input: {
     workspaceId: string;
-    ticketId: string;
+    /**
+     * Null for an eval run. `agent_runs.ticket_id` has always been nullable —
+     * this signature was the narrower of the two, and an eval case is not a row
+     * in `tickets` (see `eval_cases`, the one table with no workspace). The
+     * `eval_results` row is what points back at the case.
+     */
+    ticketId: string | null;
     model: string;
     sopVersionId?: string | null;
   },

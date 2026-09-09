@@ -209,9 +209,27 @@ export function providerFromEnv(
  * which reads like a *missing* variable rather than a misspelled one, and cost
  * a debugging cycle on the way here.
  */
+export interface ClientTuning {
+  /**
+   * How many times the SDK retries a 429 or 5xx before giving up. The SDK's
+   * own default is 2, with exponential backoff that honours `retry-after`.
+   *
+   * Raised only by callers that issue a *burst*. Measured, 2026-09-08: the
+   * golden suite's eight back-to-back runs — roughly 25 calls in 40 seconds —
+   * exhausted the default on covara and killed the last three cases with
+   * `429 Too many requests, please wait before trying again`. The account is
+   * shared with Causa's live generation, so the throttle is real capacity
+   * being used by something else, not a bug to route around. More backoff is
+   * the correct response; the demo's single-ticket path has no burst and
+   * keeps the default.
+   */
+  maxRetries?: number;
+}
+
 export function createClient(
   provider: Provider,
   env: Record<string, string | undefined>,
+  tuning: ClientTuning = {},
 ): Anthropic | AnthropicBedrock {
   if (provider.id === "bedrock") {
     // Re-checked here rather than assumed from `providerFromEnv`. The SDK
@@ -230,6 +248,9 @@ export function createClient(
       awsAccessKey: accessKey,
       awsSecretKey: secretKey,
       awsRegion: env.AWS_ANTHROPIC_REGION,
+      ...(tuning.maxRetries === undefined
+        ? {}
+        : { maxRetries: tuning.maxRetries }),
     });
   }
 
@@ -237,5 +258,10 @@ export function createClient(
   if (!apiKey) {
     throw new Error("provider: anthropic client needs ANTHROPIC_API_KEY");
   }
-  return new Anthropic({ apiKey });
+  return new Anthropic({
+    apiKey,
+    ...(tuning.maxRetries === undefined
+      ? {}
+      : { maxRetries: tuning.maxRetries }),
+  });
 }

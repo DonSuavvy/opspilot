@@ -58,6 +58,7 @@ npm run db:studio
 
 npm run verify:boot    # proves boot validation rejects a bad tool definition
 npm run verify:seed    # proves the seeded DB supports the demo arc (needs DB)
+npm run verify:evals   # proves an eval run is pinned, totalled, and harmless (needs DB)
 ```
 
 ## Conventions
@@ -191,6 +192,28 @@ Each of these cost real time. Don't rediscover them.
   `amount_cents` — and that now lives in the field's `description`, where the
   model actually reads it, pinned by a test. **Lesson: a follow-up written from
   reasoning is a hypothesis; measure before building the mechanism it asks for.**
+- **A burst of agent runs trips a Bedrock 429, and the SDK's default two
+  retries do not absorb it.** The golden suite is eight runs back to back —
+  roughly 25 model calls in under a minute — and the first calibration run lost
+  its last three cases to `429 Too many requests, please wait before trying
+  again`. covara is shared with Causa's live generation, so that is real
+  capacity in use elsewhere rather than a bug to route around: `createClient`
+  takes an optional `maxRetries` and `/api/evals/run` asks for 8, while the
+  demo's single-ticket path keeps the default because it has no burst. The
+  second half of this cost more time than the first: on the scorecard a
+  throttled case read `expected status "completed", got "failed"`, exactly like
+  a case the agent had botched, with the 429 visible only in
+  `agent_runs.error`. `runEvalSuite` now appends the loop's error to the
+  failure reason, and the scorer stays pure.
+- **An eval expectation written from the SOP is a hypothesis until two runs
+  agree.** `refund-out-of-window` asserted `action: "escalated"`, straight from
+  the SOP's "escalate when policy denies what the customer asked for". Haiku
+  escalated on one run and answered with the denial on the next; both satisfy
+  the document, which also tells it to lead with the outcome. The fix was to
+  drop the assertion, not to pick a winner — `refundCents: 0` and
+  `toolsNever: ["issue_refund"]` are what the case is for and held every time.
+  Assert the constraint the policy guarantees, not the route the model happens
+  to take to it.
 - **The seed's invoice ages are load-bearing.** `INV-2002` is paid 22 days ago
   precisely so it is inside a 30-day window and outside a 14-day one. If that
   stops being true, demo arc step 2 silently demonstrates nothing.
@@ -247,12 +270,26 @@ src/db/client.ts        lazy getDb()
 src/db/ops-data.ts      Drizzle OpsData, scoped to one workspace
 src/db/runs.ts          run + span persistence, today's spend
 src/db/seed.ts          deterministic Beacon Analytics seed
+src/db/evals.ts         eval run/result persistence, and the list + detail reads
+src/evals/case.ts       the eval case schema — closed, so a typo'd key cannot pass
+src/evals/cases.ts      GOLDEN_CASES: the eight, built from the seeded tickets
+src/evals/score.ts      the pure scorer — expectations + observation -> assertions
+src/evals/recorded-data.ts  reads through, writes recorded: the eval write barrier
+src/evals/pin.ts        prompt version and git SHA, so two runs are comparable
+src/evals/runner.ts     one case: loop + barrier + scorer
+src/evals/suite.ts      the whole suite, sequentially, into one pinned eval_runs row
 src/lib/agent-stream.ts   SSE trace reader, shared by both islands that start a run
 src/lib/approval-copy.ts  describeApproval — the sentence a reviewer decides on
+src/lib/eval-labels.ts    sopLabel, shortSha, compactJson — total over every null
 src/components/approval-decision.tsx  approve or deny one paused run, in place
 src/components/approval-queue.tsx     the pending rows, each decided on its own
+src/components/eval-lab.tsx           the streaming scorecard and the run history
 src/app/api/agent/run/  POST a ticket id, stream the trace back as SSE
+src/app/api/evals/run/  POST to run the golden suite, streamed as a scorecard
 src/app/approvals/      the queue page, server-rendered from listPendingApprovals
+src/app/evals/          run the suite, and the history with a diff link per row
+src/app/evals/[id]/     one run: the pin, then every assertion it made
+src/app/evals/diff/     ?base=&head= — regressed, fixed, added, removed, unchanged
 scripts/verify-*.ts     gate evidence that needs a database
 scripts/probe-grammar.ts  which tool set blows the strict grammar cap
 ```
