@@ -106,14 +106,18 @@ const resolveTurn: AssistantTurn = {
 };
 
 /** Counted, so "no model call" is a measurement rather than an inference. */
-function countingCreateMessage(): MessageCreator & { calls: () => number } {
+function countingCreateMessage(): {
+  createMessage: MessageCreator;
+  calls: () => number;
+} {
   let n = 0;
-  const fn = (async () => {
-    n += 1;
-    return structuredClone(resolveTurn);
-  }) as MessageCreator & { calls: () => number };
-  fn.calls = () => n;
-  return fn;
+  return {
+    createMessage: async () => {
+      n += 1;
+      return structuredClone(resolveTurn);
+    },
+    calls: () => n,
+  };
 }
 
 const createMessage: MessageCreator = async () => structuredClone(resolveTurn);
@@ -167,11 +171,6 @@ function harness(broken: Breakage): Harness {
         status: input.status,
       });
     },
-    startRun: async () => {
-      started += 1;
-      calls.push(`startRun:${started}`);
-      return `agent_run_${started}`;
-    },
     reserveRun: async () => {
       const attempt = started + 1;
       if (broken.refuseFrom !== undefined && attempt >= broken.refuseFrom) {
@@ -198,10 +197,6 @@ function harness(broken: Breakage): Harness {
     },
     writeSpan: async () => {
       if (started === broken.writeSpan) throw new Error("span blew up");
-    },
-    spentTodayNanos: async () => {
-      calls.push(`spentTodayNanos:${started}`);
-      return 0;
     },
     createOpsData: () => noopData(),
     getSopVersion: async () => SOP,
@@ -264,7 +259,7 @@ describe("runEvalSuite, when a case throws before its run is finished", () => {
 
     // The whole reason the suite is sequential: case 3 reads its budget
     // baseline only once case 2's row is closed and carries a cost.
-    expect(h.calls.indexOf("spentTodayNanos:3")).toBeGreaterThan(
+    expect(h.calls.indexOf("reserveRun:3")).toBeGreaterThan(
       h.calls.indexOf("finishRun:agent_run_2"),
     );
   });
@@ -333,7 +328,11 @@ describe("runEvalSuite, when the budget refuses a case", () => {
   it("fails the case, refuses the rest, and calls the model for neither", async () => {
     const h = harness({ refuseFrom: 2 });
     const creator = countingCreateMessage();
-    const { events, summary } = await run(h, ["one", "two", "three"], creator);
+    const { events, summary } = await run(
+      h,
+      ["one", "two", "three"],
+      creator.createMessage,
+    );
 
     expect(creator.calls(), "only case one should reach the model").toBe(1);
 
@@ -362,7 +361,12 @@ describe("runEvalSuite, when the budget refuses a case", () => {
     const h = harness({ refuseFrom: 2 });
     await run(h, ["one", "two", "three"]);
 
-    expect(h.calls.filter((c) => c.startsWith("reserveRun:agent"))).toEqual([]);
+    // Case three is never even asked: the cap does not un-reach itself, and
+    // a second refusal is one more round trip at a shared account.
+    expect(h.calls.filter((c) => c.startsWith("reserveRun"))).toEqual([
+      "reserveRun:1",
+      "reserveRun:refused:2",
+    ]);
     expect(h.finishedRuns.map((r) => r.runId)).toEqual(["agent_run_1"]);
   });
 });

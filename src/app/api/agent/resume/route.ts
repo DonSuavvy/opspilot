@@ -10,7 +10,11 @@
  * so the trace viewer shows one continuous waterfall across both invocations
  * rather than two runs that happen to share a ticket.
  */
-import { budgetConfigSchema } from "@/agent/budget";
+import {
+  budgetConfigSchema,
+  ESTIMATED_RUN_NANOS,
+  type BudgetRefusal,
+} from "@/agent/budget";
 import { cachedSystem } from "@/agent/cache";
 import { compileSop } from "@/agent/sop";
 import { createOpsData } from "@/db/ops-data";
@@ -39,14 +43,41 @@ import {
   type LogicalModel,
 } from "@/agent/provider";
 import { encodeSseEvent, spanToRow } from "@/agent/trace";
-import { finishRun, spentTodayNanos, writeSpan } from "@/db/runs";
+import {
+  accrueRunCost,
+  finishRun,
+  releaseReservation,
+  reserveResume,
+  writeSpan,
+} from "@/db/runs";
 import { streamingMessageCreator } from "@/agent/streaming";
 import { TOOLS } from "@/agent/tools";
 
 export const dynamic = "force-dynamic";
 
-const ESTIMATED_CALL_NANOS = 20_000_000; // $0.02, as in /api/agent/run
 const DEMO_MODEL: LogicalModel = "haiku";
+
+/** Same shape as `/api/agent/run`: 429 for a rate limit, 402 for the rest. */
+function refusalResponse(refusal: {
+  reason: BudgetRefusal;
+  retryAfterSeconds?: number;
+}): Response {
+  const headers =
+    refusal.retryAfterSeconds !== undefined
+      ? { "Retry-After": String(refusal.retryAfterSeconds) }
+      : undefined;
+
+  return Response.json(
+    {
+      error: `budget: refused (${refusal.reason})`,
+      reason: refusal.reason,
+      ...(refusal.retryAfterSeconds !== undefined
+        ? { retry_after_seconds: refusal.retryAfterSeconds }
+        : {}),
+    },
+    { status: refusal.reason === "rate_limited" ? 429 : 402, headers },
+  );
+}
 
 interface ResumeRequest {
   run_id?: string;
@@ -164,6 +195,34 @@ export async function POST(request: Request) {
     );
   }
 
+  const now = new Date();
+  const rates = provider.rateCard(DEMO_MODEL);
+
+  /**
+   * Reserved **before** the approval is decided, deliberately.
+   *
+   * A resume is a fresh set of model calls against the same shared account, so
+   * it is charged exactly like a new run. Asking after the decision would burn
+   * the approval on a run that then never starts: the row would read
+   * `approved` with the work undone and no way to ask again. Asking first
+   * leaves the question pending and the whole request retryable in a minute.
+   *
+   * The cost is that a reservation is held across the decision, so a decision
+   * that fails has to give it back.
+   */
+  const reservation = await reserveResume(db, {
+    runId,
+    workspaceId: run.workspaceId,
+    now,
+    config: budgetConfig,
+    estimatedRunNanos: ESTIMATED_RUN_NANOS,
+    rateVerified: rates.verifiedOn !== null,
+  });
+
+  if (!reservation.ok) return refusalResponse(reservation);
+
+  const { baselineNanos, priorNanos } = reservation;
+
   // The decision is taken *before* the stream opens, and it is what rejects a
   // double resume: the UPDATE matches only a `pending` row, so of two racing
   // requests exactly one gets a row back and the other lands here.
@@ -176,6 +235,11 @@ export async function POST(request: Request) {
       now: new Date(),
     });
   } catch (error) {
+    // The run is not going to happen, so the headroom goes back. Left in
+    // place it would consume $0.02 of the day's cap for every losing racer,
+    // and every retry would stack another one on top.
+    await releaseReservation(db, runId, priorNanos).catch(() => {});
+
     if (error instanceof ApprovalNotPendingError) {
       return Response.json({ error: error.message }, { status: 409 });
     }
@@ -187,17 +251,28 @@ export async function POST(request: Request) {
   await markRunning(db, runId);
 
   const registry = buildRegistry(TOOLS);
-  const now = new Date();
-  const baseline = await spentTodayNanos(db, run.workspaceId, now);
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
     async start(controller) {
+      /** What *this invocation* has spent. The first half is `priorNanos`. */
+      let accruedNanos = 0;
+
       const emit = async (span: SpanEvent) => {
         await writeSpan(
           db,
           spanToRow({ workspaceId: run.workspaceId, runId }, span),
         );
+
+        if (span.type === "llm_call") {
+          accruedNanos += span.costNanos;
+          await accrueRunCost(db, runId, {
+            priorNanos,
+            reservationNanos: ESTIMATED_RUN_NANOS,
+            accruedNanos,
+          });
+        }
+
         try {
           controller.enqueue(
             encoder.encode(encodeSseEvent("span", { ...span, runId })),
@@ -240,13 +315,16 @@ export async function POST(request: Request) {
             data: createOpsData(db, { workspaceId: run.workspaceId, runId }),
             policyConfig: sop.policyConfig,
           },
-          budget: { config: budgetConfig, spentTodayNanos: baseline },
-          estimatedCallNanos: ESTIMATED_CALL_NANOS,
+          budget: { config: budgetConfig, spentTodayNanos: baselineNanos },
+          estimatedCallNanos: ESTIMATED_RUN_NANOS,
           clock: () => new Date(),
           emit,
         });
 
-        await finishRun(db, runId, result, new Date());
+        // `priorNanos` is the first invocation's actual. Without it the row
+        // would be overwritten with only this half's cost and the first half
+        // would vanish from the run and from the day's spend.
+        await finishRun(db, runId, result, new Date(), { priorNanos });
 
         // A turn can hold more than one confirm-write. Each pause decides one,
         // so a resumed run may stop again on the next — and that question has
@@ -289,7 +367,11 @@ export async function POST(request: Request) {
 
         // The run stays recoverable: `serialized_messages` is left as it was,
         // so a failed resume can be retried rather than stranding the ticket.
-        await failRun(db, runId, message).catch(() => {
+        // The unused half of the reservation goes back with it — a retryable
+        // run that kept it would consume the day's cap once per attempt.
+        await failRun(db, runId, message, {
+          costNanos: priorNanos + accruedNanos,
+        }).catch(() => {
           // Nothing left to do — the original error is what matters.
         });
 

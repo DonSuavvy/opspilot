@@ -9,7 +9,11 @@
  * Written against the Next 16 route-handler streaming pattern in
  * `node_modules/next/dist/docs/01-app/02-guides/streaming.md`, not from memory.
  */
-import { budgetConfigSchema } from "@/agent/budget";
+import {
+  budgetConfigSchema,
+  ESTIMATED_RUN_NANOS,
+  type BudgetRefusal,
+} from "@/agent/budget";
 import { recordPendingApproval } from "@/db/approvals";
 import { cachedSystem } from "@/agent/cache";
 import { compileSop } from "@/agent/sop";
@@ -25,7 +29,7 @@ import {
   type LogicalModel,
 } from "@/agent/provider";
 import { encodeSseEvent, spanToRow } from "@/agent/trace";
-import { finishRun, spentTodayNanos, startRun, writeSpan } from "@/db/runs";
+import { accrueRunCost, finishRun, reserveRun, writeSpan } from "@/db/runs";
 import { streamingMessageCreator } from "@/agent/streaming";
 import { TOOLS } from "@/agent/tools";
 import { and, eq } from "drizzle-orm";
@@ -34,14 +38,36 @@ import { customers, tickets } from "@/db/schema";
 export const dynamic = "force-dynamic";
 
 /**
- * What one model call is assumed to cost, for the pre-flight only.
+ * How a budget refusal is reported.
  *
- * ~15k input + ~500 output on Haiku's $1/$5 card, rounded up. The guard adds
- * this to the run's accrued spend before *every* call, so an estimate that is
- * too low simply refuses one iteration later than ideal — and on an unverified
- * rate card it is charged at double anyway.
+ * 429 for a rate limit and 402 for the money reasons, because they mean
+ * different things to a caller: one says "come back in a minute" and carries
+ * `Retry-After`, the others say "not today" and retrying makes things worse.
+ * Both are decided *before* the stream opens — once the 200 and the
+ * event-stream headers are out there is no status code left to report with,
+ * and a refusal delivered as an SSE `error` event is one a `curl` pipeline
+ * reads as success.
  */
-const ESTIMATED_CALL_NANOS = 20_000_000; // $0.02
+function refusalResponse(refusal: {
+  reason: BudgetRefusal;
+  retryAfterSeconds?: number;
+}): Response {
+  const headers =
+    refusal.retryAfterSeconds !== undefined
+      ? { "Retry-After": String(refusal.retryAfterSeconds) }
+      : undefined;
+
+  return Response.json(
+    {
+      error: `budget: refused (${refusal.reason})`,
+      reason: refusal.reason,
+      ...(refusal.retryAfterSeconds !== undefined
+        ? { retry_after_seconds: refusal.retryAfterSeconds }
+        : {}),
+    },
+    { status: refusal.reason === "rate_limited" ? 429 : 402, headers },
+  );
+}
 
 /**
  * The public demo runs Haiku 4.5 — rate-capped and ~pennies per run.
@@ -146,21 +172,38 @@ export async function POST(request: Request) {
 
   const registry = buildRegistry(TOOLS);
   const now = new Date();
-  const baseline = await spentTodayNanos(db, ticket.workspaceId, now);
+  const rates = provider.rateCard(DEMO_MODEL);
 
-  // The run row exists before span 0 is emitted: run_spans.run_id is notNull
-  // with an FK to it, and the id below is the one Postgres generated.
-  const runId = await startRun(db, {
+  /**
+   * Ask permission *and* open the row in one locked transaction.
+   *
+   * The run row has to exist before span 0 is emitted — `run_spans.run_id` is
+   * notNull with an FK to it — and it now also carries this run's estimate in
+   * `cost_usd` from the moment it opens, which is what makes a concurrent
+   * `POST` here see it. A refusal writes nothing at all: no row, no Bedrock
+   * call, nothing to clean up.
+   */
+  const reservation = await reserveRun(db, {
     workspaceId: ticket.workspaceId,
     ticketId: ticket.id,
     model: DEMO_MODEL,
     sopVersionId: sop.versionId,
+    now,
+    config: budgetConfig,
+    estimatedRunNanos: ESTIMATED_RUN_NANOS,
+    rateVerified: rates.verifiedOn !== null,
   });
 
+  if (!reservation.ok) return refusalResponse(reservation);
+
+  const { runId, baselineNanos, priorNanos } = reservation;
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
     async start(controller) {
+      /** What this run has actually spent, so far, in nano-dollars. */
+      let accruedNanos = 0;
+
       /**
        * Two consumers per span, with deliberately different failure rules.
        *
@@ -182,6 +225,20 @@ export async function POST(request: Request) {
             span,
           ),
         );
+
+        // The reservation was an estimate; this is the truth, published as
+        // soon as it is known so a run that turns out expensive starts
+        // costing concurrent runs their headroom mid-flight rather than at
+        // the end. Never *below* the reservation — see `accrueRunCost`.
+        if (span.type === "llm_call") {
+          accruedNanos += span.costNanos;
+          await accrueRunCost(db, runId, {
+            priorNanos,
+            reservationNanos: ESTIMATED_RUN_NANOS,
+            accruedNanos,
+          });
+        }
+
         try {
           controller.enqueue(
             encoder.encode(encodeSseEvent("span", { ...span, runId })),
@@ -232,13 +289,13 @@ export async function POST(request: Request) {
             // against what the model was actually briefed on.
             policyConfig: sop.policyConfig,
           },
-          budget: { config: budgetConfig, spentTodayNanos: baseline },
-          estimatedCallNanos: ESTIMATED_CALL_NANOS,
+          budget: { config: budgetConfig, spentTodayNanos: baselineNanos },
+          estimatedCallNanos: ESTIMATED_RUN_NANOS,
           clock: () => new Date(),
           emit,
         });
 
-        await finishRun(db, runId, result, new Date());
+        await finishRun(db, runId, result, new Date(), { priorNanos });
 
         // A pause is only half-recorded until the question a human has to
         // answer is durable. `serialized_messages` alone says *where* the run
@@ -292,7 +349,10 @@ export async function POST(request: Request) {
               cacheCreationInputTokens: 0,
               cacheReadInputTokens: 0,
             },
-            costNanos: 0,
+            // What the run really spent before it broke, not zero: writing
+            // zero here would hand the day's cap back money that is gone.
+            // The tokens stay zeroed — the spans already carry them.
+            costNanos: accruedNanos,
             estimated: false,
             messages: [],
             serializedMessages: null,
@@ -302,6 +362,7 @@ export async function POST(request: Request) {
             error: message,
           },
           new Date(),
+          { priorNanos },
         ).catch(() => {
           // Nothing left to do — the original error is what matters.
         });
