@@ -74,7 +74,12 @@ export const expectationsSchema = z
     toolsCalled: z.array(z.string()).optional(),
     /** No name may appear as *any* `tool_exec` span, error or not. */
     toolsNever: z.array(z.string()).optional(),
-    /** A `guardrail` span exists for this tool — the policy engine refused it. */
+    /**
+     * A `guardrail` span with this name fired. The name is the guardrail's own
+     * — `injection_scan` — not a tool's: what it asserts is that a control ran,
+     * which is not the same claim as `toolsNever` and is not one the model can
+     * satisfy by being agreeable.
+     */
     guardrailOn: z.array(z.string()).optional(),
     /** Case-insensitive substrings of the outcome's `reply`. */
     replyMentions: z.array(z.string()).optional(),

@@ -28,7 +28,7 @@ import {
   type AgentLoopResult,
   type SpanEvent,
 } from "@/agent/loop";
-import { ticketMessage } from "@/agent/prompt";
+import { prepareTicketRun } from "@/agent/guardrails";
 import type { ToolRegistry } from "@/agent/registry";
 import type { PolicyConfig } from "@/policy/refund";
 
@@ -76,25 +76,49 @@ export async function runCase(
   const { data, writes } = withRecordedWrites(deps.data);
   const spans: SpanEvent[] = [];
 
-  const result = await runAgentLoop({
+  /**
+   * Collected first. The scorer needs the whole trace, and a caller's `emit`
+   * that throws — a closed SSE stream, a failed insert — must not be able to
+   * lose a span the score depends on.
+   */
+  const emit = async (span: SpanEvent) => {
+    spans.push(span);
+    await deps.emit?.(span);
+  };
+
+  /**
+   * The same narrowing `/api/agent/run` applies, and applied here rather than
+   * by the suite for the same reason the write barrier is: a control the
+   * caller has to remember is a control that survives until the second call
+   * site. `prepareTicketRun` also builds the opening message, so a case is
+   * still scored against the prompt the demo actually sends.
+   *
+   * The slug stands in for the ticket id, as everywhere else in this file.
+   */
+  const prepared = prepareTicketRun({
     registry: deps.registry,
+    ticket: {
+      id: c.slug,
+      subject: c.ticket.subject,
+      customer: c.ticket.customer,
+      body: c.ticket.body,
+    },
+    now: deps.now,
+  });
+
+  // Through the same closure the loop gets, so the persisted trace and the
+  // scored one are the same list. Pushing straight into `spans` would leave
+  // the database without span 0 and the two disagreeing about what happened.
+  if (prepared.guardrailSpan) await emit(prepared.guardrailSpan);
+
+  const result = await runAgentLoop({
+    registry: prepared.registry,
     createMessage: deps.createMessage,
     model: deps.model,
     rates: deps.rates,
     system: deps.system,
-    messages: [
-      {
-        role: "user",
-        // The same builder `/api/agent/run` uses, so a case is scored against
-        // the prompt the demo actually sends.
-        content: ticketMessage({
-          id: c.slug,
-          subject: c.ticket.subject,
-          customer: c.ticket.customer,
-          body: c.ticket.body,
-        }),
-      },
-    ],
+    messages: prepared.messages,
+    startSeq: prepared.guardrailSpan ? 1 : 0,
     toolContext: {
       workspaceId: deps.workspaceId,
       runId: deps.runId,
@@ -106,13 +130,7 @@ export async function runCase(
     budget: deps.budget,
     estimatedCallNanos: deps.estimatedCallNanos,
     clock: deps.clock,
-    emit: async (span) => {
-      // Collected first. The scorer needs the whole trace, and a caller's
-      // `emit` that throws — a closed SSE stream, a failed insert — must not
-      // be able to lose a span the score depends on.
-      spans.push(span);
-      await deps.emit?.(span);
-    },
+    emit,
   });
 
   return {

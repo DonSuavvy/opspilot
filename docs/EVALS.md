@@ -97,8 +97,9 @@ Expectation keys, all optional — a case names the ones that matter to it:
   this tool.
 - `toolsCalled`: each name must appear as a non-error `tool_exec` span.
 - `toolsNever`: no name may appear as *any* `tool_exec` span, error or not.
-- `guardrailOn`: a `guardrail` span exists for this tool, so the policy engine
-  refused it.
+- `guardrailOn`: a `guardrail` span with this name exists. The name is the
+  guardrail's, not a tool's — `injection_scan` for the pre-scan that narrows a
+  flagged run.
 - `replyMentions`: case-insensitive substrings of the outcome's `reply`.
 - `maxIterations`: loop iterations used, at most.
 

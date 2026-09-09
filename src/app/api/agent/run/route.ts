@@ -20,7 +20,7 @@ import { compileSop } from "@/agent/sop";
 import { createOpsData } from "@/db/ops-data";
 import { getDb } from "@/db/client";
 import { loadActiveSop } from "@/db/sops";
-import { ticketMessage } from "@/agent/prompt";
+import { prepareTicketRun } from "@/agent/guardrails";
 import { runAgentLoop, type SpanEvent } from "@/agent/loop";
 import { buildRegistry } from "@/agent/registry";
 import {
@@ -197,6 +197,29 @@ export async function POST(request: Request) {
   if (!reservation.ok) return refusalResponse(reservation);
 
   const { runId, baselineNanos, priorNanos } = reservation;
+
+  /**
+   * The injection pre-scan, and what it costs the run.
+   *
+   * Run after the reservation so a flagged ticket that cannot be afforded is
+   * refused with a status code rather than a guardrail span nobody reads, and
+   * before the stream opens so span 0 has a run row to hang off.
+   *
+   * When it flags, the loop gets a registry with no confirm-write tool in it.
+   * The SOP already tells the model the body is data; this is the half that
+   * holds when the model is persuaded otherwise.
+   */
+  const prepared = prepareTicketRun({
+    registry,
+    ticket: {
+      id: ticket.id,
+      subject: ticket.subject,
+      customer: customer?.externalId ?? null,
+      body: ticket.body,
+    },
+    now,
+  });
+
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
@@ -253,8 +276,29 @@ export async function POST(request: Request) {
           encoder.encode(encodeSseEvent("run", { runId, ticketId: ticket.id })),
         );
 
+        if (prepared.guardrailSpan) {
+          // Persisted and streamed like any other span, through the same
+          // `emit`. A guardrail the trace does not show is a control nobody
+          // can audit, and demo arc step 4 is precisely the claim that the
+          // trace shows it.
+          await emit(prepared.guardrailSpan);
+
+          // So a ticket that was injected *after* it was seeded carries the
+          // inbox badge too. The predicate is the guard: an already-flagged
+          // ticket updates zero rows rather than churning one.
+          await db
+            .update(tickets)
+            .set({ suspectedInjection: true })
+            .where(
+              and(
+                eq(tickets.id, ticket.id),
+                eq(tickets.suspectedInjection, false),
+              ),
+            );
+        }
+
         const result = await runAgentLoop({
-          registry,
+          registry: prepared.registry,
           createMessage: streamingMessageCreator(client),
           model: provider.modelId(DEMO_MODEL),
           rates: provider.rateCard(DEMO_MODEL),
@@ -268,17 +312,11 @@ export async function POST(request: Request) {
               policyConfig: sop.policyConfig,
             }),
           ),
-          messages: [
-            {
-              role: "user",
-              content: ticketMessage({
-                id: ticket.id,
-                subject: ticket.subject,
-                customer: customer?.externalId ?? null,
-                body: ticket.body,
-              }),
-            },
-          ],
+          messages: prepared.messages,
+          // Span 0 belongs to the guardrail when it fired. `run_spans` is
+          // unique on (run_id, seq), so a loop numbering from zero anyway
+          // would die on its first insert.
+          startSeq: prepared.guardrailSpan ? 1 : 0,
           toolContext: {
             workspaceId: ticket.workspaceId,
             runId,
@@ -310,7 +348,8 @@ export async function POST(request: Request) {
             toolName: pending.toolName,
             toolInput: pending.toolInput,
             safetyClass:
-              registry.get(pending.toolName)?.safetyClass ?? "confirm_write",
+              prepared.registry.get(pending.toolName)?.safetyClass ??
+            "confirm_write",
           });
         }
 
