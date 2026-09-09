@@ -60,14 +60,30 @@ const SPAN_STYLE: Record<Span["type"], string> = {
 };
 
 const STATUS_TONE: Record<string, string> = {
-  completed: "bg-emerald-100 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200",
-  paused_for_approval: "bg-sky-100 text-sky-900 dark:bg-sky-950 dark:text-sky-200",
-  budget_refused: "bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200",
+  completed:
+    "bg-emerald-100 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200",
+  paused_for_approval:
+    "bg-sky-100 text-sky-900 dark:bg-sky-950 dark:text-sky-200",
+  budget_refused:
+    "bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200",
   refused: "bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200",
   failed: "bg-red-100 text-red-900 dark:bg-red-950 dark:text-red-200",
 };
 
-export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
+export function RunConsole({
+  tickets,
+  intakePaused = false,
+}: {
+  tickets: TicketSummary[];
+  /**
+   * The spend guard has closed intake — the daily cap is spent or the kill
+   * switch is on. Decided on the server, where the budget config and today's
+   * spend already are, and passed down rather than fetched: a button that
+   * looks live and returns 402 on click is a worse answer than one that says
+   * why it is disabled before anyone presses it.
+   */
+  intakePaused?: boolean;
+}) {
   const [selected, setSelected] = useState<TicketSummary | null>(
     tickets[0] ?? null,
   );
@@ -157,8 +173,7 @@ export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
   const asking = awaiting
     ? describeApproval({ toolName: awaiting.name, toolInput: awaiting.input })
     : "A confirm-write tool is waiting for a decision.";
-  const pausedRunId =
-    done?.status === "paused_for_approval" ? runId : null;
+  const pausedRunId = done?.status === "paused_for_approval" ? runId : null;
 
   return (
     // Two columns from `md`, not `lg`: the trace is the thing being
@@ -201,10 +216,15 @@ export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
         <div className="flex flex-wrap items-center gap-3">
           <Button
             onClick={() => selected && run(selected)}
-            disabled={!selected || running}
+            disabled={!selected || running || intakePaused}
           >
             {running ? "Running…" : "Run agent"}
           </Button>
+          {intakePaused ? (
+            <span className="text-sm text-amber-700 dark:text-amber-300">
+              Intake is paused — no run can start.
+            </span>
+          ) : null}
           <span className="font-mono text-sm tabular-nums text-zinc-500">
             {usd(liveCost)}
             {done?.estimated ? " (estimated)" : ""}
