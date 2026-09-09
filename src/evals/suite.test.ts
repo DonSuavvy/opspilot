@@ -105,6 +105,17 @@ const resolveTurn: AssistantTurn = {
   },
 };
 
+/** Counted, so "no model call" is a measurement rather than an inference. */
+function countingCreateMessage(): MessageCreator & { calls: () => number } {
+  let n = 0;
+  const fn = (async () => {
+    n += 1;
+    return structuredClone(resolveTurn);
+  }) as MessageCreator & { calls: () => number };
+  fn.calls = () => n;
+  return fn;
+}
+
 const createMessage: MessageCreator = async () => structuredClone(resolveTurn);
 
 interface Harness {
@@ -112,7 +123,11 @@ interface Harness {
   /** Every side effect in order, so ordering is one artifact to read. */
   calls: string[];
   finishedRuns: { runId: string; result: AgentLoopResult }[];
-  finishedSuite: { passedCases: number; failedCases: number }[];
+  finishedSuite: {
+    passedCases: number;
+    failedCases: number;
+    status: string;
+  }[];
 }
 
 interface Breakage {
@@ -122,6 +137,8 @@ interface Breakage {
   insertEvalResult?: number;
   /** Case number whose `finishRun` throws, wherever it is called from. */
   finishRun?: number;
+  /** Case number from which `reserveRun` starts refusing. */
+  refuseFrom?: number;
 }
 
 function harness(broken: Breakage): Harness {
@@ -147,12 +164,32 @@ function harness(broken: Breakage): Harness {
       finishedSuite.push({
         passedCases: input.passedCases,
         failedCases: input.failedCases,
+        status: input.status,
       });
     },
     startRun: async () => {
       started += 1;
       calls.push(`startRun:${started}`);
       return `agent_run_${started}`;
+    },
+    reserveRun: async () => {
+      const attempt = started + 1;
+      if (broken.refuseFrom !== undefined && attempt >= broken.refuseFrom) {
+        calls.push(`reserveRun:refused:${attempt}`);
+        return {
+          ok: false as const,
+          reason: "daily_cap_reached" as const,
+          remainingNanos: 0,
+        };
+      }
+      started += 1;
+      calls.push(`reserveRun:${started}`);
+      return {
+        ok: true as const,
+        runId: `agent_run_${started}`,
+        baselineNanos: 0,
+        priorNanos: 0,
+      };
     },
     finishRun: async (_db, runId, result) => {
       calls.push(`finishRun:${runId}`);
@@ -174,7 +211,11 @@ function harness(broken: Breakage): Harness {
   return { persist, calls, finishedRuns, finishedSuite };
 }
 
-async function run(h: Harness, slugs: string[]) {
+async function run(
+  h: Harness,
+  slugs: string[],
+  creator: MessageCreator = createMessage,
+) {
   const events: EvalSuiteEvent[] = [];
 
   const summary = await runEvalSuite({
@@ -183,7 +224,7 @@ async function run(h: Harness, slugs: string[]) {
     sopVersionId: null,
     model: "haiku",
     cases: slugs.map(caseFor),
-    createMessage,
+    createMessage: creator,
     provider: PROVIDER,
     budgetConfig: {
       dailyCapNanos: 5_000_000_000,
@@ -252,7 +293,9 @@ describe("runEvalSuite, when a case throws after its run is finished", () => {
     expect(summary.failed).toBe(1);
     expect(summary.passed).toBe(2);
     expect(summary.passed + summary.failed).toBe(summary.total);
-    expect(h.finishedSuite).toEqual([{ passedCases: 2, failedCases: 1 }]);
+    expect(h.finishedSuite).toEqual([
+      { passedCases: 2, failedCases: 1, status: "failed" },
+    ]);
   });
 
   it("leaves the completed run alone rather than re-finishing it as failed", async () => {
@@ -264,5 +307,62 @@ describe("runEvalSuite, when a case throws after its run is finished", () => {
     // The agent run genuinely completed. Only the bookkeeping around it broke.
     expect(finishes).toHaveLength(1);
     expect(finishes[0]!.result.status).toBe("completed");
+  });
+});
+
+/**
+ * A budget refusal is a *result*, not a crash.
+ *
+ * The suite used to read its baseline per case and trust that the previous
+ * case's `finishRun` had landed — which is exactly the hole CLAUDE.md logged
+ * as open, because a run in flight contributes nothing to that sum. Reserving
+ * closes it, and reserving means a case can now be told no before a single
+ * token is bought.
+ *
+ * Two things have to hold once that happens. The refused case is recorded and
+ * named, so the scorecard says *why* it is red rather than reporting a
+ * mysterious infrastructure failure. And the cases behind it are not attempted
+ * at all: if the cap is reached on case two, cases three through eight cannot
+ * pass either, and firing six more reservations at a shared Bedrock account to
+ * be told no six more times is the burst the guard exists to prevent.
+ *
+ * The suite still reports `completed`. `failed` is reserved for a suite that
+ * broke; this one worked exactly as designed and has eight results to show.
+ */
+describe("runEvalSuite, when the budget refuses a case", () => {
+  it("fails the case, refuses the rest, and calls the model for neither", async () => {
+    const h = harness({ refuseFrom: 2 });
+    const creator = countingCreateMessage();
+    const { events, summary } = await run(h, ["one", "two", "three"], creator);
+
+    expect(creator.calls(), "only case one should reach the model").toBe(1);
+
+    const results = events.filter((e) => e.type === "case");
+    expect(results).toHaveLength(3);
+    expect(results.map((e) => e.passed)).toEqual([true, false, false]);
+    expect(results[1]!.failureReason).toBe("budget: daily_cap_reached");
+    expect(results[2]!.failureReason).toBe("budget: daily_cap_reached");
+    expect(results[2]!.agentRunId).toBeNull();
+
+    expect(summary.passed).toBe(1);
+    expect(summary.failed).toBe(2);
+    expect(summary.passed + summary.failed).toBe(summary.total);
+  });
+
+  it("leaves the suite `completed` — a refusal is a finding, not a crash", async () => {
+    const h = harness({ refuseFrom: 2 });
+    await run(h, ["one", "two", "three"]);
+
+    expect(h.finishedSuite).toEqual([
+      { passedCases: 1, failedCases: 2, status: "completed" },
+    ]);
+  });
+
+  it("opens no agent_runs row for a case it never ran", async () => {
+    const h = harness({ refuseFrom: 2 });
+    await run(h, ["one", "two", "three"]);
+
+    expect(h.calls.filter((c) => c.startsWith("reserveRun:agent"))).toEqual([]);
+    expect(h.finishedRuns.map((r) => r.runId)).toEqual(["agent_run_1"]);
   });
 });
