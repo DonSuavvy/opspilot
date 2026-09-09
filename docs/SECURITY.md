@@ -32,8 +32,16 @@ action the SOP does not permit, and directs the agent to escalate with reason
 before the model sees the ticket and names what it found
 (`src/agent/injection.ts`): five patterns, no model call, no network, so the
 eval suite can assert on the result. Then the code stops asking nicely. A
-flagged run is given no confirm-write tools.
-<!-- day7: confirm in the run path -->
+flagged run is given no confirm-write tools: `prepareTicketRun`
+(`src/agent/guardrails.ts`) rebuilds the registry without them, so
+`issue_refund` and `update_subscription` are absent from the tool block rather
+than merely discouraged, and the trace opens with an `injection_scan` guardrail
+span naming what was withheld. All three entry points apply it —
+`/api/agent/run`, `/api/agent/resume`, and the eval runner — and the resume
+path re-derives it from the ticket rather than trusting the serialized
+conversation to carry it, since that carries the messages and not the tools.
+The `prompt-injection` eval case asserts the span, which is the one expectation
+a well-behaved model cannot satisfy on its own.
 
 The scan reports a single weak signal without flagging it, because a real
 customer can write "without approval" in passing, and a false positive strips
@@ -61,11 +69,18 @@ second refund.
 
 Anyone who can click the scenario injector can spend the shared account's
 money. Three controls, all in `src/agent/budget.ts` and `src/db/runs.ts`: a
-daily cap read from the environment, with startup refusing to run uncapped; a
-kill switch that stops every run without a deploy; and spend reserved under a
-row lock before a run starts, with a per-workspace rate limit, so concurrent
-runs see each other's spend instead of each reading the same stale baseline.
-<!-- day7: confirm in the run path -->
+daily cap read from the environment, with every route that can open a run
+refusing the request outright when it is unset; a kill switch, checked before
+anything else and before the transaction, that stops every run without a
+deploy; and spend reserved under `select ... for update` on the workspace row
+before a run starts, with a per-workspace rate limit, so concurrent runs see
+each other's spend instead of each reading the same stale baseline.
+
+One correction on the way through: the cap is enforced per request, not at
+startup. `budgetConfigSchema.parse` runs inside each route handler and answers
+a missing cap with a 500, so a deployment with no `OPSPILOT_DAILY_BUDGET_USD`
+boots fine and refuses every run. Uncapped spending is still impossible, which
+is what the control is for, but nothing fails at boot to tell you.
 
 ## Data exfiltration through reply drafts
 
