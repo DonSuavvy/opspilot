@@ -32,29 +32,57 @@ describe("budgetGauge", () => {
    */
   it("warns at exactly 80 percent", () => {
     expect(
-      budgetGauge({ spentNanos: 4 * USD, capNanos: 5 * USD, killSwitch: false }),
+      budgetGauge({
+        spentNanos: 4 * USD,
+        capNanos: 5 * USD,
+        killSwitch: false,
+      }),
     ).toEqual({ state: "warning", percent: 80, remainingNanos: USD });
   });
 
   it("stays ok just under 80 percent", () => {
     expect(
       budgetGauge({
+        spentNanos: 3_970_000_000,
+        capNanos: 5 * USD,
+        killSwitch: false,
+      }),
+    ).toEqual({ state: "ok", percent: 79.4, remainingNanos: 1_030_000_000 });
+  });
+
+  /**
+   * The threshold reads the *rounded* percent, so the badge and the number
+   * beside it always agree. 79.99999998% displays as "80.0%", and a card
+   * reading "80.0% · ok" is a worse bug than warning a hair early — whoever
+   * is looking at it would have to decide which half to believe.
+   */
+  it("warns when a hair under 80 rounds up to it", () => {
+    expect(
+      budgetGauge({
         spentNanos: 3_999_999_999,
         capNanos: 5 * USD,
         killSwitch: false,
-      }).state,
-    ).toBe("ok");
+      }),
+    ).toEqual({ state: "warning", percent: 80, remainingNanos: 1_000_000_001 });
   });
 
   it("is exhausted when spend equals the cap", () => {
     expect(
-      budgetGauge({ spentNanos: 5 * USD, capNanos: 5 * USD, killSwitch: false }),
+      budgetGauge({
+        spentNanos: 5 * USD,
+        capNanos: 5 * USD,
+        killSwitch: false,
+      }),
     ).toEqual({ state: "exhausted", percent: 100, remainingNanos: 0 });
   });
 
   it("clamps percent and remaining when spend overshoots the cap", () => {
     expect(
-      budgetGauge({ spentNanos: 9 * USD, capNanos: 5 * USD, killSwitch: false }),
+      budgetGauge({
+        spentNanos: 9 * USD,
+        capNanos: 5 * USD,
+        killSwitch: false,
+      }),
     ).toEqual({ state: "exhausted", percent: 100, remainingNanos: 0 });
   });
 
