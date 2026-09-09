@@ -122,7 +122,11 @@ function deps(
     runId: "run_1",
     now: NOW,
     budget: {
-      config: { dailyCapNanos: 5_000_000_000, killSwitch: false },
+      config: {
+        dailyCapNanos: 5_000_000_000,
+        killSwitch: false,
+        runsPerMinute: 10,
+      },
       spentTodayNanos: 0,
     },
     estimatedCallNanos: 20_000_000,

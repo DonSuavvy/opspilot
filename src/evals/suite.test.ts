@@ -185,7 +185,11 @@ async function run(h: Harness, slugs: string[]) {
     cases: slugs.map(caseFor),
     createMessage,
     provider: PROVIDER,
-    budgetConfig: { dailyCapNanos: 5_000_000_000, killSwitch: false },
+    budgetConfig: {
+      dailyCapNanos: 5_000_000_000,
+      killSwitch: false,
+      runsPerMinute: 10,
+    },
     gitSha: null,
     now: NOW,
     emit: (event) => {
