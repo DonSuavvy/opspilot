@@ -210,7 +210,12 @@ Each of these cost real time. Don't rediscover them.
   memory to count in — and refused with 429 plus `Retry-After: 60`, against 402
   for the money reasons. `decideReservation` asks the money questions **first**,
   so an exhausted cap is never reported as "come back in a minute", and the
-  kill switch keeps outranking everything without being special-cased.
+  kill switch keeps outranking everything without being special-cased. **Mind
+  the eval suite**: the golden suite is eight sequential runs, so the default
+  of 10 leaves a margin of two. Lower `OPSPILOT_RUNS_PER_MINUTE`, or run the
+  suite twice inside a minute, and the trailing cases come back
+  `budget: rate_limited` — a red scorecard that says nothing about the agent.
+  `verify:evals` runs two cases and cannot see this.
 - **CLOSED, and the original claim was wrong — constraint stripping stays.**
   This was logged as "stripping is now gratuitous once `strict` is off, and the
   model is told `amount_cents` is a bare `number`". Measuring it before acting

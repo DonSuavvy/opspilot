@@ -19,10 +19,10 @@ import { runEvalSuite, type EvalPersistence, type EvalSuiteEvent } from "./suite
  * two bugs live at different points of it, which is why there are two
  * scenarios rather than one.
  *
- * **Before `finishRun`** — a throw from `writeSpan`, `createOpsData` or the
- * baseline read leaves the `agent_runs` row at `running` with a null cost. It
- * then contributes zero to every later case's budget baseline, which is the
- * one thing the suite's sequential ordering exists to guarantee.
+ * **Before `finishRun`** — a throw from `writeSpan` or `createOpsData` leaves
+ * the `agent_runs` row at `running`, still holding the reservation
+ * `reserveRun` charged it. Left there it consumes the day's headroom for a run
+ * that is not running, and it does so for every case behind it.
  *
  * **After `finishRun`** — a throw from `insertEvalResult` or `emit` happens
  * once the counters have already been bumped, so the catch counts the case a
