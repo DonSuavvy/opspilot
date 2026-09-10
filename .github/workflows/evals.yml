@@ -89,6 +89,12 @@ jobs:
       # nothing about the agent. The suite is sequential either way, so the
       # burst protection that matters is the SDK's retry budget, not this.
       OPSPILOT_RUNS_PER_MINUTE: "12"
+      # The same margin, one scope up. Every case runs in the one CI workspace,
+      # so both ceilings count the same eight runs — raising only the first
+      # would leave the suite self-throttling at the second the moment it grows
+      # past the default of 20, and the refusal would look like a regression
+      # rather than like a limit the job set on itself.
+      OPSPILOT_GLOBAL_RUNS_PER_MINUTE: "24"
 
     steps:
       - uses: actions/checkout@v5
