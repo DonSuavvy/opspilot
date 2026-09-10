@@ -387,7 +387,97 @@ async function main() {
 
     /* ------------------------------------------------------------------ */
     console.log(
-      `\n${BOLD}6. The kill switch refuses before the lock is needed${RESET}`,
+      `\n${BOLD}6. A resume across midnight is charged to the day it spends on${RESET}`,
+    );
+    /**
+     * The defect this check exists for.
+     *
+     * `spentTodayNanos` summed on `started_at`, but every writer of `cost_usd`
+     * — `reserveResume`, `accrueRunCost`, `finishRun` — writes back into the
+     * *original* row. So a run paused at 23:50 and resumed at 00:10 charged
+     * its second half to yesterday: money spent today, invisible to today's
+     * sum, and the cap it is meant to enforce quietly raised by however much
+     * the resume cost. The fix is a second timestamp, `charged_at`, moved
+     * every time the cost is.
+     *
+     * One timestamp per row, so the row moves wholesale: yesterday's half
+     * follows the resume onto today rather than being split across two days.
+     * That is the conservative direction — today's sum, the one the guard
+     * reads, is never short.
+     */
+    const dayStart = new Date();
+    dayStart.setUTCHours(0, 0, 0, 0);
+    const lastNight = new Date(dayStart.getTime() - 10 * 60_000);
+    const afterMidnight = new Date(dayStart.getTime() + 10 * 60_000);
+
+    const overnight = await reserveRun(db, {
+      workspaceId,
+      ticketId: null,
+      model: "haiku",
+      now: lastNight,
+      config: budget(),
+      estimatedRunNanos: ESTIMATED_RUN_NANOS,
+      rateVerified: true,
+    });
+    if (!overnight.ok) throw new Error(`reserve refused: ${overnight.reason}`);
+
+    await finishRun(db, overnight.runId, finished(10_000_000), lastNight, {
+      priorNanos: 0,
+    });
+
+    check(
+      "yesterday's half is yesterday's spend",
+      await spentTodayNanos(db, workspaceId, lastNight),
+      10_000_000,
+    );
+    check(
+      "and today's sum, before the resume, does not see it",
+      await spentTodayNanos(db, workspaceId, afterMidnight),
+      0,
+    );
+
+    const overnightResume = await reserveResume(db, {
+      runId: overnight.runId,
+      workspaceId,
+      now: afterMidnight,
+      config: budget(),
+      estimatedRunNanos: ESTIMATED_RUN_NANOS,
+      rateVerified: true,
+    });
+    if (!overnightResume.ok) {
+      throw new Error(`resume refused: ${overnightResume.reason}`);
+    }
+
+    check(
+      "the reservation the resume takes is today's money",
+      await spentTodayNanos(db, workspaceId, afterMidnight),
+      10_000_000 + ESTIMATED_RUN_NANOS,
+    );
+
+    await finishRun(
+      db,
+      overnight.runId,
+      finished(5_000_000),
+      afterMidnight,
+      { priorNanos: overnightResume.priorNanos },
+    );
+
+    check(
+      "and today's sum carries the whole row once it finishes",
+      await spentTodayNanos(db, workspaceId, afterMidnight),
+      15_000_000,
+    );
+    check(
+      "with yesterday no longer counting what today already has",
+      await spentTodayNanos(db, workspaceId, lastNight),
+      0,
+    );
+
+    await clear();
+
+    /* ------------------------------------------------------------------ */
+    console.log(
+      `\n${BOLD}7. The kill switch refuses before the lock is needed${RESET}`,
     );
     const stopped = await reserveRun(db, {
       workspaceId,
