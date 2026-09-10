@@ -98,6 +98,13 @@ export function budgetGauge(input: BudgetGaugeInput): BudgetGauge {
 export interface GuardrailSpanLike {
   name: string;
   isError: boolean;
+  /**
+   * Optional because only the injection scan reads it — the other four
+   * writers of a guardrail span put everything the summary needs in `output`,
+   * and requiring a `null` from each of them would be noise standing in for a
+   * contract. `loadRecentGuardrails` passes the column either way.
+   */
+  input?: unknown;
   output: unknown;
 }
 
@@ -108,6 +115,48 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** `outside_refund_window` reads as prose in a table; the code does not. */
 function humanize(code: string): string {
   return code.replaceAll("_", " ");
+}
+
+/** `["a"]` -> `a`, `["a","b"]` -> `a and b`, `["a","b","c"]` -> `a, b and c`. */
+function andList(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? "";
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+function stringsIn(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((v): v is string => typeof v === "string" && v.length > 0)
+    : [];
+}
+
+/**
+ * The one summary written against a known shape rather than sniffed for.
+ *
+ * `prepareTicketRun` is the only writer of this span and it splits the payload
+ * across both columns: the signals in `input`, `flagged` and the withheld
+ * tools in `output`. Reading only `output.signals` — which nothing writes —
+ * left the demo's fourth beat rendering as a bare `injection_scan`, the one
+ * row on this page where naming what the control did is the entire point.
+ */
+function summarizeInjectionScan(span: GuardrailSpanLike): string {
+  const signals = stringsIn(isRecord(span.input) ? span.input.signals : null);
+  const withheld = stringsIn(
+    isRecord(span.output) ? span.output.restrictedTools : null,
+  );
+
+  const counted =
+    signals.length > 0
+      ? `${signals.length} signal${signals.length === 1 ? "" : "s"}`
+      : null;
+
+  const parts = [
+    counted,
+    withheld.length > 0 ? `withheld ${andList(withheld)}` : null,
+  ].filter((part): part is string => part !== null);
+
+  return parts.length > 0
+    ? `Injection flagged: ${parts.join(", ")}`
+    : "Injection flagged";
 }
 
 function firstLine(text: string): string {
@@ -135,6 +184,10 @@ export function summarizeGuardrail(span: GuardrailSpanLike): string {
   const output = span.output;
   if (!isRecord(output)) return span.name;
 
+  // Read first, because it is the one shape here that is *known* rather than
+  // inferred, and `flagged` identifies it exactly.
+  if (output.flagged === true) return summarizeInjectionScan(span);
+
   const violations = output.violations;
   if (Array.isArray(violations) && violations.length > 0) {
     const first = violations[0];
@@ -147,12 +200,6 @@ export function summarizeGuardrail(span: GuardrailSpanLike): string {
   const error = output.error;
   if (typeof error === "string" && error.trim().length > 0) {
     return firstLine(error);
-  }
-
-  const signals = output.signals;
-  if (Array.isArray(signals) && signals.length > 0) {
-    const noun = signals.length === 1 ? "signal" : "signals";
-    return `${signals.length} injection ${noun}`;
   }
 
   return span.name;
@@ -238,6 +285,8 @@ async function loadRecentGuardrails(
       name: runSpans.name,
       isError: runSpans.isError,
       startedAt: runSpans.startedAt,
+      // Both columns: the injection scan's signals live in `input`.
+      input: runSpans.input,
       output: runSpans.output,
     })
     .from(runSpans)
@@ -258,6 +307,7 @@ async function loadRecentGuardrails(
     summary: summarizeGuardrail({
       name: row.name,
       isError: row.isError,
+      input: row.input,
       output: row.output,
     }),
   }));
