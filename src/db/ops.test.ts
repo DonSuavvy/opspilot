@@ -182,24 +182,60 @@ describe("summarizeGuardrail", () => {
     expect(summary.endsWith("…")).toBe(true);
   });
 
-  it("counts the signals an injection scan raised", () => {
+  /**
+   * The shape these three assert is `prepareTicketRun`'s, read from
+   * `src/agent/guardrails.ts` rather than guessed.
+   *
+   * The signals go in the span's **input** and the withheld tools in its
+   * output; the previous version of these tests put the signals in `output`,
+   * a shape nothing writes, so they passed while Mission Control rendered the
+   * real span as a bare `injection_scan`. A fake that agrees with the code
+   * under test and with nothing else is worse than no test at all.
+   */
+  it("names the signals and the tools an injection scan withheld", () => {
     expect(
       summarizeGuardrail({
         name: "injection_scan",
-        isError: true,
-        output: { flagged: true, signals: ["ignore_instructions", "urgency"] },
+        isError: false,
+        input: {
+          signals: [
+            "ignore_instructions",
+            "authority_claim",
+            "prior_approval",
+            "policy_override",
+            "urgency",
+          ],
+        },
+        output: {
+          flagged: true,
+          restrictedTools: ["issue_refund", "update_subscription"],
+        },
       }),
-    ).toBe("2 injection signals");
+    ).toBe(
+      "Injection flagged: 5 signals, withheld issue_refund and update_subscription",
+    );
   });
 
-  it("says one signal in the singular", () => {
+  it("says one signal in the singular, and names a lone tool alone", () => {
     expect(
       summarizeGuardrail({
         name: "injection_scan",
-        isError: true,
-        output: { flagged: true, signals: ["ignore_instructions"] },
+        isError: false,
+        input: { signals: ["ignore_instructions"] },
+        output: { flagged: true, restrictedTools: ["issue_refund"] },
       }),
-    ).toBe("1 injection signal");
+    ).toBe("Injection flagged: 1 signal, withheld issue_refund");
+  });
+
+  it("still says a scan flagged when it withheld nothing", () => {
+    expect(
+      summarizeGuardrail({
+        name: "injection_scan",
+        isError: false,
+        input: { signals: ["urgency"] },
+        output: { flagged: true, restrictedTools: [] },
+      }),
+    ).toBe("Injection flagged: 1 signal");
   });
 
   it("falls back to the span name when the output says nothing", () => {
