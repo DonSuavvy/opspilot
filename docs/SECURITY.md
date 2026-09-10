@@ -131,8 +131,11 @@ which is whether a burst is one visitor or twenty.
 `POST /api/sandbox/reset` deletes and re-seeds a tenant, and it is the one
 public route the spend guard cannot see, because it costs database work rather
 than model calls. `resetAllowed` refuses a second reset inside thirty seconds,
-checked inside the same advisory lock the reset itself takes so two clicks
-arriving together cannot both re-seed (`src/db/sandbox.ts`).
+checked inside the same advisory lock the reset itself takes: the second of
+two clicks arriving together reads the row the first just planted and is
+refused by its own rule (`src/db/sandbox.ts`). That ordering is by
+construction, from the lock. `npm run verify:sandbox` exercises the rule
+sequentially.
 
 **The sweep removes data, not just a flag marking it expired.**
 `GET /api/cron/cleanup`, bearer-gated on `CRON_SECRET`, deletes every sandbox
