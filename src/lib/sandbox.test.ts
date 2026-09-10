@@ -4,6 +4,7 @@ import {
   displaySlug,
   isSandboxSlug,
   newSandboxSlug,
+  resetAllowed,
   resolveSandbox,
   sandboxExpiry,
   SANDBOX_COOKIE,
@@ -160,5 +161,58 @@ describe("displaySlug", () => {
     // a response body and a throw there would be a 500 on an operator page.
     expect(displaySlug("")).toBe("");
     expect(displaySlug("beacon-analytics")).toBe("beacon-analytics");
+  });
+});
+
+describe("resetAllowed", () => {
+  const seededAt = new Date("2026-09-10T03:00:00.000Z");
+  const at = (ms: number) => new Date(seededAt.getTime() + ms);
+
+  it("refuses a second reset in the same breath", () => {
+    // `/api/sandbox/reset` is unauthenticated and each call deletes and
+    // re-seeds a whole fixture set under an advisory lock. Nothing else about
+    // it costs the account money, but a loop against it is a database the
+    // demo cannot serve pages from.
+    expect(resetAllowed(seededAt, at(0))).toEqual({
+      allowed: false,
+      retryAfterSeconds: 30,
+    });
+  });
+
+  it("counts down rather than repeating the full wait", () => {
+    expect(resetAllowed(seededAt, at(20_000)).retryAfterSeconds).toBe(10);
+  });
+
+  it("never answers zero seconds while refusing", () => {
+    // A `Retry-After: 0` on a 429 invites the retry it just refused.
+    expect(resetAllowed(seededAt, at(29_999))).toEqual({
+      allowed: false,
+      retryAfterSeconds: 1,
+    });
+  });
+
+  it("allows the reset the instant the cooldown is up", () => {
+    expect(resetAllowed(seededAt, at(30_000))).toEqual({
+      allowed: true,
+      retryAfterSeconds: 0,
+    });
+  });
+
+  it("allows a reset of a sandbox that was never planted", () => {
+    // No row means nothing to throttle: the visitor is about to get their
+    // first seed, which is the same work a first page load would have done.
+    expect(resetAllowed(null, at(0))).toEqual({
+      allowed: true,
+      retryAfterSeconds: 0,
+    });
+  });
+
+  it("treats a seed instant in the future as a full cooldown", () => {
+    // Clock skew between the database and the server, not an attack. The
+    // conservative reading is the safe one, and it is bounded at 30.
+    expect(resetAllowed(at(60_000), seededAt)).toEqual({
+      allowed: false,
+      retryAfterSeconds: 30,
+    });
   });
 });
