@@ -124,6 +124,9 @@ const createMessage: MessageCreator = async () => structuredClone(resolveTurn);
 
 interface Harness {
   persist: EvalPersistence;
+  /** Every `reserveRun` input, in order. `unknown` so a field this file is
+   * about to require does not have to exist yet for the file to compile. */
+  reserveRunInputs: unknown[];
   /** Every side effect in order, so ordering is one artifact to read. */
   calls: string[];
   finishedRuns: { runId: string; result: AgentLoopResult }[];
@@ -152,6 +155,7 @@ interface Breakage {
 
 function harness(broken: Breakage): Harness {
   const calls: string[] = [];
+  const reserveRunInputs: unknown[] = [];
   const finishedRuns: Harness["finishedRuns"] = [];
   const finishedSuite: Harness["finishedSuite"] = [];
   let started = 0;
@@ -177,7 +181,8 @@ function harness(broken: Breakage): Harness {
         status: input.status,
       });
     },
-    reserveRun: async () => {
+    reserveRun: async (_db, input) => {
+      reserveRunInputs.push(input);
       // Counted per *call*, not per successful start, so a refusal that is
       // not sticky does not leave the next case answering to the same number.
       attempts += 1;
@@ -221,7 +226,7 @@ function harness(broken: Breakage): Harness {
     loadActiveSop: async () => SOP,
   };
 
-  return { persist, calls, finishedRuns, finishedSuite };
+  return { persist, calls, finishedRuns, finishedSuite, reserveRunInputs };
 }
 
 async function run(
@@ -428,5 +433,52 @@ describe("runEvalSuite, when a case is rate limited", () => {
 
     expect(summary.passed).toBe(2);
     expect(summary.failed).toBe(1);
+  });
+});
+
+/**
+ * One instant for the policy, one instant per row.
+ *
+ * `now` is frozen for the whole suite on purpose — a refund window that moved
+ * between case two and case seven would make the golden set drift, which is
+ * the reason `now` is injected anywhere in this codebase. But the same frozen
+ * instant was also being written to `agent_runs.started_at`, so eight rows all
+ * claimed to have started at once: the per-minute count saw a burst that never
+ * happened, and Mission Control's timeline collapsed to a point.
+ *
+ * The clock is stepped a minute per case here rather than trusted to advance
+ * on its own. Three cases against a fake persistence layer finish inside a
+ * millisecond, so real timestamps would be equal about as often as not and the
+ * distinctness this asserts would be a coin flip.
+ */
+describe("runEvalSuite, and the instants it stamps its rows with", () => {
+  it("gives every case its own started_at while the policy keeps one now", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW.getTime() + 5 * 60_000));
+
+    try {
+      const h = harness({});
+      await run(h, ["one", "two", "three"], async () => {
+        vi.setSystemTime(new Date(Date.now() + 60_000));
+        return structuredClone(resolveTurn);
+      });
+
+      const inputs = h.reserveRunInputs as { now: Date; startedAt?: Date }[];
+      expect(inputs).toHaveLength(3);
+
+      expect(
+        inputs.map((i) => i.now.getTime()),
+        "the policy instant stays frozen",
+      ).toEqual([NOW.getTime(), NOW.getTime(), NOW.getTime()]);
+
+      const startedAts = inputs.map((i) => i.startedAt?.getTime());
+      expect(new Set(startedAts).size, "three rows, three instants").toBe(3);
+      expect(
+        startedAts.every((t) => t !== undefined && t !== NOW.getTime()),
+        "and none of them is the frozen now",
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
