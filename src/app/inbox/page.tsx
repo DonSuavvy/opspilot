@@ -7,7 +7,7 @@
  * part — running a ticket and watching the trace build — is the one client
  * island below.
  */
-import { count, desc, eq } from "drizzle-orm";
+import { and, count, desc, eq } from "drizzle-orm";
 
 import Link from "next/link";
 
@@ -16,12 +16,17 @@ import { RunConsole, type TicketSummary } from "@/components/run-console";
 import { getDb } from "@/db/client";
 import { budgetGauge, type BudgetGauge } from "@/db/ops";
 import { spentTodayNanos } from "@/db/runs";
-import { approvals, customers, tickets, workspaces } from "@/db/schema";
+import { approvals, customers, tickets } from "@/db/schema";
+import { SandboxReset } from "@/components/sandbox-reset";
+import {
+  currentSandbox,
+  SandboxHeaderMissingError,
+} from "@/lib/workspace";
 
 // The inbox reflects run state, which changes underneath any cache.
 export const dynamic = "force-dynamic";
 
-async function loadTickets(): Promise<TicketSummary[]> {
+async function loadTickets(workspaceId: string): Promise<TicketSummary[]> {
   const db = getDb();
 
   const rows = await db
@@ -33,6 +38,7 @@ async function loadTickets(): Promise<TicketSummary[]> {
     })
     .from(tickets)
     .leftJoin(customers, eq(customers.id, tickets.customerId))
+    .where(eq(tickets.workspaceId, workspaceId))
     .orderBy(desc(tickets.createdAt))
     .limit(20);
 
@@ -47,18 +53,39 @@ async function loadTickets(): Promise<TicketSummary[]> {
 /**
  * How many calls are waiting on a person, for the header link.
  *
- * Unfiltered by workspace, exactly as `loadTickets` above is: this page shows
- * one demo tenant, and a count scoped differently from the list beside it
- * would be the more confusing of the two answers.
+ * Scoped to the visitor's sandbox, exactly as `loadTickets` above is. These
+ * two used to be unfiltered together, which was consistent while there was one
+ * tenant and would now count a stranger's paused refund into this reader's
+ * badge.
  */
-async function countPendingApprovals(): Promise<number> {
+async function countPendingApprovals(workspaceId: string): Promise<number> {
   const db = getDb();
   const [row] = await db
     .select({ pending: count() })
     .from(approvals)
-    .where(eq(approvals.status, "pending"));
+    .where(
+      and(
+        eq(approvals.workspaceId, workspaceId),
+        eq(approvals.status, "pending"),
+      ),
+    );
 
   return row?.pending ?? 0;
+}
+
+/**
+ * How long this sandbox has left, in the coarsest unit that is still true.
+ *
+ * Formatted on the server for the same reason `formatAge` is on the approvals
+ * page: a client island reading its own clock during render disagrees with the
+ * server's render of the same number, and React reports that as a hydration
+ * error.
+ */
+function formatRemaining(expiresAt: Date, now: Date): string {
+  const minutes = Math.round((expiresAt.getTime() - now.getTime()) / 60_000);
+  if (minutes <= 0) return "any moment now";
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.round(minutes / 60)}h`;
 }
 
 const NANOS_PER_USD = 1_000_000_000;
@@ -83,19 +110,13 @@ interface BudgetView {
   capNanos: number;
 }
 
-async function loadBudgetView(): Promise<BudgetView | null> {
+async function loadBudgetView(workspaceId: string): Promise<BudgetView | null> {
   try {
     const parsed = budgetConfigSchema.safeParse(process.env);
     if (!parsed.success) return null;
 
     const db = getDb();
-    const [ws] = await db
-      .select({ id: workspaces.id })
-      .from(workspaces)
-      .limit(1);
-    if (!ws) return null;
-
-    const spentNanos = await spentTodayNanos(db, ws.id, new Date());
+    const spentNanos = await spentTodayNanos(db, workspaceId, new Date());
     const capNanos = parsed.data.dailyCapNanos;
 
     return {
@@ -117,14 +138,24 @@ export default async function Home() {
   let pendingApprovals = 0;
   let budget: BudgetView | null = null;
   let loadError: string | null = null;
+  let resetsIn: string | null = null;
 
   try {
+    // Seeds on the spot for a first-time visitor, so the list below is never
+    // empty for want of a workspace nobody planted.
+    const sandbox = await currentSandbox();
+    resetsIn = formatRemaining(sandbox.expiresAt, new Date());
+
     [ticketList, pendingApprovals, budget] = await Promise.all([
-      loadTickets(),
-      countPendingApprovals(),
-      loadBudgetView(),
+      loadTickets(sandbox.workspaceId),
+      countPendingApprovals(sandbox.workspaceId),
+      loadBudgetView(sandbox.workspaceId),
     ]);
   } catch (error) {
+    // A missing sandbox header means the proxy did not run for this route.
+    // The message below tells the reader to rebuild Postgres, which would be
+    // a long way to go for a matcher typo.
+    if (error instanceof SandboxHeaderMissingError) throw error;
     // The most likely cause by far is an unseeded or unreachable database, and
     // a stack trace in the browser is a worse answer than the command to fix it.
     loadError = error instanceof Error ? error.message : String(error);
@@ -160,6 +191,21 @@ export default async function Home() {
           it — the trace below streams in as the agent works, span by span, with
           cost accruing live.
         </p>
+
+        {/*
+          Two facts a visitor needs before they start clicking: this copy is
+          theirs alone, and it does not last. The Reset button is next to the
+          sentence rather than in a menu because the moment someone wants it is
+          the moment they have made a mess.
+        */}
+        {resetsIn ? (
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <p className="text-sm text-zinc-500">
+              This sandbox is yours alone. It resets in {resetsIn}.
+            </p>
+            <SandboxReset />
+          </div>
+        ) : null}
 
         {/*
           Quieter than the banner and deliberately so: approaching a cap is a
