@@ -9,11 +9,8 @@
  * Written against the Next 16 route-handler streaming pattern in
  * `node_modules/next/dist/docs/01-app/02-guides/streaming.md`, not from memory.
  */
-import {
-  budgetConfigSchema,
-  ESTIMATED_RUN_NANOS,
-  type BudgetRefusal,
-} from "@/agent/budget";
+import { budgetConfigSchema, ESTIMATED_RUN_NANOS } from "@/agent/budget";
+import { budgetRefusalResponse } from "@/lib/budget-response";
 import { recordPendingApproval } from "@/db/approvals";
 import { cachedSystem } from "@/agent/cache";
 import { compileSop } from "@/agent/sop";
@@ -47,38 +44,6 @@ export const dynamic = "force-dynamic";
  * same number for the same reason.
  */
 export const maxDuration = 300;
-
-/**
- * How a budget refusal is reported.
- *
- * 429 for a rate limit and 402 for the money reasons, because they mean
- * different things to a caller: one says "come back in a minute" and carries
- * `Retry-After`, the others say "not today" and retrying makes things worse.
- * Both are decided *before* the stream opens — once the 200 and the
- * event-stream headers are out there is no status code left to report with,
- * and a refusal delivered as an SSE `error` event is one a `curl` pipeline
- * reads as success.
- */
-function refusalResponse(refusal: {
-  reason: BudgetRefusal;
-  retryAfterSeconds?: number;
-}): Response {
-  const headers =
-    refusal.retryAfterSeconds !== undefined
-      ? { "Retry-After": String(refusal.retryAfterSeconds) }
-      : undefined;
-
-  return Response.json(
-    {
-      error: `budget: refused (${refusal.reason})`,
-      reason: refusal.reason,
-      ...(refusal.retryAfterSeconds !== undefined
-        ? { retry_after_seconds: refusal.retryAfterSeconds }
-        : {}),
-    },
-    { status: refusal.reason === "rate_limited" ? 429 : 402, headers },
-  );
-}
 
 /**
  * The public demo runs Haiku 4.5 — rate-capped and ~pennies per run.
@@ -222,7 +187,7 @@ export async function POST(request: Request) {
     rateVerified: rates.verifiedOn !== null,
   });
 
-  if (!reservation.ok) return refusalResponse(reservation);
+  if (!reservation.ok) return budgetRefusalResponse(reservation);
 
   const { runId, baselineNanos, priorNanos } = reservation;
 

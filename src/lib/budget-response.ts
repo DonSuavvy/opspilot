@@ -38,6 +38,13 @@ export function budgetRefusalResponse(refusal: BudgetRefusalLike): Response {
       ...(refusal.retryAfterSeconds !== undefined
         ? { retry_after_seconds: refusal.retryAfterSeconds }
         : {}),
+      // `scope`, not `rateLimitScope`: this is the wire, and `budget-copy.ts`
+      // is what reads it back. Omitted rather than nulled when the
+      // reservation named none, so a caller can tell "no ceiling said" from
+      // "a ceiling said nothing".
+      ...(refusal.rateLimitScope !== undefined
+        ? { scope: refusal.rateLimitScope }
+        : {}),
     },
     { status: refusal.reason === "rate_limited" ? 429 : 402, headers },
   );

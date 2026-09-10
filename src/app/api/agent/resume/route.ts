@@ -10,11 +10,8 @@
  * so the trace viewer shows one continuous waterfall across both invocations
  * rather than two runs that happen to share a ticket.
  */
-import {
-  budgetConfigSchema,
-  ESTIMATED_RUN_NANOS,
-  type BudgetRefusal,
-} from "@/agent/budget";
+import { budgetConfigSchema, ESTIMATED_RUN_NANOS } from "@/agent/budget";
+import { budgetRefusalResponse } from "@/lib/budget-response";
 import { cachedSystem } from "@/agent/cache";
 import { compileSop } from "@/agent/sop";
 import { createOpsData } from "@/db/ops-data";
@@ -70,28 +67,6 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 const DEMO_MODEL: LogicalModel = "haiku";
-
-/** Same shape as `/api/agent/run`: 429 for a rate limit, 402 for the rest. */
-function refusalResponse(refusal: {
-  reason: BudgetRefusal;
-  retryAfterSeconds?: number;
-}): Response {
-  const headers =
-    refusal.retryAfterSeconds !== undefined
-      ? { "Retry-After": String(refusal.retryAfterSeconds) }
-      : undefined;
-
-  return Response.json(
-    {
-      error: `budget: refused (${refusal.reason})`,
-      reason: refusal.reason,
-      ...(refusal.retryAfterSeconds !== undefined
-        ? { retry_after_seconds: refusal.retryAfterSeconds }
-        : {}),
-    },
-    { status: refusal.reason === "rate_limited" ? 429 : 402, headers },
-  );
-}
 
 interface ResumeRequest {
   run_id?: string;
@@ -275,7 +250,7 @@ export async function POST(request: Request) {
     rateVerified: rates.verifiedOn !== null,
   });
 
-  if (!reservation.ok) return refusalResponse(reservation);
+  if (!reservation.ok) return budgetRefusalResponse(reservation);
 
   const { baselineNanos, priorNanos } = reservation;
 

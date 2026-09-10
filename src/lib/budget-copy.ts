@@ -10,7 +10,8 @@
  * Before them every `rate_limited` meant the same thing. Now two people can
  * be refused in the same second for opposite reasons, one clicking faster
  * than their own sandbox allows and one queued behind everybody else, and the
- * sentence has to tell them apart. Telling the second to slow down is a lie;
+ * sentence has to tell them apart. `budget-response.ts` is what puts `scope`
+ * on the wire; the two field names have to agree and once did not. Telling the second to slow down is a lie;
  * telling the first that the demo is busy hands them an excuse.
  *
  * Pure, and separate from the component that renders it, for the same reason
@@ -33,7 +34,10 @@ const SCOPES: ReadonlySet<string> = new Set<RateLimitScope>([
 
 export interface BudgetRefusalView {
   reason: BudgetRefusal;
-  /** Null when the body did not say, which is every body today. */
+  /**
+   * Null when the body did not say, which is every refusal that is not a rate
+   * limit and every response from a deploy older than this field.
+   */
   scope: RateLimitScope | null;
   retryAfterSeconds: number | null;
 }
@@ -76,9 +80,10 @@ export function readBudgetRefusal(body: unknown): BudgetRefusalView | null {
 /**
  * The rate-limit sentence, by whose ceiling answered.
  *
- * An absent scope names neither. The refusal body does not carry one yet, and
- * guessing between two opposite explanations to make the sentence feel
- * complete is how a demo tells a stranger something false.
+ * An absent scope names neither. The money refusals carry none, and an older
+ * deploy answers without one — guessing between two opposite explanations to
+ * make the sentence feel complete is how a demo tells a stranger something
+ * false.
  */
 function describeRateLimit(scope: RateLimitScope | null | undefined): string {
   if (scope === "workspace") {
