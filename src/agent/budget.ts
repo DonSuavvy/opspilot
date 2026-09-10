@@ -89,7 +89,11 @@ export const budgetConfigSchema = z
         if (!Number.isFinite(usd) || usd <= 0) {
           ctx.addIssue({
             code: "custom",
-            message: `OPSPILOT_DAILY_BUDGET_USD must be a positive number, got "${s}"`,
+            // The offending value is deliberately not echoed. `/api/agent/run`
+            // returns `error.message` in a 500 body, so anything quoted here
+            // is quoted to the internet — and the operator reading the log
+            // can see their own `.env` without being told what is in it.
+            message: "OPSPILOT_DAILY_BUDGET_USD must be a positive number",
           });
           return z.NEVER;
         }
