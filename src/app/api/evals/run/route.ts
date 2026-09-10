@@ -18,16 +18,16 @@ import { createClient, providerFromEnv, type LogicalModel } from "@/agent/provid
 import { streamingMessageCreator } from "@/agent/streaming";
 import { encodeSseEvent } from "@/agent/trace";
 import { getDb } from "@/db/client";
-import { workspaces } from "@/db/schema";
 import { GOLDEN_CASES } from "@/evals/cases";
 import { resolveGitSha } from "@/evals/pin";
 import { runEvalSuite, type EvalSuiteEvent } from "@/evals/suite";
+import { sandboxFromRequest } from "@/lib/workspace";
 
 export const dynamic = "force-dynamic";
 
 /**
- * A suite is eight sequential agent runs. Vercel's cap will need addressing
- * before Day 8; locally this is the honest number.
+ * A suite is eight sequential agent runs, so the platform default is nowhere
+ * near enough. 300 is the Pro ceiling; Hobby clamps it rather than failing.
  */
 export const maxDuration = 300;
 
@@ -36,16 +36,6 @@ const MODELS: readonly LogicalModel[] = ["haiku", "sonnet", "opus"];
 interface RunEvalsRequest {
   sop_version_id?: string;
   model?: string;
-}
-
-/**
- * The demo has exactly one workspace, as `/api/sop` also assumes. Day 8
- * replaces this with the visitor's cookie-scoped sandbox.
- */
-async function demoWorkspaceId(db: ReturnType<typeof getDb>) {
-  const [ws] = await db.select({ id: workspaces.id }).from(workspaces).limit(1);
-  if (!ws) throw new Error("no workspace — run `npm run db:seed`");
-  return ws.id;
 }
 
 /**
@@ -91,7 +81,9 @@ export async function POST(request: Request) {
   let client;
   try {
     db = getDb();
-    workspaceId = await demoWorkspaceId(db);
+    // Scoped to the visitor, so a suite run scores their SOP against their
+    // tickets and lands in their eval history.
+    ({ workspaceId } = await sandboxFromRequest(request));
     budgetConfig = budgetConfigSchema.parse(process.env);
     provider = providerFromEnv(process.env);
     // A burst, unlike the demo's single-ticket path: eight runs back to back

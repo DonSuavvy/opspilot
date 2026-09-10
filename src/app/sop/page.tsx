@@ -2,8 +2,8 @@ import Link from "next/link";
 
 import { SopEditor } from "@/components/sop-editor";
 import { getDb } from "@/db/client";
-import { workspaces } from "@/db/schema";
 import { listSopVersions, loadActiveSop } from "@/db/sops";
+import { currentSandbox } from "@/lib/workspace";
 
 export const dynamic = "force-dynamic";
 
@@ -13,21 +13,13 @@ export const dynamic = "force-dynamic";
  */
 export default async function SopPage() {
   const db = getDb();
-  const [ws] = await db.select({ id: workspaces.id }).from(workspaces).limit(1);
-
-  if (!ws) {
-    return (
-      <main className="mx-auto max-w-6xl p-8">
-        <p className="text-sm text-zinc-500">
-          No workspace found — run <code>npm run db:seed</code>.
-        </p>
-      </main>
-    );
-  }
+  // The empty-workspace branch that used to live here is gone: `currentSandbox`
+  // seeds on demand, so by the time this returns there is a SOP to edit.
+  const { workspaceId } = await currentSandbox();
 
   const [active, versions] = await Promise.all([
-    loadActiveSop(db, ws.id),
-    listSopVersions(db, ws.id),
+    loadActiveSop(db, workspaceId),
+    listSopVersions(db, workspaceId),
   ]);
 
   return (

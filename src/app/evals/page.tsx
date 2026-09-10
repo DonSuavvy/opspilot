@@ -12,8 +12,11 @@ import Link from "next/link";
 import { EvalLab, type EvalRunRow } from "@/components/eval-lab";
 import { getDb } from "@/db/client";
 import { listEvalRuns } from "@/db/evals";
-import { workspaces } from "@/db/schema";
 import { shortSha, sopLabel } from "@/lib/eval-labels";
+import {
+  currentSandbox,
+  SandboxHeaderMissingError,
+} from "@/lib/workspace";
 
 // The history gains a row every time the button below is pressed.
 export const dynamic = "force-dynamic";
@@ -48,21 +51,17 @@ function toRows(runs: Awaited<ReturnType<typeof listEvalRuns>>): EvalRunRow[] {
 export default async function EvalsPage() {
   let rows: EvalRunRow[] = [];
   let loadError: string | null = null;
-  let hasWorkspace = true;
 
   try {
-    const db = getDb();
-    const [ws] = await db
-      .select({ id: workspaces.id })
-      .from(workspaces)
-      .limit(1);
-
-    if (!ws) {
-      hasWorkspace = false;
-    } else {
-      rows = toRows(await listEvalRuns(db, ws.id));
-    }
+    // The visitor's own history. Their suite runs, their SOP versions, their
+    // regressions, and nobody else's.
+    const { workspaceId } = await currentSandbox();
+    rows = toRows(await listEvalRuns(getDb(), workspaceId));
   } catch (error) {
+    // A missing sandbox header is a routing fault, not a database fault. The
+    // copy below would send whoever reads it to rebuild Postgres over a
+    // proxy matcher, so it propagates instead.
+    if (error instanceof SandboxHeaderMissingError) throw error;
     // Almost always an unseeded or unreachable database, and the command to
     // fix it is a better answer than a stack trace in the browser.
     loadError = error instanceof Error ? error.message : String(error);
@@ -98,13 +97,7 @@ export default async function EvalsPage() {
         </div>
       ) : null}
 
-      {!loadError && !hasWorkspace ? (
-        <p className="text-sm text-zinc-500">
-          No workspace found — run <code>npm run db:seed</code>.
-        </p>
-      ) : null}
-
-      {!loadError && hasWorkspace ? <EvalLab runs={rows} /> : null}
+      {loadError ? null : <EvalLab runs={rows} />}
     </main>
   );
 }

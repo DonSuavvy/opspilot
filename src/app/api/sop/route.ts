@@ -11,7 +11,7 @@
 import { UnknownPlaceholderError } from "@/agent/sop";
 import { SopDraftError } from "@/agent/sop-draft";
 import { getDb } from "@/db/client";
-import { workspaces } from "@/db/schema";
+import { sandboxFromRequest } from "@/lib/workspace";
 import {
   createSopVersion,
   listSopVersions,
@@ -21,21 +21,13 @@ import {
 
 export const dynamic = "force-dynamic";
 
-/**
- * The demo has exactly one workspace. Day 8 replaces this with the visitor's
- * cookie-scoped sandbox; until then, resolving it here keeps the editor from
- * having to know an id it cannot discover.
- */
-async function demoWorkspaceId(db: ReturnType<typeof getDb>) {
-  const [ws] = await db.select({ id: workspaces.id }).from(workspaces).limit(1);
-  if (!ws) throw new Error("no workspace — run `npm run db:seed`");
-  return ws.id;
-}
-
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const db = getDb();
-    const workspaceId = await demoWorkspaceId(db);
+    // The visitor's own sandbox, seeded on the spot if this is their first
+    // request. Editing the SOP is demo arc step 2, and it has to change the
+    // policy for the person doing the editing and nobody else.
+    const { workspaceId } = await sandboxFromRequest(request);
     const [active, versions] = await Promise.all([
       loadActiveSop(db, workspaceId),
       listSopVersions(db, workspaceId),
@@ -69,7 +61,7 @@ export async function POST(request: Request) {
 
   try {
     const db = getDb();
-    const workspaceId = await demoWorkspaceId(db);
+    const { workspaceId } = await sandboxFromRequest(request);
     const created = await createSopVersion(db, {
       workspaceId,
       bodyMarkdown: body.bodyMarkdown,

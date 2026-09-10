@@ -34,8 +34,19 @@ import { streamingMessageCreator } from "@/agent/streaming";
 import { TOOLS } from "@/agent/tools";
 import { and, eq } from "drizzle-orm";
 import { customers, tickets } from "@/db/schema";
+import { ownedOrMissing } from "@/lib/ownership";
+import { sandboxFromRequest } from "@/lib/workspace";
 
 export const dynamic = "force-dynamic";
+
+/**
+ * One run is a handful of model calls, and Vercel's default cuts them off.
+ *
+ * 300 seconds is the ceiling on a Pro function; Hobby caps lower and will
+ * clamp this rather than fail the build. `/api/evals/run` already carries the
+ * same number for the same reason.
+ */
+export const maxDuration = 300;
 
 /**
  * How a budget refusal is reported.
@@ -109,7 +120,21 @@ export async function POST(request: Request) {
 
   const db = getDb();
 
-  const [ticket] = await db
+  // Resolved before the ticket is read, because the answer decides whether
+  // this visitor is allowed to see it. Seeds the sandbox if the visitor is new
+  // or their last one expired, which is why a first `curl` against a fresh
+  // cookie works at all.
+  let sandbox;
+  try {
+    sandbox = await sandboxFromRequest(request);
+  } catch (error) {
+    return Response.json(
+      { error: error instanceof Error ? error.message : String(error) },
+      { status: 500 },
+    );
+  }
+
+  const [row] = await db
     .select({
       id: tickets.id,
       workspaceId: tickets.workspaceId,
@@ -121,6 +146,9 @@ export async function POST(request: Request) {
     .where(eq(tickets.id, ticketId))
     .limit(1);
 
+  // One branch and one message for both "no such ticket" and "not yours". A
+  // separate 403 would tell whoever is guessing ids which guesses landed.
+  const ticket = ownedOrMissing(row, sandbox.workspaceId);
   if (!ticket) {
     return Response.json({ error: `no ticket ${ticketId}` }, { status: 404 });
   }

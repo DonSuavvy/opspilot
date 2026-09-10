@@ -39,6 +39,8 @@ import {
 import { prepareTicketRun } from "@/agent/guardrails";
 import { buildRegistry } from "@/agent/registry";
 import { tickets } from "@/db/schema";
+import { ownedOrMissing } from "@/lib/ownership";
+import { sandboxFromRequest } from "@/lib/workspace";
 import { eq } from "drizzle-orm";
 import {
   createClient,
@@ -57,6 +59,15 @@ import { streamingMessageCreator } from "@/agent/streaming";
 import { TOOLS } from "@/agent/tools";
 
 export const dynamic = "force-dynamic";
+
+/**
+ * One run is a handful of model calls, and Vercel's default cuts them off.
+ *
+ * 300 seconds is the ceiling on a Pro function; Hobby caps lower and will
+ * clamp this rather than fail the build. `/api/evals/run` already carries the
+ * same number for the same reason.
+ */
+export const maxDuration = 300;
 
 const DEMO_MODEL: LogicalModel = "haiku";
 
@@ -123,7 +134,22 @@ export async function POST(request: Request) {
 
   const db = getDb();
 
-  const run = await loadPausedRun(db, runId);
+  // Same rule as `/api/agent/run`: resolve the visitor first, then decide
+  // whether the id they sent names anything they are allowed to see.
+  let sandbox;
+  try {
+    sandbox = await sandboxFromRequest(request);
+  } catch (error) {
+    return Response.json(
+      { error: error instanceof Error ? error.message : String(error) },
+      { status: 500 },
+    );
+  }
+
+  // A paused run belonging to another sandbox reads as a run that never
+  // existed. Anything else would let one visitor confirm a stranger's refund
+  // is sitting in a queue.
+  const run = ownedOrMissing(await loadPausedRun(db, runId), sandbox.workspaceId);
   if (!run) {
     return Response.json({ error: `no run ${runId}` }, { status: 404 });
   }
