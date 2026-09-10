@@ -30,7 +30,11 @@
  */
 import { cachedSystem } from "@/agent/cache";
 import { compileSop } from "@/agent/sop";
-import { ESTIMATED_RUN_NANOS, type BudgetConfig } from "@/agent/budget";
+import {
+  ESTIMATED_RUN_NANOS,
+  type BudgetConfig,
+  type BudgetRefusal,
+} from "@/agent/budget";
 import type { AgentLoopResult, MessageCreator } from "@/agent/loop";
 import type { LogicalModel, Provider } from "@/agent/provider";
 import { buildRegistry } from "@/agent/registry";
@@ -152,6 +156,20 @@ export interface EvalSuiteSummary {
   promptVersion: string;
 }
 
+/**
+ * The refusals that stay true for the rest of the suite.
+ *
+ * Typed as `BudgetRefusal[]` rather than as string literals so a renamed or
+ * mistyped member is a compile error rather than a case quietly re-attempted
+ * against an exhausted cap. `rate_limited` is absent on purpose — see
+ * `budgetRefusal` in `runEvalSuite`.
+ */
+const STICKY_REFUSALS: readonly BudgetRefusal[] = [
+  "kill_switch",
+  "daily_cap_reached",
+  "run_would_exceed_cap",
+];
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -263,16 +281,28 @@ export async function runEvalSuite(
   let costNanos = 0;
   let threw = false;
   /**
-   * Sticky. Once the guard says no, every remaining case is refused without a
+   * Sticky, but only for the refusals that stay true.
+   *
+   * Once the day's money is gone every remaining case is refused without a
    * reservation of its own — the cap does not un-reach itself, and re-asking
-   * eight times is the burst the guard exists to prevent. Kept separate from
-   * `threw` on purpose: it must not turn the suite's status to `failed`.
+   * eight times is the burst the guard exists to prevent. `rate_limited` is
+   * deliberately *not* in that set: it is a wait rather than a limit, it
+   * clears inside sixty seconds, and the golden suite is eight sequential
+   * runs against a default of ten a minute, so it is the refusal most likely
+   * to land mid-suite. Made sticky it turned one throttled case into six red
+   * ones that were never attempted.
+   *
+   * Kept separate from `threw` on purpose: neither turns the suite's status
+   * to `failed`.
    */
-  let budgetRefusal: string | null = null;
+  let budgetRefusal: BudgetRefusal | null = null;
 
   const rateVerified = rates.verifiedOn !== null;
 
   for (const c of enabled) {
+    /** This case's refusal, sticky or not. `budgetRefusal` only holds the
+     * sticky ones, so a rate-limited case still needs somewhere to say why. */
+    let caseRefusal: BudgetRefusal | null = budgetRefusal;
     const startedAt = new Date();
     let agentRunId: string | null = null;
     let priorNanos = 0;
@@ -388,7 +418,10 @@ export async function runEvalSuite(
           continue;
         }
 
-        budgetRefusal = reservation.reason;
+        caseRefusal = reservation.reason;
+        if (STICKY_REFUSALS.includes(reservation.reason)) {
+          budgetRefusal = reservation.reason;
+        }
       }
 
       /**
@@ -397,7 +430,7 @@ export async function runEvalSuite(
        * says *why* it is red rather than reporting a mysterious failure.
        */
       failed += 1;
-      const failureReason = `budget: ${budgetRefusal}`;
+      const failureReason = `budget: ${caseRefusal}`;
       const latencyMs = Date.now() - startedAt.getTime();
 
       await persist.insertEvalResult(db, {
