@@ -109,6 +109,94 @@ mandates, run it once, read the trace. A case written from a guess encodes
 the guess: when it goes red you cannot tell whether the agent regressed or the
 case was always wrong.
 
+## The CI gate
+
+`.github/workflows/evals.yml` runs the golden suite on a pull request and posts
+the scorecard as a comment it edits in place on every push. It is a separate
+workflow from `ci.yml` because it calls a real model on an account shared with
+a production system, so it must not run on every push.
+
+### What triggers it
+
+Five paths, and nothing else:
+
+- `src/db/sop-content.ts` — the SOP the demo workspace is seeded with
+- `src/agent/prompt.ts` — the constitution above the SOP
+- `src/agent/sop.ts` — the compiler that turns the two into bytes
+- `src/evals/**` — the cases, the scorer, the runner, the suite
+- `.github/workflows/evals.yml` — so a change to the gate is gated by itself
+
+Everything on that list moves what the model reads or what a result means.
+Nothing off it should change an eval outcome, and if it does, that is a
+finding worth a case of its own.
+
+### What fails it
+
+Any failing case, plus a suite that threw. There is no threshold and no
+allowance for flakes.
+
+That is the right definition today because `main` is 8/8. With every case green,
+a red one is a regression by definition, and the alternative would be to compare
+against a stored baseline that does not exist yet: `eval_runs` holds every past
+run, but nothing marks which run is the bar. Until something does, "all green"
+is the only baseline that cannot drift.
+
+The failure the definition does get wrong is a Bedrock 429. The scorecard says
+so in the row — `runEvalSuite` appends the loop's error to the failure reason —
+so read the row before assuming the agent moved. Do not re-run the job to chase
+a green: it spends the money again, and the row already told you.
+
+### Reading the comment
+
+```
+<!-- opspilot-scorecard -->
+
+## Eval scorecard
+
+SOP v1 · 30-day · prompt `0ecf547f0ba1` · model `haiku` on `bedrock` · commit `e7e9675`
+
+**8/8 passed** · $0.078064 (estimated) · 1m 4s wall time
+
+| case | result | failed assertions | cost | latency |
+| --- | --- | --- | --- | --- |
+| `refund-in-window` | pass | — | $0.007343 | 4.1s |
+```
+
+The pin line first: two comments are only comparable if the SOP version, the
+refund window, the prompt hash and the commit are all in front of you. A red
+case under a changed prompt hash and an unchanged SOP version means the
+compiler moved, not the document.
+
+Then the table, in suite order. Rows do not sort by result, so a scorecard
+lines up row for row against the one it replaced. A failing row carries every
+failed assertion as `name: expected X, got Y`; a case that failed before it was
+scored carries its failure reason instead, which is where a 429 shows up.
+
+Cost reads `(estimated)` because Bedrock's rates are unverified. See CLAUDE.md.
+
+### What it costs
+
+$0.078 for eight cases on Haiku, measured 2026-09-10 on the run that gated this
+workflow in. Wall time was 1m 4s. Both are estimates against an unverified rate
+card and will move with the prompt, so treat the dollar cap in the workflow
+(`OPSPILOT_DAILY_BUDGET_USD: "1.00"`, about six suites) as the number that
+matters rather than this one.
+
+Locally the same thing is `npm run evals:ci`, against whatever `DATABASE_URL`
+points at. It writes `SCORECARD_PATH` (default `scorecard.md`, gitignored),
+appends to `$GITHUB_STEP_SUMMARY` when CI sets it, and exits 1 on a red case.
+
+### Where the secrets live
+
+Repository secrets, under the same names the code reads:
+`AWS_ANTHROPIC_ACCESS_KEY_ID`, `AWS_ANTHROPIC_SECRET_ACCESS_KEY`,
+`AWS_ANTHROPIC_REGION`. `scripts/wizard-deploy.sh` sets them.
+
+A fork PR gets none of them, so the job stops at the env check with
+`Evals need AWS_ANTHROPIC_* secrets; see docs/RUNBOOK.md` and no model call.
+This repo is solo, so that is a fine place to stop. Handing secrets to a fork
+would mean `pull_request_target` and a label gate, which is a different design.
+
 ## Reading a diff
 
 `diffEvalRuns` sorts cases into regressed, fixed, unchanged, added and removed.
