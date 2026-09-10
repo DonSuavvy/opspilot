@@ -14,7 +14,12 @@
  */
 import { and, eq, isNotNull, lt, sql } from "drizzle-orm";
 
-import { isSandboxSlug, sandboxExpiry } from "@/lib/sandbox";
+import {
+  isSandboxSlug,
+  resetAllowed,
+  sandboxExpiry,
+  SANDBOX_TTL_MS,
+} from "@/lib/sandbox";
 
 import type { DbOrTx } from "./runs";
 import { workspaces } from "./schema";
@@ -34,6 +39,20 @@ export class NotASandboxError extends Error {
   constructor(slug: string) {
     super(`${JSON.stringify(slug)} is not a sandbox slug`);
     this.name = "NotASandboxError";
+  }
+}
+
+/**
+ * The reset came too soon after the last one.
+ *
+ * Typed rather than a 500 with a message, because the route has to answer 429
+ * and set `Retry-After`, and sniffing a string to decide a status code is how
+ * a reworded sentence becomes an outage.
+ */
+export class ResetTooSoonError extends Error {
+  constructor(readonly retryAfterSeconds: number) {
+    super(`sandbox was reset less than 30 seconds ago`);
+    this.name = "ResetTooSoonError";
   }
 }
 
@@ -131,6 +150,16 @@ export async function ensureSandbox(
  * from the slug by `seedIdsFor`, which is what lets the eval cases name an
  * invoice by computing its id, so a reset yields the same ids with fresh dates
  * and no runs against them.
+ *
+ * **The cooldown is checked inside the lock, not before it.** Two clicks that
+ * arrive together both read the same row, and a check outside would let both
+ * through and re-seed the tenant twice. Under the lock the second one reads
+ * the row the first just planted and is refused by its own rule.
+ *
+ * There is no `seeded_at` column and this does not need one: `plant` writes
+ * `expires_at` as the seed instant plus the TTL, so subtracting the TTL
+ * recovers the seed instant exactly. A null `expires_at` means the durable
+ * tenant, which `requireSandboxSlug` has already ruled out.
  */
 export async function resetSandbox(
   db: DbOrTx,
@@ -141,6 +170,18 @@ export async function resetSandbox(
 
   return await db.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${slug}))`);
+
+    const existing = await readSandbox(tx, slug);
+    const seededAt =
+      existing?.expiresAt == null
+        ? null
+        : new Date(existing.expiresAt.getTime() - SANDBOX_TTL_MS);
+
+    const verdict = resetAllowed(seededAt, now);
+    if (!verdict.allowed) {
+      throw new ResetTooSoonError(verdict.retryAfterSeconds);
+    }
+
     return await plant(tx, slug, now);
   });
 }

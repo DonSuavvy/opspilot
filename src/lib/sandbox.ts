@@ -119,6 +119,59 @@ export function sandboxExpiry(now: Date): Date {
   return new Date(now.getTime() + SANDBOX_TTL_MS);
 }
 
+/**
+ * How long a freshly planted sandbox is left alone before it may be reset.
+ *
+ * Thirty seconds, which is long enough that a click and a double click land on
+ * one reset and short enough that nobody demonstrating this notices. It is not
+ * a security boundary: the slug is already the capability, and a visitor
+ * resetting their own fixtures harms nobody. It bounds the *work*, because
+ * `/api/sandbox/reset` is unauthenticated and each call deletes and re-seeds a
+ * whole tenant under an advisory lock.
+ */
+export const SANDBOX_RESET_COOLDOWN_MS = 30_000;
+
+export interface ResetVerdict {
+  allowed: boolean;
+  /** Whole seconds until a refused reset would be accepted. Zero when allowed. */
+  retryAfterSeconds: number;
+}
+
+/**
+ * May this sandbox be thrown away and planted again yet?
+ *
+ * `seededAt` is null when there is no row, which is allowed: the visitor is
+ * about to get their first seed, and that is the same work their first page
+ * load would have done.
+ *
+ * A seed instant in the future is clock skew between Postgres and the server
+ * rather than an attack, and the conservative reading costs a visitor at most
+ * one wait. The countdown is bounded at the cooldown either way, so a badly
+ * skewed clock cannot produce a `Retry-After` measured in hours.
+ *
+ * The consequence worth naming: a visitor whose sandbox was planted by the
+ * page load they are looking at cannot reset for thirty seconds. That is the
+ * right answer rather than an edge case, because what they would be asking
+ * for is a fresh copy of the fresh copy they already have.
+ */
+export function resetAllowed(seededAt: Date | null, now: Date): ResetVerdict {
+  if (seededAt === null) return { allowed: true, retryAfterSeconds: 0 };
+
+  const elapsedMs = Math.max(0, now.getTime() - seededAt.getTime());
+  if (elapsedMs >= SANDBOX_RESET_COOLDOWN_MS) {
+    return { allowed: true, retryAfterSeconds: 0 };
+  }
+
+  return {
+    allowed: false,
+    // Ceiling, never floor: a `Retry-After: 0` on a 429 invites the retry it
+    // just refused.
+    retryAfterSeconds: Math.ceil(
+      (SANDBOX_RESET_COOLDOWN_MS - elapsedMs) / 1000,
+    ),
+  };
+}
+
 export interface ResolveSandboxInput {
   /** The cookie value as it arrived, if it arrived at all. */
   cookie: string | undefined;

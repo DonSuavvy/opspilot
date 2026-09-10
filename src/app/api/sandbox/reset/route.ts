@@ -12,9 +12,15 @@
  *
  * The slug comes from the header the proxy stamped, so a visitor can only ever
  * reset their own sandbox. Nothing in the body is read at all.
+ *
+ * Unauthenticated, and it stays that way — a demo that asks a stranger to sign
+ * in before they may un-break it is a demo nobody finishes. What it does not
+ * stay is unlimited: `resetSandbox` refuses a second reset inside thirty
+ * seconds, because deleting and re-seeding a tenant is real database work and
+ * this is the one public route the spend guard cannot see.
  */
 import { getDb } from "@/db/client";
-import { resetSandbox } from "@/db/sandbox";
+import { ResetTooSoonError, resetSandbox } from "@/db/sandbox";
 import { SANDBOX_HEADER } from "@/lib/sandbox";
 import {
   requireSandboxHeader,
@@ -38,6 +44,17 @@ export async function POST(request: Request) {
     const { expiresAt } = await resetSandbox(getDb(), slug, new Date());
     return Response.json({ ok: true, expiresAt: expiresAt.toISOString() });
   } catch (error) {
+    if (error instanceof ResetTooSoonError) {
+      const seconds = error.retryAfterSeconds;
+      return Response.json(
+        {
+          error: `This sandbox was just reset. Try again in ${seconds} seconds.`,
+          retry_after_seconds: seconds,
+        },
+        { status: 429, headers: { "Retry-After": String(seconds) } },
+      );
+    }
+
     return Response.json(
       { error: error instanceof Error ? error.message : String(error) },
       { status: 500 },

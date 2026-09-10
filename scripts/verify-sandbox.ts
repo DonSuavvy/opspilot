@@ -21,6 +21,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { closeDb, getDb } from "../src/db/client";
 import {
   ensureSandbox,
+  ResetTooSoonError,
   resetSandbox,
   sweepExpiredSandboxes,
 } from "../src/db/sandbox";
@@ -212,6 +213,31 @@ async function main(): Promise<number> {
   check(
     after.expiresAt.getTime() === later.getTime() + 24 * HOUR_MS,
     "the TTL restarted from the reset instant",
+  );
+
+  // The cooldown, against a real row rather than a derived instant. There is
+  // no `seeded_at` column, so `resetSandbox` recovers the seed instant by
+  // subtracting the TTL from `expires_at` — an arithmetic identity that holds
+  // only as long as `plant` writes both together, which is what this asserts.
+  let refused: unknown = null;
+  try {
+    await resetSandbox(db, slugD, new Date(later.getTime() + 5_000));
+  } catch (error) {
+    refused = error;
+  }
+  check(
+    refused instanceof ResetTooSoonError,
+    "a second reset five seconds later is refused",
+  );
+  check(
+    refused instanceof ResetTooSoonError && refused.retryAfterSeconds === 25,
+    `and says to come back in 25 seconds (got ${
+      refused instanceof ResetTooSoonError ? refused.retryAfterSeconds : "no refusal"
+    })`,
+  );
+  check(
+    (await resetSandbox(db, slugD, new Date(later.getTime() + 30_000))).seeded,
+    "and allows it once the 30 seconds are up",
   );
 
   /* ---------------------------------------------------------------------- */
