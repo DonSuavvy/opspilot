@@ -18,6 +18,8 @@ import {
   type BudgetConfig,
 } from "@/agent/budget";
 
+import { displaySlug } from "@/lib/sandbox";
+
 import type { DbOrTx } from "./runs";
 import { spentTodayNanos } from "./runs";
 import { agentRuns, approvals, evalRuns, runSpans, workspaces } from "./schema";
@@ -225,12 +227,50 @@ export interface RecentGuardrail {
 
 export interface RecentRun {
   id: string;
-  /** `demo` is the durable workspace; a sandbox slug begins with `sb_`. */
+  /**
+   * What the badge prints, never what a cookie would be accepted from.
+   *
+   * `demo` is the durable workspace. A sandbox reads `sb_` plus a mask and four hex
+   * characters, because the full slug is the capability protecting that
+   * visitor and this page has no login in front of it.
+   */
+  workspaceLabel: string;
+  status: string;
+  model: string;
+  startedAt: Date;
+  costUsd: string | null;
+}
+
+/** The row `loadRecentRuns` selects, before anything is done to it. */
+export interface RecentRunRow {
+  id: string;
   workspaceSlug: string;
   status: string;
   model: string;
   startedAt: Date;
   costUsd: string | null;
+}
+
+/**
+ * One row to one badge, and the only place the slug is allowed to be dropped.
+ *
+ * Split out of the query so the rule is testable without Postgres — `npm test`
+ * runs without a database and the assertion that matters here is a regex over
+ * the mapper's output, not a round trip through a table.
+ *
+ * Masking happens at this boundary rather than in the page, so `OpsSnapshot`
+ * itself never carries a full slug. A view model that holds the secret and
+ * trusts every renderer not to print it is one JSX edit away from leaking it.
+ */
+export function toRecentRun(row: RecentRunRow): RecentRun {
+  return {
+    id: row.id,
+    workspaceLabel: displaySlug(row.workspaceSlug),
+    status: row.status,
+    model: row.model,
+    startedAt: row.startedAt,
+    costUsd: row.costUsd,
+  };
 }
 
 export interface OpsSnapshot {
@@ -323,14 +363,15 @@ async function loadRecentGuardrails(db: DbOrTx): Promise<RecentGuardrail[]> {
 /**
  * The last few runs, whichever sandbox started them.
  *
- * The slug is carried per row because it is the only thing that tells them
+ * A label is carried per row because it is the only thing that tells them
  * apart on this page. `demo` is the durable workspace behind the scripted
  * arc; everything beginning `sb_` is one visitor's sandbox. An operator
  * watching a burst wants to know whether it is one person clicking or twenty
- * people arriving, and that question has no answer without the slug.
+ * people arriving, and four characters of tail answer that. The rest of the
+ * slug is a capability and stops at {@link toRecentRun}.
  */
 async function loadRecentRuns(db: DbOrTx): Promise<RecentRun[]> {
-  const rows = await db
+  const rows: RecentRunRow[] = await db
     .select({
       id: agentRuns.id,
       workspaceSlug: workspaces.slug,
@@ -344,7 +385,7 @@ async function loadRecentRuns(db: DbOrTx): Promise<RecentRun[]> {
     .orderBy(desc(agentRuns.startedAt))
     .limit(RECENT_RUNS);
 
-  return rows;
+  return rows.map(toRecentRun);
 }
 
 /**

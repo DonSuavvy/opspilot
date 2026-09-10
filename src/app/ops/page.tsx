@@ -217,9 +217,15 @@ function LimitsCard({ snapshot }: { snapshot: OpsSnapshot }) {
   );
 }
 
-/** `sb_` is a per-visitor sandbox; `demo` is the durable workspace. */
-function WorkspaceBadge({ slug }: { slug: string }) {
-  const sandbox = slug.startsWith("sb_");
+/**
+ * `sb_` is a per-visitor sandbox; `demo` is the durable workspace.
+ *
+ * A label, not a slug. `toRecentRun` masked it before the snapshot was built,
+ * because this page is unauthenticated and a full slug read off it is enough
+ * to act as that visitor.
+ */
+function WorkspaceBadge({ label }: { label: string }) {
+  const sandbox = label.startsWith("sb_");
   return (
     <span
       className={`rounded px-1.5 py-0.5 font-mono text-xs ${
@@ -228,7 +234,7 @@ function WorkspaceBadge({ slug }: { slug: string }) {
           : "bg-sky-100 text-sky-900 dark:bg-sky-950 dark:text-sky-200"
       }`}
     >
-      {slug}
+      {label}
     </span>
   );
 }
@@ -262,7 +268,7 @@ function RecentRunsCard({ snapshot }: { snapshot: OpsSnapshot }) {
                       {formatAt(row.startedAt)}
                     </td>
                     <td className="py-1.5 pr-4">
-                      <WorkspaceBadge slug={row.workspaceSlug} />
+                      <WorkspaceBadge label={row.workspaceLabel} />
                     </td>
                     <td className="py-1.5 pr-4 text-zinc-600 dark:text-zinc-300">
                       {row.status.replaceAll("_", " ")}

@@ -87,6 +87,33 @@ export function isSandboxSlug(v: unknown): v is string {
   return typeof v === "string" && SLUG_PATTERN.test(v);
 }
 
+/** How much of a slug's tail survives {@link displaySlug}. */
+const VISIBLE_TAIL = 4;
+
+/**
+ * A slug that can be printed, which is not the same thing as a slug.
+ *
+ * The slug *is* the capability. There is no password behind it: whoever sends
+ * `opspilot_sandbox=<slug>` is that visitor, may approve their paused refunds
+ * and may wipe their fixtures. So it belongs in a `Set-Cookie` and in a `where`
+ * clause, and nowhere else — least of all in Mission Control, which is an
+ * unauthenticated page that lists every sandbox that has run recently.
+ *
+ * Four hex characters are kept because the operator's question is "is this
+ * burst one visitor or twenty", and that needs rows to be *distinguishable*,
+ * not identifiable. Sixteen bits of tail collide often enough to be useless
+ * for guessing the other 112 and rarely enough to tell a page of runs apart.
+ *
+ * Total over its argument, and non-sandbox slugs come back unchanged. `demo`
+ * is the durable tenant, it is named in the README and the runbook, and
+ * masking a public name would cost the badge its meaning while protecting
+ * nothing. A throw here would be a 500 on an operator page.
+ */
+export function displaySlug(slug: string): string {
+  if (!isSandboxSlug(slug)) return slug;
+  return `sb_\u2026${slug.slice(-VISIBLE_TAIL)}`;
+}
+
 /** When a sandbox seeded at `now` becomes eligible for the sweep. */
 export function sandboxExpiry(now: Date): Date {
   return new Date(now.getTime() + SANDBOX_TTL_MS);
