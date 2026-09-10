@@ -5,10 +5,22 @@
 # comment that it edits in place on every push.
 #
 # It costs money on every run: roughly $0.16 on Haiku for eight cases, charged
-# to an AWS account shared with a production system. That is why the `paths`
-# filter is narrow, why `concurrency` cancels a superseded run rather than
-# letting two suites race, and why nothing here retries a red job. A case that
-# lost to a Bedrock 429 says so in its own row on the scorecard.
+# to an AWS account shared with a production system. That is why `concurrency`
+# cancels a superseded run rather than letting two suites race, and why nothing
+# here retries a red job. A case that lost to a Bedrock 429 says so in its own
+# row on the scorecard.
+#
+# The `paths` filter used to be narrow for the same reason, and it was the
+# wrong economy. It named the SOP, the prompt and the suite, so a pull request
+# touching `src/policy/refund.ts`, `src/agent/loop.ts`, `src/agent/tools.ts` or
+# `src/agent/guardrails.ts` could regress every golden case without the gate
+# firing at all. A gate that does not fire on the code it grades is not a
+# saving. The filter now covers everything a case's outcome depends on.
+#
+# `src/agent/**` and `src/evals/**` include their own `*.test.ts`, so a
+# test-only change pays for a suite. That is deliberate rather than overlooked:
+# the alternative is a `paths-ignore` that has to stay correct, and the day it
+# is wrong it is wrong in the direction of not running.
 #
 # Fork PRs get no secrets from GitHub, so this job fails at the env check with
 # "Evals need AWS_ANTHROPIC_* secrets; see docs/RUNBOOK.md" rather than
@@ -21,10 +33,15 @@ name: Evals
 on:
   pull_request:
     paths:
+      # What the agent decides with.
+      - src/policy/**
+      - src/agent/**
+      # What it decides against, and what grades the decision.
+      - src/db/seed.ts
       - src/db/sop-content.ts
-      - src/agent/prompt.ts
-      - src/agent/sop.ts
       - src/evals/**
+      # And the gate itself.
+      - scripts/ci-evals.ts
       - .github/workflows/evals.yml
 
 # One suite per PR. A second push while the first is still running cancels it,

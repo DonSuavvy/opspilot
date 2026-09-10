@@ -118,17 +118,27 @@ a production system, so it must not run on every push.
 
 ### What triggers it
 
-Five paths, and nothing else:
+Everything a case's outcome depends on:
 
+- `src/policy/**` — the rules a refund is judged against
+- `src/agent/**` — the constitution, the SOP compiler, the loop, the tools,
+  the guardrails
+- `src/db/seed.ts` — the fixtures the cases name
 - `src/db/sop-content.ts` — the SOP the demo workspace is seeded with
-- `src/agent/prompt.ts` — the constitution above the SOP
-- `src/agent/sop.ts` — the compiler that turns the two into bytes
 - `src/evals/**` — the cases, the scorer, the runner, the suite
+- `scripts/ci-evals.ts` — the gate's own entry point
 - `.github/workflows/evals.yml` — so a change to the gate is gated by itself
 
-Everything on that list moves what the model reads or what a result means.
-Nothing off it should change an eval outcome, and if it does, that is a
-finding worth a case of its own.
+The list used to name five files and stopped at the prompt. That was the
+wrong economy: a pull request touching `src/policy/refund.ts`,
+`src/agent/loop.ts`, `src/agent/tools.ts` or `src/agent/guardrails.ts` could
+regress every golden case with the gate silent, and a gate that does not fire
+on the code it grades saves nothing worth having.
+
+`src/agent/**` and `src/evals/**` sweep up their own `*.test.ts`, so a
+test-only change pays for a suite. Deliberate: the alternative is a
+`paths-ignore` that has to stay correct, and the day it is wrong it is wrong
+in the direction of not running.
 
 ### What fails it
 

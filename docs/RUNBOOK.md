@@ -242,8 +242,9 @@ its own ids, and cannot see another sandbox's data.
 ## CI secrets for the eval gate
 
 `.github/workflows/evals.yml` (the `Evals` workflow) runs `npm run evals:ci`
-(`scripts/ci-evals.ts`) on any pull request touching `src/db/sop-content.ts`,
-`src/agent/prompt.ts`, `src/agent/sop.ts`, or `src/evals/**`. It posts one
+(`scripts/ci-evals.ts`) on any pull request touching `src/policy/**`,
+`src/agent/**`, `src/db/seed.ts`, `src/db/sop-content.ts`, `src/evals/**`,
+`scripts/ci-evals.ts` or the workflow itself. It posts one
 upserted scorecard comment per PR and fails the check on any failing case.
 This is the CI gate the README's headline claim rests on: prompt changes go
 through CI like code.
