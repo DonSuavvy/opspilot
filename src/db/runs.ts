@@ -163,10 +163,20 @@ export interface ReserveRunInput {
   ticketId: string | null;
   model: string;
   sopVersionId?: string | null;
-  /** Injected, never `Date.now()` — and written to `started_at` *and*
-   * `charged_at`, so the rate window is measured against the same instant the
-   * decision used and the reservation counts on the day it is taken. */
+  /** Injected, never `Date.now()`. The instant the *decision* is made
+   * against: the day's spend, the rate window, the policy. */
   now: Date;
+  /**
+   * When this run actually began, defaulting to `now`.
+   *
+   * They part company wherever `now` is deliberately frozen. The eval suite
+   * freezes it for all eight cases so the refund window cannot drift mid-run,
+   * and used to write that one instant to every row — eight runs claiming to
+   * have started at once, a per-minute count reading a burst that never
+   * happened, and a Mission Control timeline collapsed to a point. The policy
+   * wants one instant; the rows want their own.
+   */
+  startedAt?: Date;
   config: BudgetConfig;
   estimatedRunNanos: number;
   /** False when the rate card had no `verifiedOn` — see the safety factor. */
@@ -281,10 +291,13 @@ export async function reserveRun(
         status: "running",
         // Explicit rather than `defaultNow()`, so the row this reservation
         // writes falls inside the same rate window the decision measured.
-        startedAt: input.now,
-        // The reservation is money spent now, so the row is charged now. The
-        // two are the same instant on an insert and part ways on a resume.
-        chargedAt: input.now,
+        startedAt: input.startedAt ?? input.now,
+        // Charged when the row starts, not when the decision was taken — the
+        // reservation is money this run spends, and a frozen policy instant
+        // could sit on the far side of midnight from it. `started_at` and
+        // `charged_at` are the same instant on an insert and part ways on a
+        // resume.
+        chargedAt: input.startedAt ?? input.now,
         costUsd: runCostUsd(input.estimatedRunNanos, "reservation"),
       })
       .returning({ id: agentRuns.id });

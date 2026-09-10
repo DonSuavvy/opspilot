@@ -324,7 +324,11 @@ export async function runEvalSuite(
           ticketId: null,
           model,
           sopVersionId: sop.versionId,
+          // The frozen instant decides; the wall clock stamps the row. Eight
+          // cases sharing one `started_at` made the rate limit and Mission
+          // Control read a burst that never happened.
           now,
+          startedAt,
           config: input.budgetConfig,
           estimatedRunNanos: ESTIMATED_RUN_NANOS,
           rateVerified,
