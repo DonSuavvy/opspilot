@@ -293,6 +293,7 @@ IDs and API shapes changed in 2025–26; do not code from memory.
 
 ```
 docs/PLAN.md            authoritative build plan
+docs/SECURITY.md        the threat model, and which file each control lives in
 src/policy/             pure policy engine (refund limits, escalation)
 src/agent/registry.ts   tool registry: Zod -> strict JSON Schema, boot validation
 src/agent/tools.ts      the 9 tools — 8 handlers live; update_subscription is a
@@ -301,9 +302,12 @@ src/agent/loop.ts       the hand-rolled tool loop (MessageCreator seam)
 src/agent/data.ts       OpsData — the workspace-bound seam handlers run against
 src/agent/trace.ts      span -> run_spans row, and SSE framing
 src/agent/streaming.ts  the production MessageCreator (stream -> finalMessage)
+src/agent/injection.ts  the deterministic pre-scan — five signals, no model
+src/agent/guardrails.ts prepareTicketRun — a flagged run loses confirm-write
 src/db/schema.ts        Drizzle schema (15 tables)
 src/db/client.ts        lazy getDb()
 src/db/ops-data.ts      Drizzle OpsData, scoped to one workspace
+src/db/ops.ts           Mission Control's read side — budgetGauge, opsSnapshot
 src/db/runs.ts          run + span persistence, today's spend
 src/db/seed.ts          deterministic Beacon Analytics seed
 src/db/evals.ts         eval run/result persistence, and the list + detail reads
@@ -317,16 +321,19 @@ src/evals/suite.ts      the whole suite, sequentially, into one pinned eval_runs
 src/lib/agent-stream.ts   SSE trace reader, shared by both islands that start a run
 src/lib/approval-copy.ts  describeApproval — the sentence a reviewer decides on
 src/lib/eval-labels.ts    sopLabel, shortSha, compactJson — total over every null
+src/lib/span-copy.ts      describeSpan — one line saying what a span carried
 src/components/approval-decision.tsx  approve or deny one paused run, in place
 src/components/approval-queue.tsx     the pending rows, each decided on its own
 src/components/eval-lab.tsx           the streaming scorecard and the run history
 src/app/api/agent/run/  POST a ticket id, stream the trace back as SSE
 src/app/api/evals/run/  POST to run the golden suite, streamed as a scorecard
+src/app/api/health/     liveness and budget state, leaking no environment
 src/app/approvals/      the queue page, server-rendered from listPendingApprovals
 src/app/evals/          run the suite, and the history with a diff link per row
 src/app/evals/[id]/     one run: the pin, then every assertion it made
 src/app/evals/diff/     ?base=&head= — regressed, fixed, added, removed, unchanged
-scripts/verify-*.ts     gate evidence that needs a database
+src/app/ops/            Mission Control — spend, guardrails, approvals, evals
+scripts/verify-*.ts     gate evidence — boot, seed, evals, and budget under load
 scripts/probe-grammar.ts  which tool set blows the strict grammar cap
 ```
 
