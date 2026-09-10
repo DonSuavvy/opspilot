@@ -82,6 +82,42 @@ a missing cap with a 500, so a deployment with no `OPSPILOT_DAILY_BUDGET_USD`
 boots fine and refuses every run. Uncapped spending is still impossible, which
 is what the control is for, but nothing fails at boot to tell you.
 
+## Sandboxes
+
+Every visitor gets a sandbox instead of sharing the demo tenant: a workspace
+seeded lazily on first use, torn down after a day whether or not anyone asks.
+
+**The cookie is the credential, and it is a capability, not a login.**
+`opspilot_sandbox` carries `sb_` followed by 32 hex characters, 128 bits of
+randomness, set `httpOnly` so no script on the page can read it
+(`src/proxy.ts`). There is no account behind it: holding the cookie is
+holding the sandbox. Losing it loses the sandbox, not an identity, which is
+the right trade for a demo nobody signs up for.
+
+**A ticket or run id from one sandbox does not resolve in another.** The seed
+already derives every id from a workspace-scoped key rather than the key
+alone, which is what let a second workspace exist at all without colliding on
+a primary key (`src/db/seed.ts`, `seedIdsFor`). Day 8 reuses that shape for
+sandboxes: the same fixture gets a different id in each one, so a copied URL
+or a guessed id from someone else's sandbox simply is not there. The ownership
+check answers 404, not someone else's data and not a permission error that
+would confirm the id exists at all (`src/lib/workspace.ts`).
+
+**The daily cap stays global; the rate limits split.**
+`OPSPILOT_DAILY_BUDGET_USD` caps every sandbox combined, not the visitor in
+front of you specifically, because the account behind all of them is the same
+shared Bedrock capacity the budget abuse section above exists to protect. Rate
+limits run in both directions: `OPSPILOT_RUNS_PER_MINUTE` catches one sandbox
+looping, and `OPSPILOT_GLOBAL_RUNS_PER_MINUTE` catches many sandboxes summing
+to a burst that trips Bedrock's throttle even though no single one looks
+abusive on its own.
+
+**The sweep removes data, not just a flag marking it expired.**
+`GET /api/cron/cleanup`, bearer-gated on `CRON_SECRET`, deletes every sandbox
+past its `expires_at` (`src/db/sandbox.ts`). A sandbox that outlives its
+visitor does not sit around as a growing pile of tickets, runs, and drafts for
+someone else to eventually find.
+
 ## Data exfiltration through reply drafts
 
 A reply is the one artifact that leaves the agent, so it is the obvious channel
@@ -91,9 +127,6 @@ for anything the model was talked into repeating. Drafts are written to
 sent. Nothing in this repository sends email.
 
 ## Not covered yet
-
-Per-visitor sandboxes and per-visitor caps are Day 8. Until they land, the
-public demo shares one workspace and one budget.
 
 No LLM judge scores tone, so a reply can be in-policy and still read badly.
 
