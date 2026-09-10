@@ -27,7 +27,10 @@ export const dynamic = "force-dynamic";
 
 /**
  * A suite is eight sequential agent runs, so the platform default is nowhere
- * near enough. 300 is the Pro ceiling; Hobby clamps it rather than failing.
+ * near enough. 300 seconds needs Fluid compute, which is on by default for
+ * new Vercel projects; without it a Hobby project caps at 60 seconds and a
+ * value over the plan's limit fails the deployment rather than being clamped
+ * to it. Same number and same caveat as `/api/agent/run`.
  */
 export const maxDuration = 300;
 

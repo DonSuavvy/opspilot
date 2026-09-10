@@ -60,9 +60,13 @@ export const dynamic = "force-dynamic";
 /**
  * One run is a handful of model calls, and Vercel's default cuts them off.
  *
- * 300 seconds is the ceiling on a Pro function; Hobby caps lower and will
- * clamp this rather than fail the build. `/api/evals/run` already carries the
- * same number for the same reason.
+ * 300 seconds needs **Fluid compute**, which is on by default for new Vercel
+ * projects and is what raises the ceiling above the per-plan function limit.
+ * Without it a Hobby project caps at 60 seconds and a value over the plan's
+ * limit fails the deployment rather than being clamped down to it, so this is
+ * a thing to check in project settings before a deploy rather than a number
+ * that quietly degrades. `/api/evals/run` carries the same number for the
+ * same reason.
  */
 export const maxDuration = 300;
 

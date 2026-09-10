@@ -178,6 +178,17 @@ Neon runs this project's database in `ap-southeast-1`. `vercel.json` pins
 `regions: ["sin1"]` (Singapore) so the agent's database round trips stay
 local to that region instead of crossing the Pacific on every tool call.
 
+### Fluid compute
+
+The three streaming routes (`/api/agent/run`, `/api/agent/resume`,
+`/api/evals/run`) export `maxDuration = 300`, and 300 seconds is above the
+per-plan function limit. Fluid compute is what raises the ceiling. It is on
+by default for new Vercel projects; check it under **Project Settings →
+Functions → Fluid compute**, or set `"fluid": true` in `vercel.json`. With it
+off, a Hobby project caps at 60 seconds and a `maxDuration` over the plan's
+limit fails the deployment rather than being clamped to it, so this is worth
+confirming before the first deploy and not after.
+
 ### Environment variables
 
 Everything a production deploy needs, beyond what Vercel sets on its own:
