@@ -11,6 +11,14 @@ suite runs in CI.
 > agent loop lands on Day 2. Nothing below is aspirational — the "Verify it
 > yourself" section runs today. Roadmap and per-day gates: [`docs/PLAN.md`](docs/PLAN.md).
 
+**Live demo:** fill in the URL here after running `scripts/wizard-deploy.sh`
+(for example, `https://opspilot.vercel.app`).
+
+Every visitor gets a disposable sandbox: a cookie-scoped workspace, seeded on
+first use and swept clean after its TTL expires. Prompt changes go through CI
+like code. A pull request that touches the SOP or the prompt fails the build
+if the eval suite regresses.
+
 ---
 
 ## The idea
