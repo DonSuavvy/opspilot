@@ -143,6 +143,11 @@ interface Breakage {
   finishRun?: number;
   /** Case number from which `reserveRun` starts refusing. */
   refuseFrom?: number;
+  /**
+   * Case number refused once with `rate_limited`, the retryable refusal.
+   * Later cases reserve normally — which is the whole point of it.
+   */
+  rateLimit?: number;
 }
 
 function harness(broken: Breakage): Harness {
@@ -150,6 +155,7 @@ function harness(broken: Breakage): Harness {
   const finishedRuns: Harness["finishedRuns"] = [];
   const finishedSuite: Harness["finishedSuite"] = [];
   let started = 0;
+  let attempts = 0;
   let inserted = 0;
 
   const persist: EvalPersistence = {
@@ -172,7 +178,19 @@ function harness(broken: Breakage): Harness {
       });
     },
     reserveRun: async () => {
-      const attempt = started + 1;
+      // Counted per *call*, not per successful start, so a refusal that is
+      // not sticky does not leave the next case answering to the same number.
+      attempts += 1;
+      const attempt = attempts;
+      if (broken.rateLimit === attempt) {
+        calls.push(`reserveRun:rate_limited:${attempt}`);
+        return {
+          ok: false as const,
+          reason: "rate_limited" as const,
+          retryAfterSeconds: 60,
+          remainingNanos: 0,
+        };
+      }
       if (broken.refuseFrom !== undefined && attempt >= broken.refuseFrom) {
         calls.push(`reserveRun:refused:${attempt}`);
         return {
@@ -368,5 +386,47 @@ describe("runEvalSuite, when the budget refuses a case", () => {
       "reserveRun:refused:2",
     ]);
     expect(h.finishedRuns.map((r) => r.runId)).toEqual(["agent_run_1"]);
+  });
+});
+
+/**
+ * A rate limit is not a cap, and the suite must not treat it as one.
+ *
+ * The sticky refusal exists because the cap does not un-reach itself: once the
+ * day's money is gone, asking seven more times is exactly the burst the guard
+ * prevents. `rate_limited` is the opposite — it is a *wait*, it clears on its
+ * own inside sixty seconds, and the golden suite is eight sequential runs
+ * against a default of ten a minute, so it is the refusal most likely to land
+ * mid-suite. Made sticky, one throttled case turned the six behind it red and
+ * the scorecard said nothing about the agent.
+ */
+describe("runEvalSuite, when a case is rate limited", () => {
+  it("fails that case and still runs the next one", async () => {
+    const h = harness({ rateLimit: 2 });
+    const creator = countingCreateMessage();
+    const { events, summary } = await run(
+      h,
+      ["one", "two", "three"],
+      creator.createMessage,
+    );
+
+    expect(
+      creator.calls(),
+      "cases one and three should both reach the model",
+    ).toBe(2);
+
+    expect(h.calls.filter((c) => c.startsWith("reserveRun"))).toEqual([
+      "reserveRun:1",
+      "reserveRun:rate_limited:2",
+      "reserveRun:2",
+    ]);
+
+    const results = events.filter((e) => e.type === "case");
+    expect(results.map((e) => e.passed)).toEqual([true, false, true]);
+    expect(results[1]!.failureReason).toBe("budget: rate_limited");
+    expect(results[2]!.failureReason).toBeNull();
+
+    expect(summary.passed).toBe(2);
+    expect(summary.failed).toBe(1);
   });
 });
