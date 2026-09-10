@@ -375,8 +375,9 @@ if command -v vercel >/dev/null 2>&1; then
 
   note "OPSPILOT_GLOBAL_RUNS_PER_MINUTE is new: the same check across every"
   note "sandbox combined, so it should be a multiple of the per-sandbox limit"
-  note "above, not equal to it."
-  ask OPSPILOT_GLOBAL_RUNS_PER_MINUTE_INPUT "Runs per minute, across all sandboxes [suggested 30, no code default exists]:"
+  note "above, not equal to it. The code default is 20; CI sets 24 for the"
+  note "eval suite; 30 leaves production room for visitors and a suite at once."
+  ask OPSPILOT_GLOBAL_RUNS_PER_MINUTE_INPUT "Runs per minute, across all sandboxes [suggested 30, code default 20]:"
   OPSPILOT_GLOBAL_RUNS_PER_MINUTE_INPUT="${OPSPILOT_GLOBAL_RUNS_PER_MINUTE_INPUT:-30}"
   _vercel_env_set OPSPILOT_GLOBAL_RUNS_PER_MINUTE "$OPSPILOT_GLOBAL_RUNS_PER_MINUTE_INPUT" production
 

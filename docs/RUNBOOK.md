@@ -29,9 +29,12 @@ instead of each reading the same stale total.
 
 ### Reading /ops
 
-Mission Control lists every workspace with its slug, and for each one: today's
-spend against the cap, the rate-limit counters, pending approvals, and recent
-eval runs. Costs on Bedrock are estimates charged at a safety multiple, and
+Mission Control reports the whole deployment: today's spend against the cap,
+the two rate-limit counters, in-flight runs, pending approvals, recent
+guardrail spans, and the last dozen runs whichever sandbox started them. The
+page is unauthenticated, so a sandbox is badged as `sb_` plus four hex
+characters rather than its slug — enough to tell rows apart, not enough to
+act as that visitor. Costs on Bedrock are estimates charged at a safety multiple, and
 the page says so next to the number. Start here when a demo looks slow or a
 run refuses unexpectedly.
 
@@ -124,6 +127,15 @@ would otherwise idle long enough to cold-start between visits.
 
 `vercel.json` schedules it daily at 03:00 UTC. It requires a bearer token and
 returns without touching the database if the token is wrong or missing.
+
+### The reset button
+
+`POST /api/sandbox/reset` wipes and re-seeds the caller's own sandbox, keyed
+off the header the proxy stamped, so nobody can reset anyone else's. It
+refuses a second reset inside thirty seconds with a 429, a `Retry-After` and a
+sentence the button renders as-is. A visitor whose sandbox was planted by the
+page load in front of them is inside that window, which is the right answer:
+what they would be asking for is a fresh copy of the fresh copy they have.
 
 ### Manual invocation
 

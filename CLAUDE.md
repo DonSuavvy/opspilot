@@ -354,30 +354,43 @@ src/evals/runner.ts     one case: loop + barrier + scorer
 src/evals/suite.ts      the whole suite, sequentially, into one pinned eval_runs row
 src/evals/scorecard.ts  the CI comment's scorecard text, built from a suite result —
                         not the UI's, which is eval-lab.tsx below
+src/evals/provider-env.ts  whether the eval gate has a provider at all: the whole
+                        Bedrock trio, or the first-party key
 src/lib/agent-stream.ts   SSE trace reader, shared by both islands that start a run
 src/lib/approval-copy.ts  describeApproval — the sentence a reviewer decides on
 src/lib/eval-labels.ts    sopLabel, shortSha, compactJson — total over every null
-src/lib/sandbox.ts        the sandbox slug: sb_ + 32 hex, read from the cookie
+src/lib/sandbox.ts        the sandbox slug: sb_ + 32 hex, read from the cookie —
+                          plus displaySlug, the masked form anything public
+                          prints, and resetAllowed, the reset cooldown
+src/lib/ownership.ts      ownedOrMissing — another sandbox's row is a 404, with
+                          the same body as a row that never existed
+src/lib/budget-copy.ts    a refusal body -> the sentence a visitor reads
+src/lib/budget-response.ts  a Reservation -> the 429 or 402 both run routes send
 src/lib/span-copy.ts      describeSpan — one line saying what a span carried
 src/lib/workspace.ts      resolves a request's workspace from its sandbox header,
-                          or the durable demo tenant when there isn't one
+                          and throws when there isn't one — there is deliberately
+                          no fallback tenant, since a silent one would put a
+                          visitor inside somebody else's sandbox
 src/components/approval-decision.tsx  approve or deny one paused run, in place
 src/components/approval-queue.tsx     the pending rows, each decided on its own
 src/components/eval-lab.tsx           the streaming scorecard and the run history
 src/app/inbox/          the ticket inbox — moved here from / on Day 8; / is the
                         landing page now
 src/app/api/agent/run/  POST a ticket id, stream the trace back as SSE
+src/app/api/agent/resume/  POST a decision on a paused run, stream the rest
 src/app/api/evals/run/  POST to run the golden suite, streamed as a scorecard
 src/app/api/health/     liveness and budget state, leaking no environment
-src/app/api/sandbox/reset/  POST — wipes and reseeds the caller's own sandbox
+src/app/api/sandbox/reset/  POST — wipes and reseeds the caller's own sandbox,
+                            429 inside a thirty second cooldown
 src/app/api/cron/cleanup/   GET, bearer-gated on CRON_SECRET — sweeps expired
                             sandboxes and doubles as the Neon keep-alive
 src/app/approvals/      the queue page, server-rendered from listPendingApprovals
 src/app/evals/          run the suite, and the history with a diff link per row
 src/app/evals/[id]/     one run: the pin, then every assertion it made
 src/app/evals/diff/     ?base=&head= — regressed, fixed, added, removed, unchanged
-src/app/ops/            Mission Control — every workspace, its slug, spend,
-                        guardrails, approvals, evals
+src/app/ops/            Mission Control — the whole deployment's spend, rate
+                        counters, guardrails, approvals, evals, and recent runs
+                        badged by masked slug
 scripts/verify-*.ts     gate evidence — boot, seed, evals, budget, and sandbox
 scripts/probe-grammar.ts  which tool set blows the strict grammar cap
 scripts/ci-evals.ts     the evals:ci entry point — runs the suite, upserts the
