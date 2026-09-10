@@ -251,6 +251,15 @@ const RESERVATION_LOCK_KEY = 4_207_360_001;
  * An advisory lock needs no table and no migration. There is no row to lock
  * for a run that does not exist yet, which is the same reason the old lock
  * was on `workspaces` rather than on `agent_runs`.
+ *
+ * **`_xact_` rather than the session variant, and on Neon that is not a
+ * preference.** A session-level advisory lock is held by a backend, and a
+ * transaction-mode pooler hands backends to whoever asks next, so the lock
+ * outlives the caller and is released by nobody. The transaction-scoped form
+ * lives and dies inside one transaction, which a pooler in transaction mode
+ * keeps on one backend by definition. Deploying behind Neon's pooled endpoint
+ * is the plan of record, so the wrong one of these two would deadlock the
+ * demo rather than fail a test.
  */
 async function lockReservations(tx: DbOrTx): Promise<void> {
   await tx.execute(
