@@ -21,6 +21,8 @@ import { ApprovalDecision } from "@/components/approval-decision";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { describeApproval } from "@/lib/approval-copy";
+import { compactJson } from "@/lib/eval-labels";
+import { describeSpan } from "@/lib/span-copy";
 import { readAgentStream, type Done, type Span } from "@/lib/agent-stream";
 
 export interface TicketSummary {
@@ -60,14 +62,30 @@ const SPAN_STYLE: Record<Span["type"], string> = {
 };
 
 const STATUS_TONE: Record<string, string> = {
-  completed: "bg-emerald-100 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200",
-  paused_for_approval: "bg-sky-100 text-sky-900 dark:bg-sky-950 dark:text-sky-200",
-  budget_refused: "bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200",
+  completed:
+    "bg-emerald-100 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200",
+  paused_for_approval:
+    "bg-sky-100 text-sky-900 dark:bg-sky-950 dark:text-sky-200",
+  budget_refused:
+    "bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200",
   refused: "bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200",
   failed: "bg-red-100 text-red-900 dark:bg-red-950 dark:text-red-200",
 };
 
-export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
+export function RunConsole({
+  tickets,
+  intakePaused = false,
+}: {
+  tickets: TicketSummary[];
+  /**
+   * The spend guard has closed intake — the daily cap is spent or the kill
+   * switch is on. Decided on the server, where the budget config and today's
+   * spend already are, and passed down rather than fetched: a button that
+   * looks live and returns 402 on click is a worse answer than one that says
+   * why it is disabled before anyone presses it.
+   */
+  intakePaused?: boolean;
+}) {
   const [selected, setSelected] = useState<TicketSummary | null>(
     tickets[0] ?? null,
   );
@@ -157,8 +175,7 @@ export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
   const asking = awaiting
     ? describeApproval({ toolName: awaiting.name, toolInput: awaiting.input })
     : "A confirm-write tool is waiting for a decision.";
-  const pausedRunId =
-    done?.status === "paused_for_approval" ? runId : null;
+  const pausedRunId = done?.status === "paused_for_approval" ? runId : null;
 
   return (
     // Two columns from `md`, not `lg`: the trace is the thing being
@@ -201,10 +218,15 @@ export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
         <div className="flex flex-wrap items-center gap-3">
           <Button
             onClick={() => selected && run(selected)}
-            disabled={!selected || running}
+            disabled={!selected || running || intakePaused}
           >
             {running ? "Running…" : "Run agent"}
           </Button>
+          {intakePaused ? (
+            <span className="text-sm text-amber-700 dark:text-amber-300">
+              Intake is paused — no run can start.
+            </span>
+          ) : null}
           <span className="font-mono text-sm tabular-nums text-zinc-500">
             {usd(liveCost)}
             {done?.estimated ? " (estimated)" : ""}
@@ -238,7 +260,13 @@ export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
           {spans.map((span) => (
             <li
               key={span.seq}
-              className="grid grid-cols-[2rem_9rem_1fr_auto] items-center gap-3 rounded px-2 py-1.5 text-sm odd:bg-zinc-50 dark:odd:bg-zinc-900/50"
+              // `gap-x-3`, not `gap-3`. Until this row had a second line the
+              // two were the same thing; with the summary below the bar,
+              // `gap-3` would put 12px between every span's two lines and
+              // roughly double the height of the whole waterfall — undoing
+              // the `md:grid-cols` fix above, which exists because the trace
+              // fell below the fold on a laptop-sized split view.
+              className="grid grid-cols-[2rem_9rem_1fr_auto] items-center gap-x-3 gap-y-0.5 rounded px-2 py-1.5 text-sm odd:bg-zinc-50 dark:odd:bg-zinc-900/50"
             >
               <span className="font-mono text-xs text-zinc-400">
                 {span.seq}
@@ -263,6 +291,41 @@ export function RunConsole({ tickets }: { tickets: TicketSummary[] }) {
                   : ""}
                 {usd(span.costNanos)}
               </span>
+              {/*
+                Closed by default, and `col-span-4` because the row above is a
+                four-column grid — a fifth child without it lands in the first
+                column of an implicit new row, 2rem wide.
+
+                Native `<details>`, not a controlled panel: expanded state that
+                lives in React is state the streaming appends have to preserve,
+                and a span the viewer opened mid-run must not close itself when
+                the next one arrives. The browser already gets this right.
+
+                A guardrail that is not an error reads amber like its bar —
+                the injection scan is a control that worked, and the only
+                thing in this list that must never be mistaken for a failure.
+              */}
+              <details className="col-span-4">
+                <summary
+                  className={`cursor-pointer text-xs ${
+                    span.type === "guardrail" && !span.isError
+                      ? "text-amber-700 dark:text-amber-300"
+                      : "text-zinc-500"
+                  }`}
+                >
+                  {describeSpan(span)}
+                </summary>
+                <dl className="mt-1 grid grid-cols-[3.5rem_1fr] gap-x-2 gap-y-1 font-mono text-xs text-zinc-600 dark:text-zinc-400">
+                  <dt className="text-zinc-400">input</dt>
+                  <dd className="overflow-x-auto break-all">
+                    {compactJson(span.input)}
+                  </dd>
+                  <dt className="text-zinc-400">output</dt>
+                  <dd className="overflow-x-auto break-all">
+                    {compactJson(span.output)}
+                  </dd>
+                </dl>
+              </details>
             </li>
           ))}
           {running ? (

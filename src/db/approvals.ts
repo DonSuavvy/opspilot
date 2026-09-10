@@ -22,6 +22,7 @@ import {
   runSpans,
   tickets,
 } from "./schema";
+import { runCostUsd } from "./runs";
 
 /** The columns the resume path actually reads. */
 export interface ApprovalRow {
@@ -286,9 +287,21 @@ export async function failRun(
   db: Db,
   runId: string,
   error: string,
+  /**
+   * What the run is left charged. Omitted, `cost_usd` is untouched — which is
+   * right for a run that never reserved, and wrong for a resume that did: it
+   * would leave the estimate on the row for the rest of the day and stack
+   * another one on top of it every time the resume was retried.
+   */
+  cost?: { costNanos: number },
 ): Promise<void> {
   await db
     .update(agentRuns)
-    .set({ status: "failed", error, endedAt: new Date() })
+    .set({
+      status: "failed",
+      error,
+      endedAt: new Date(),
+      ...(cost ? { costUsd: runCostUsd(cost.costNanos) } : {}),
+    })
     .where(eq(agentRuns.id, runId));
 }

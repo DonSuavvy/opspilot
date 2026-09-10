@@ -110,7 +110,11 @@ async function run(
     messages: [{ role: "user", content: "refund please" }],
     toolContext: ctx(),
     budget: {
-      config: { dailyCapNanos: 10_000_000_000, killSwitch: false },
+      config: {
+        dailyCapNanos: 10_000_000_000,
+        killSwitch: false,
+        runsPerMinute: 10,
+      },
       spentTodayNanos: 0,
     },
     estimatedCallNanos: 1_000,

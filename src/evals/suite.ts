@@ -1,16 +1,22 @@
 /**
  * The suite runner — eight cases, one `eval_runs` row, one pin.
  *
- * **Sequential, deliberately.** The obvious optimisation here is `Promise.all`
- * over the cases, and it would break the budget guard. `spentTodayNanos` sums
- * `agent_runs.cost_usd`, and `finishRun` is that column's only writer, so a run
- * still in flight contributes nothing to the baseline every other run reads.
- * Eight concurrent cases would each see the same starting figure and each be
- * cleared to spend up to the full daily cap. Running them in order means case
- * *n* reads a baseline that already includes cases 1..n-1 — the guard works
- * because of the ordering, not despite it. (CLAUDE.md logs the cross-run
- * version of this as still open; the suite is the one caller that must not
- * make it worse.)
+ * **Sequential, deliberately** — for two reasons, and only one of them used to
+ * be true. The suite once relied on the ordering for its budget guard: case
+ * *n* read a baseline that already included cases 1..n-1 because `finishRun`
+ * had landed. That crutch is gone. `reserveRun` charges a run before it starts
+ * and under a row lock, so eight concurrent cases would now be counted
+ * correctly. The ordering stays because of the *other* reason: eight cases
+ * fired at once is roughly 25 model calls in under a minute against an account
+ * shared with a law firm's live generation, and that is precisely the burst
+ * that cost the first calibration run three cases to a Bedrock 429.
+ *
+ * **A budget refusal is a result, not a crash.** A case the guard turns away
+ * is recorded, named `budget: <reason>`, and counted as failed — and every
+ * case behind it is refused unattempted, because if the cap is reached on case
+ * two then cases three through eight cannot pass either and firing six more
+ * reservations to be told no six more times is the burst again. The suite
+ * still reports `completed`: `failed` is for a suite that broke.
  *
  * **One system prompt, compiled once.** Every case in a run must be scored
  * against the same bytes, or `prompt_version` is a lie and the diff attributes
@@ -24,7 +30,11 @@
  */
 import { cachedSystem } from "@/agent/cache";
 import { compileSop } from "@/agent/sop";
-import type { BudgetConfig } from "@/agent/budget";
+import {
+  ESTIMATED_RUN_NANOS,
+  type BudgetConfig,
+  type BudgetRefusal,
+} from "@/agent/budget";
 import type { AgentLoopResult, MessageCreator } from "@/agent/loop";
 import type { LogicalModel, Provider } from "@/agent/provider";
 import { buildRegistry } from "@/agent/registry";
@@ -38,19 +48,13 @@ import {
   upsertEvalCases,
 } from "@/db/evals";
 import { createOpsData } from "@/db/ops-data";
-import { finishRun, spentTodayNanos, startRun, writeSpan } from "@/db/runs";
+import { finishRun, reserveRun, writeSpan } from "@/db/runs";
 import { getSopVersion, loadActiveSop } from "@/db/sops";
 
 import type { EvalCase } from "./case";
 import { promptVersion } from "./pin";
 import { runCase } from "./runner";
 import type { Assertion } from "./types";
-
-/**
- * What one model call is assumed to cost, for the budget pre-flight only.
- * Same figure `/api/agent/run` uses; see the note there.
- */
-const ESTIMATED_CALL_NANOS = 20_000_000; // $0.02
 
 /**
  * Every side effect the suite has, in one injectable bag.
@@ -66,10 +70,9 @@ export interface EvalPersistence {
   createEvalRun: typeof createEvalRun;
   insertEvalResult: typeof insertEvalResult;
   finishEvalRun: typeof finishEvalRun;
-  startRun: typeof startRun;
+  reserveRun: typeof reserveRun;
   finishRun: typeof finishRun;
   writeSpan: typeof writeSpan;
-  spentTodayNanos: typeof spentTodayNanos;
   createOpsData: typeof createOpsData;
   getSopVersion: typeof getSopVersion;
   loadActiveSop: typeof loadActiveSop;
@@ -80,10 +83,9 @@ const DB_PERSISTENCE: EvalPersistence = {
   createEvalRun,
   insertEvalResult,
   finishEvalRun,
-  startRun,
+  reserveRun,
   finishRun,
   writeSpan,
-  spentTodayNanos,
   createOpsData,
   getSopVersion,
   loadActiveSop,
@@ -153,6 +155,20 @@ export interface EvalSuiteSummary {
   costNanos: number;
   promptVersion: string;
 }
+
+/**
+ * The refusals that stay true for the rest of the suite.
+ *
+ * Typed as `BudgetRefusal[]` rather than as string literals so a renamed or
+ * mistyped member is a compile error rather than a case quietly re-attempted
+ * against an exhausted cap. `rate_limited` is absent on purpose — see
+ * `budgetRefusal` in `runEvalSuite`.
+ */
+const STICKY_REFUSALS: readonly BudgetRefusal[] = [
+  "kill_switch",
+  "daily_cap_reached",
+  "run_would_exceed_cap",
+];
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -264,10 +280,32 @@ export async function runEvalSuite(
   let failed = 0;
   let costNanos = 0;
   let threw = false;
+  /**
+   * Sticky, but only for the refusals that stay true.
+   *
+   * Once the day's money is gone every remaining case is refused without a
+   * reservation of its own — the cap does not un-reach itself, and re-asking
+   * eight times is the burst the guard exists to prevent. `rate_limited` is
+   * deliberately *not* in that set: it is a wait rather than a limit, it
+   * clears inside sixty seconds, and the golden suite is eight sequential
+   * runs against a default of ten a minute, so it is the refusal most likely
+   * to land mid-suite. Made sticky it turned one throttled case into six red
+   * ones that were never attempted.
+   *
+   * Kept separate from `threw` on purpose: neither turns the suite's status
+   * to `failed`.
+   */
+  let budgetRefusal: BudgetRefusal | null = null;
+
+  const rateVerified = rates.verifiedOn !== null;
 
   for (const c of enabled) {
+    /** This case's refusal, sticky or not. `budgetRefusal` only holds the
+     * sticky ones, so a rate-limited case still needs somewhere to say why. */
+    let caseRefusal: BudgetRefusal | null = budgetRefusal;
     const startedAt = new Date();
     let agentRunId: string | null = null;
+    let priorNanos = 0;
     // Whether the `agent_runs` row is already closed. The catch below has to
     // tell a run that never finished from one that finished fine and then hit
     // a bookkeeping failure — re-finishing the second as failed would replace
@@ -275,78 +313,139 @@ export async function runEvalSuite(
     let runFinished = false;
 
     try {
-      agentRunId = await persist.startRun(db, {
-        workspaceId,
-        // An eval case is not a ticket. `eval_results.eval_case_id` is what
-        // points back at what was run.
-        ticketId: null,
-        model,
-        sopVersionId: sop.versionId,
-      });
+      if (budgetRefusal === null) {
+        // Charged before a token is bought, and under a lock, so a case is
+        // visible to every concurrent run from the moment it starts rather
+        // than from the moment it finishes.
+        const reservation = await persist.reserveRun(db, {
+          workspaceId,
+          // An eval case is not a ticket. `eval_results.eval_case_id` is what
+          // points back at what was run.
+          ticketId: null,
+          model,
+          sopVersionId: sop.versionId,
+          // The frozen instant decides; the wall clock stamps the row. Eight
+          // cases sharing one `started_at` made the rate limit and Mission
+          // Control read a burst that never happened.
+          now,
+          startedAt,
+          config: input.budgetConfig,
+          estimatedRunNanos: ESTIMATED_RUN_NANOS,
+          rateVerified,
+        });
 
-      // Re-read per case rather than once before the loop: the previous case's
-      // `finishRun` has landed by now, so this baseline includes it. That is
-      // the whole reason the suite is sequential.
-      const baseline = await persist.spentTodayNanos(db, workspaceId, now);
+        if (reservation.ok) {
+          agentRunId = reservation.runId;
+          priorNanos = reservation.priorNanos;
 
-      const run = await runCase(c, {
-        registry,
-        createMessage: input.createMessage,
-        model: wireModel,
-        rates,
-        system,
-        policyConfig: sop.policyConfig,
-        data: persist.createOpsData(db, { workspaceId, runId: agentRunId }),
-        workspaceId,
-        runId: agentRunId,
-        now,
-        budget: { config: input.budgetConfig, spentTodayNanos: baseline },
-        estimatedCallNanos: ESTIMATED_CALL_NANOS,
-        clock: () => new Date(),
-        emit: async (span) => {
-          await persist.writeSpan(
-            db,
-            spanToRow({ workspaceId, runId: agentRunId! }, span),
-          );
-        },
-      });
+          const run = await runCase(c, {
+            registry,
+            createMessage: input.createMessage,
+            model: wireModel,
+            rates,
+            system,
+            policyConfig: sop.policyConfig,
+            data: persist.createOpsData(db, { workspaceId, runId: agentRunId }),
+            workspaceId,
+            runId: agentRunId,
+            now,
+            budget: {
+              config: input.budgetConfig,
+              spentTodayNanos: reservation.baselineNanos,
+            },
+            estimatedCallNanos: ESTIMATED_RUN_NANOS,
+            clock: () => new Date(),
+            emit: async (span) => {
+              await persist.writeSpan(
+                db,
+                spanToRow({ workspaceId, runId: agentRunId! }, span),
+              );
+            },
+          });
 
-      const endedAt = new Date();
-      await persist.finishRun(db, agentRunId, run.result, endedAt);
-      runFinished = true;
+          const endedAt = new Date();
+          await persist.finishRun(db, agentRunId, run.result, endedAt, {
+            priorNanos,
+          });
+          runFinished = true;
 
-      // Charged as soon as it is known, so the next case's baseline sees it
-      // even if the bookkeeping below throws. The counters are not: they move
-      // only once the case is recorded and announced, or the catch would count
-      // it a second time.
-      costNanos += run.result.costNanos;
+          // Charged as soon as it is known, so the next case's baseline sees
+          // it even if the bookkeeping below throws. The counters are not:
+          // they move only once the case is recorded and announced, or the
+          // catch would count it a second time.
+          costNanos += run.result.costNanos;
 
-      const latencyMs = endedAt.getTime() - startedAt.getTime();
-      const caseCost = toUsd(run.result.costNanos);
+          const latencyMs = endedAt.getTime() - startedAt.getTime();
+          const caseCost = toUsd(run.result.costNanos);
+
+          /**
+           * A case can go red for two very different reasons, and the
+           * scorecard has to say which. The scorer only ever sees the
+           * *outcome*, so a run the provider throttled to death reads exactly
+           * like a run the agent botched — the first calibration run reported
+           * three cases as `expected status "completed", got "failed"` when
+           * the real cause was a Bedrock 429 sitting in `agent_runs.error`.
+           * Naming it here keeps the scorer pure and the scorecard honest.
+           */
+          const failureReason =
+            run.score.failureReason !== null && run.result.error
+              ? `${run.score.failureReason} — the run did not finish: ${run.result.error}`
+              : run.score.failureReason;
+
+          await persist.insertEvalResult(db, {
+            workspaceId,
+            evalRunId,
+            evalCaseId: caseIds.get(c.slug)!,
+            agentRunId,
+            passed: run.score.passed,
+            assertions: run.score.assertions,
+            failureReason,
+            costNanos: run.result.costNanos,
+            latencyMs,
+          });
+
+          await emit({
+            type: "case",
+            slug: c.slug,
+            title: c.title,
+            passed: run.score.passed,
+            failureReason,
+            assertions: run.score.assertions,
+            costUsd: caseCost,
+            latencyMs,
+            agentRunId,
+          });
+
+          if (run.score.passed) passed += 1;
+          else failed += 1;
+
+          continue;
+        }
+
+        caseRefusal = reservation.reason;
+        if (STICKY_REFUSALS.includes(reservation.reason)) {
+          budgetRefusal = reservation.reason;
+        }
+      }
 
       /**
-       * A case can go red for two very different reasons, and the scorecard
-       * has to say which. The scorer only ever sees the *outcome*, so a run
-       * the provider throttled to death reads exactly like a run the agent
-       * botched — the first calibration run reported three cases as
-       * `expected status "completed", got "failed"` when the real cause was
-       * a Bedrock 429 sitting in `agent_runs.error`. Naming it here keeps the
-       * scorer pure and the scorecard honest.
+       * Refused. No row was opened and no model was called, so there is
+       * nothing to finish — only a result to record, named so the scorecard
+       * says *why* it is red rather than reporting a mysterious failure.
        */
-      const failureReason =
-        run.score.failureReason !== null && run.result.error
-          ? `${run.score.failureReason} — the run did not finish: ${run.result.error}`
-          : run.score.failureReason;
+      failed += 1;
+      const failureReason = `budget: ${caseRefusal}`;
+      const latencyMs = Date.now() - startedAt.getTime();
 
       await persist.insertEvalResult(db, {
         workspaceId,
         evalRunId,
         evalCaseId: caseIds.get(c.slug)!,
-        agentRunId,
-        passed: run.score.passed,
-        assertions: run.score.assertions,
+        agentRunId: null,
+        passed: false,
+        assertions: [],
         failureReason,
-        costNanos: run.result.costNanos,
+        costNanos: 0,
         latencyMs,
       });
 
@@ -354,16 +453,13 @@ export async function runEvalSuite(
         type: "case",
         slug: c.slug,
         title: c.title,
-        passed: run.score.passed,
+        passed: false,
         failureReason,
-        assertions: run.score.assertions,
-        costUsd: caseCost,
+        assertions: [],
+        costUsd: "0.000000",
         latencyMs,
-        agentRunId,
+        agentRunId: null,
       });
-
-      if (run.score.passed) passed += 1;
-      else failed += 1;
     } catch (error) {
       /**
        * A case that throws is a failed case, not a failed suite. The other
@@ -379,17 +475,18 @@ export async function runEvalSuite(
       const latencyMs = Date.now() - startedAt.getTime();
 
       /**
-       * Close the row the case opened. A `running` row with a null cost is
-       * invisible to `spentTodayNanos`, so leaving one here would hand every
-       * later case a baseline that under-reports the day's spend — the one
-       * thing the sequential ordering above exists to prevent.
+       * Close the row the case opened. A `running` row still holds its
+       * reservation, so leaving one here would keep the day's headroom
+       * consumed by a run that is not running.
        *
        * Swallowed on purpose: this is recovery, and a failure to record the
        * failure must not replace the error that caused it.
        */
       if (agentRunId !== null && !runFinished) {
         await persist
-          .finishRun(db, agentRunId, threwResult(failureReason), new Date())
+          .finishRun(db, agentRunId, threwResult(failureReason), new Date(), {
+            priorNanos,
+          })
           .catch(() => {});
       }
 

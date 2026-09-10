@@ -169,7 +169,13 @@ function testRegistry(
 }
 
 function budget(over: Partial<BudgetConfig> = {}): BudgetConfig {
-  return { dailyCapNanos: 5_000_000_000, killSwitch: false, ...over }; // $5
+  // $5 a day, ten runs a minute.
+  return {
+    dailyCapNanos: 5_000_000_000,
+    killSwitch: false,
+    runsPerMinute: 10,
+    ...over,
+  };
 }
 
 /** A monotonic fake clock, so latency and timestamps are assertable. */

@@ -59,6 +59,7 @@ npm run db:studio
 npm run verify:boot    # proves boot validation rejects a bad tool definition
 npm run verify:seed    # proves the seeded DB supports the demo arc (needs DB)
 npm run verify:evals   # proves an eval run is pinned, totalled, and harmless (needs DB)
+npm run verify:budget  # proves the spend guard holds under concurrency (needs DB)
 ```
 
 ## Conventions
@@ -169,17 +170,57 @@ Each of these cost real time. Don't rediscover them.
   `UNVERIFIED_RATE_SAFETY_FACTOR`. Fix by reading covara's line items in Cost
   Explorer, then set real rates *and* a `verifiedOn` date — a test fails if you
   set one without the other.
-- **OPEN — the spend guard is per-run, not per-account.** `spentTodayNanos()`
-  sums `agent_runs.cost_usd`, and `finishRun` is that column's only writer, so
-  a run *in flight* contributes zero to the baseline every other run reads.
-  Two concurrent `POST /api/agent/run` calls therefore each see the same
-  starting figure and each may spend up to the full daily cap; ten concurrent
-  calls, ten times the cap. The in-run accrual added on Day 2 fixes the
-  sequential case *inside* one run and does nothing across runs. Confirmed by
-  inspection, not yet by a concurrent test. This is exactly the "stranger
-  clicking the scenario injector" case `budget.ts` was written for, and it
-  becomes reachable on Day 8 when sandboxes go public — fix before then, by
-  charging spend as it accrues or taking a row lock, not by patching the read.
+- **CLOSED — the spend guard was per-run, not per-account. Now it reserves.**
+  `spentTodayNanos()` sums `agent_runs.cost_usd` and `finishRun` was that
+  column's only writer, so a run *in flight* contributed exactly zero to the
+  baseline every other run read. No amount of care in the SELECT could have
+  fixed it: the number it wanted did not exist yet. The mechanism is
+  **reserve, accrue, replace**. `reserveRun` takes `select ... for update` on
+  the workspace row, sums the day, counts starts in the last 60 seconds, and on
+  allow inserts the `agent_runs` row with `cost_usd` *already set to the
+  estimate* — so a concurrent reservation queues behind the lock and sees it.
+  `accrueRunCost` raises the row after every `llm_call` span; `finishRun`
+  replaces the reservation with the actual. The lock is on `workspaces`, not
+  `agent_runs`, because the thing being serialised is the decision and there is
+  no row to lock for a run that does not exist yet — so one sandbox's burst
+  never blocks another's. **What the concurrent test proved**
+  (`npm run verify:budget`, 21 checks): five `reserveRun` calls through
+  `Promise.all` against a cap that fits two let exactly two through and land
+  the day's spend on the cap exactly. Delete the `for update` and the same
+  script reports 5 allowed, 5 rows, $0.10 against a $0.04 cap. **Two things
+  found on the way.** `finishRun` wrote `result.costNanos` flat, which on a
+  *resumed* run is only the second invocation's accrual — the first half's cost
+  was overwritten and lost, from the run's row and from every later spend read;
+  it now writes `prior + actual`. And the incremental accrual SQL that suggests
+  itself, `cost_usd = cost_usd - reservation + greatest(reservation, accrued)`,
+  is correct exactly once: the second time accrued exceeds the reservation it
+  adds the excess to a row that already holds it ($0.025 then $0.030 leaves
+  $0.035), and `finishRun` compounds it. `accrueRunCost` is absolute instead,
+  `prior + max(reservation, accrued)`, which is idempotent however often it
+  runs — safe because there is exactly one writer per run row. Only a
+  *two*-accrual sequence tells the two forms apart, so `verify:budget` runs one.
+  A run whose process dies between reserving and finishing holds its
+  reservation until midnight: the cap under-spends rather than over-spends,
+  which is the direction to be wrong in. **One further hole, found and closed
+  the same way**: the day was keyed on `started_at`, so a run paused at 23:50
+  and resumed at 00:10 charged its second half to yesterday and today's sum
+  never saw the money — `agent_runs.charged_at` now moves with every write of
+  `cost_usd` and `spentTodayNanos` reads it, while run *counts* (the rate
+  limit, "runs today") stay on `started_at`, which is what they actually ask.
+- **A burst is a second axis, and it is not about money.** Ten runs at two
+  cents each are eight cents inside a five-dollar cap and still enough to trip
+  Bedrock's 429 on an account shared with Causa's live generation. So
+  `OPSPILOT_RUNS_PER_MINUTE` (default 10) is checked per workspace from
+  `agent_runs.started_at` — from rows, because a serverless deployment has no
+  memory to count in — and refused with 429 plus `Retry-After: 60`, against 402
+  for the money reasons. `decideReservation` asks the money questions **first**,
+  so an exhausted cap is never reported as "come back in a minute", and the
+  kill switch keeps outranking everything without being special-cased. **Mind
+  the eval suite**: the golden suite is eight sequential runs, so the default
+  of 10 leaves a margin of two. Lower `OPSPILOT_RUNS_PER_MINUTE`, or run the
+  suite twice inside a minute, and the trailing cases come back
+  `budget: rate_limited` — a red scorecard that says nothing about the agent.
+  `verify:evals` runs two cases and cannot see this.
 - **CLOSED, and the original claim was wrong — constraint stripping stays.**
   This was logged as "stripping is now gratuitous once `strict` is off, and the
   model is told `amount_cents` is a bare `number`". Measuring it before acting
@@ -257,6 +298,7 @@ IDs and API shapes changed in 2025–26; do not code from memory.
 
 ```
 docs/PLAN.md            authoritative build plan
+docs/SECURITY.md        the threat model, and which file each control lives in
 src/policy/             pure policy engine (refund limits, escalation)
 src/agent/registry.ts   tool registry: Zod -> strict JSON Schema, boot validation
 src/agent/tools.ts      the 9 tools — 8 handlers live; update_subscription is a
@@ -265,9 +307,12 @@ src/agent/loop.ts       the hand-rolled tool loop (MessageCreator seam)
 src/agent/data.ts       OpsData — the workspace-bound seam handlers run against
 src/agent/trace.ts      span -> run_spans row, and SSE framing
 src/agent/streaming.ts  the production MessageCreator (stream -> finalMessage)
+src/agent/injection.ts  the deterministic pre-scan — five signals, no model
+src/agent/guardrails.ts prepareTicketRun — a flagged run loses confirm-write
 src/db/schema.ts        Drizzle schema (15 tables)
 src/db/client.ts        lazy getDb()
 src/db/ops-data.ts      Drizzle OpsData, scoped to one workspace
+src/db/ops.ts           Mission Control's read side — budgetGauge, opsSnapshot
 src/db/runs.ts          run + span persistence, today's spend
 src/db/seed.ts          deterministic Beacon Analytics seed
 src/db/evals.ts         eval run/result persistence, and the list + detail reads
@@ -281,16 +326,19 @@ src/evals/suite.ts      the whole suite, sequentially, into one pinned eval_runs
 src/lib/agent-stream.ts   SSE trace reader, shared by both islands that start a run
 src/lib/approval-copy.ts  describeApproval — the sentence a reviewer decides on
 src/lib/eval-labels.ts    sopLabel, shortSha, compactJson — total over every null
+src/lib/span-copy.ts      describeSpan — one line saying what a span carried
 src/components/approval-decision.tsx  approve or deny one paused run, in place
 src/components/approval-queue.tsx     the pending rows, each decided on its own
 src/components/eval-lab.tsx           the streaming scorecard and the run history
 src/app/api/agent/run/  POST a ticket id, stream the trace back as SSE
 src/app/api/evals/run/  POST to run the golden suite, streamed as a scorecard
+src/app/api/health/     liveness and budget state, leaking no environment
 src/app/approvals/      the queue page, server-rendered from listPendingApprovals
 src/app/evals/          run the suite, and the history with a diff link per row
 src/app/evals/[id]/     one run: the pin, then every assertion it made
 src/app/evals/diff/     ?base=&head= — regressed, fixed, added, removed, unchanged
-scripts/verify-*.ts     gate evidence that needs a database
+src/app/ops/            Mission Control — spend, guardrails, approvals, evals
+scripts/verify-*.ts     gate evidence — boot, seed, evals, and budget under load
 scripts/probe-grammar.ts  which tool set blows the strict grammar cap
 ```
 
