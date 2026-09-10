@@ -26,7 +26,8 @@
     "verify:budget": "tsx scripts/verify-budget.ts",
     "verify:resume": "tsx scripts/verify-resume.ts",
     "verify:refund": "tsx scripts/verify-refund.ts",
-    "verify:evals": "tsx scripts/verify-evals.ts"
+    "verify:evals": "tsx scripts/verify-evals.ts",
+    "verify:sandbox": "tsx scripts/verify-sandbox.ts"
   },
   "dependencies": {
     "@anthropic-ai/bedrock-sdk": "^0.32.1",
