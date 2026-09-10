@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  displaySlug,
   isSandboxSlug,
   newSandboxSlug,
   resolveSandbox,
@@ -125,5 +126,39 @@ describe("sandboxExpiry", () => {
     const now = new Date("2026-09-10T03:00:00.000Z");
     sandboxExpiry(now);
     expect(now.toISOString()).toBe("2026-09-10T03:00:00.000Z");
+  });
+});
+
+describe("displaySlug", () => {
+  // The slug is the whole of the capability. Anyone who reads one off an
+  // unauthenticated page can set it as a cookie and act as that visitor, so
+  // no full slug may reach a response body — including Mission Control's,
+  // which is the operator's global view and is not behind a login.
+  const slug = `sb_${"0123456789abcdef".repeat(2)}`;
+
+  it("keeps the durable tenant readable", () => {
+    expect(displaySlug("demo")).toBe("demo");
+  });
+
+  it("shows a sandbox as its prefix, a mask and four hex characters", () => {
+    expect(displaySlug(slug)).toBe("sb_…cdef");
+  });
+
+  it("never emits a value a cookie would be accepted from", () => {
+    expect(isSandboxSlug(displaySlug(slug))).toBe(false);
+    expect(displaySlug(slug)).not.toMatch(/[0-9a-f]{32}/);
+  });
+
+  it("tells two sandboxes apart when their tails differ", () => {
+    expect(displaySlug(`sb_${"a".repeat(28)}1234`)).not.toBe(
+      displaySlug(`sb_${"a".repeat(28)}5678`),
+    );
+  });
+
+  it("leaves anything that is not a sandbox slug alone", () => {
+    // Total over its argument, because it sits between a database column and
+    // a response body and a throw there would be a 500 on an operator page.
+    expect(displaySlug("")).toBe("");
+    expect(displaySlug("beacon-analytics")).toBe("beacon-analytics");
   });
 });
