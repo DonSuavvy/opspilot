@@ -4,6 +4,7 @@ import {
   isSandboxSlug,
   newSandboxSlug,
   resolveSandbox,
+  sandboxExpiry,
   SANDBOX_COOKIE,
   SANDBOX_COOKIE_MAX_AGE_S,
   SANDBOX_HEADER,
@@ -102,5 +103,27 @@ describe("resolveSandbox", () => {
     const result = resolveSandbox({ cookie: "demo", random: () => bytes(9) });
     expect(result.fresh).toBe(true);
     expect(result.slug).not.toBe("demo");
+  });
+});
+
+describe("sandboxExpiry", () => {
+  // Literal instants rather than arithmetic over SANDBOX_TTL_MS. Recomputing
+  // the answer the way the code computes it would pass however wrong both are.
+  it("expires 24 hours after the seed instant", () => {
+    expect(sandboxExpiry(new Date("2026-09-10T03:00:00.000Z")).toISOString()).toBe(
+      "2026-09-11T03:00:00.000Z",
+    );
+  });
+
+  it("carries the offset across a month boundary", () => {
+    expect(sandboxExpiry(new Date("2026-09-30T23:30:00.000Z")).toISOString()).toBe(
+      "2026-10-01T23:30:00.000Z",
+    );
+  });
+
+  it("leaves the instant it was handed alone", () => {
+    const now = new Date("2026-09-10T03:00:00.000Z");
+    sandboxExpiry(now);
+    expect(now.toISOString()).toBe("2026-09-10T03:00:00.000Z");
   });
 });
