@@ -103,6 +103,10 @@ async function loadSnapshot(): Promise<{
   config: BudgetConfig;
 } | null> {
   const db = getDb();
+
+  // Not a scope any more, just a seeded check: every figure below spans every
+  // workspace. An empty `workspaces` table means an unseeded database, and
+  // "run the seed" is a better answer than a page of zeroes.
   const [ws] = await db.select({ id: workspaces.id }).from(workspaces).limit(1);
   if (!ws) return null;
 
@@ -111,7 +115,7 @@ async function loadSnapshot(): Promise<{
   // transitively reaches it.
   const config = budgetConfigSchema.parse(process.env);
   return {
-    snapshot: await opsSnapshot(db, ws.id, new Date(), config),
+    snapshot: await opsSnapshot(db, new Date(), config),
     config,
   };
 }
@@ -188,15 +192,98 @@ function LimitsCard({ snapshot }: { snapshot: OpsSnapshot }) {
         </div>
         <dl className="grid grid-cols-3 gap-4">
           <Stat
-            label="Runs per minute"
-            value={String(snapshot.runsPerMinute)}
+            label="Started last minute"
+            value={`${snapshot.runsInLastMinute} / ${snapshot.globalRunsPerMinute}`}
           />
           <Stat
-            label="Started last minute"
-            value={`${snapshot.runsInLastMinute} / ${snapshot.runsPerMinute}`}
+            label="Per sandbox"
+            value={`${snapshot.runsPerMinute} / min`}
           />
           <Stat label="In flight" value={String(snapshot.inFlight)} />
         </dl>
+        {/*
+          Two ceilings, and the difference between them is the thing an
+          operator has to be able to see. The count on the left is every
+          sandbox at once, which is what the shared Bedrock account actually
+          feels; the one beside it bounds any single visitor.
+        */}
+        <p className="text-xs leading-5 text-zinc-500">
+          Both are counted from rows, not from process memory, so they hold
+          across serverless invocations. Every figure on this page spans every
+          sandbox.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+/** `sb_` is a per-visitor sandbox; `demo` is the durable workspace. */
+function WorkspaceBadge({ slug }: { slug: string }) {
+  const sandbox = slug.startsWith("sb_");
+  return (
+    <span
+      className={`rounded px-1.5 py-0.5 font-mono text-xs ${
+        sandbox
+          ? "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+          : "bg-sky-100 text-sky-900 dark:bg-sky-950 dark:text-sky-200"
+      }`}
+    >
+      {slug}
+    </span>
+  );
+}
+
+function RecentRunsCard({ snapshot }: { snapshot: OpsSnapshot }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Recent runs</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {snapshot.recentRuns.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs text-zinc-500">
+                  <th className="pb-2 font-normal">Started</th>
+                  <th className="pb-2 font-normal">Sandbox</th>
+                  <th className="pb-2 font-normal">Status</th>
+                  <th className="pb-2 font-normal">Model</th>
+                  <th className="pb-2 text-right font-normal">Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {snapshot.recentRuns.map((row) => (
+                  <tr
+                    key={row.id}
+                    className="border-t border-zinc-100 dark:border-zinc-800"
+                  >
+                    <td className="whitespace-nowrap py-1.5 pr-4 font-mono text-xs text-zinc-500">
+                      {formatAt(row.startedAt)}
+                    </td>
+                    <td className="py-1.5 pr-4">
+                      <WorkspaceBadge slug={row.workspaceSlug} />
+                    </td>
+                    <td className="py-1.5 pr-4 text-zinc-600 dark:text-zinc-300">
+                      {row.status.replaceAll("_", " ")}
+                    </td>
+                    <td className="py-1.5 pr-4 font-mono text-xs">
+                      {row.model}
+                    </td>
+                    <td className="py-1.5 text-right font-mono text-xs tabular-nums">
+                      ${Number(row.costUsd ?? 0).toFixed(4)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="text-sm text-zinc-500">
+            No runs yet. Every sandbox appears here, so this is also how you see
+            whether a burst is one visitor or twenty.
+          </p>
+        )}
       </CardContent>
     </Card>
   );
@@ -370,8 +457,9 @@ export default async function OpsPage() {
         </div>
         <p className="mt-1 max-w-2xl text-sm text-zinc-500">
           What the agent is allowed to spend, how fast it may start runs, and
-          every gate that has refused a tool call. Read only — nothing on this
-          page changes what it reports.
+          every gate that has refused a tool call. Figures span every sandbox,
+          because the budget and the shared account do. Read only — nothing on
+          this page changes what it reports.
         </p>
       </header>
 
@@ -403,6 +491,7 @@ export default async function OpsPage() {
             <RunsCard snapshot={loaded.snapshot} />
             <QueuesCard snapshot={loaded.snapshot} />
           </div>
+          <RecentRunsCard snapshot={loaded.snapshot} />
           <GuardrailsCard snapshot={loaded.snapshot} />
         </div>
       ) : null}

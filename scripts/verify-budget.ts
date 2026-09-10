@@ -10,9 +10,9 @@
  *
  * 1. **The lock.** Five reservations fired at the same instant against a cap
  *    that fits two. The old code let all five through, because each read a
- *    baseline that none of the others had written to yet. `select ... for
- *    update` on the workspace row is what makes reservation *n* see the
- *    n-1 before it.
+ *    baseline that none of the others had written to yet.
+ *    `pg_advisory_xact_lock` on one fixed key is what makes reservation *n*
+ *    see the n-1 before it.
  * 2. **The rate limit**, counted from rows rather than from memory — a
  *    serverless deployment has no memory to count in.
  * 3. **The accrual arithmetic**, which is where the design sketch for this
@@ -21,18 +21,26 @@
  *    second one, and only a sequence of three writes shows it.
  * 4. **The resume round-trip**, where a run's cost is written by two separate
  *    invocations and the first half used to be silently overwritten.
+ * 5. **That the cap is one figure, not one per tenant.** Checks 8 to 10 need
+ *    a second workspace, because a per-workspace lock and a per-workspace sum
+ *    satisfy checks 1 to 7 perfectly. Per-visitor sandboxes mint a workspace
+ *    per browser cookie, so the scoped version handed every stranger a fresh
+ *    daily cap. Check 10 is the control: the same race with the workspace row
+ *    lock back in place, which over-admits.
  *
- * Everything runs against a **throwaway workspace**, created here and deleted
- * in a `finally`. The demo workspace's spend today is what Mission Control
- * shows and what the daily cap actually governs; a gate script that moved it
- * would be corrupting the thing it verifies. Rows are cleared between checks
- * too, so each starts from a known baseline of zero.
+ * Everything runs against **two throwaway workspaces**, created here and
+ * deleted in a `finally`. The demo workspace's spend today is what Mission
+ * Control shows and what the daily cap actually governs; a gate script that
+ * moved it would be corrupting the thing it verifies. Rows are cleared
+ * between checks too, so each starts from a known baseline of zero — which
+ * now matters more, since the sum no longer filters by workspace and a
+ * leftover row from check 3 would be spend check 8 could see.
  */
 import { config } from "dotenv";
 
 config({ path: ".env.local" });
 
-import { and, eq, gte, inArray, sql } from "drizzle-orm";
+import { eq, gte, inArray, sql } from "drizzle-orm";
 
 import type { BudgetConfig } from "../src/agent/budget";
 import { decideReservation, ESTIMATED_RUN_NANOS } from "../src/agent/budget";
@@ -137,7 +145,6 @@ async function main() {
     ])
     .returning({ id: workspaces.id, slug: workspaces.slug });
 
-  const ws = wsA;
   const workspaceId = wsA!.id;
   const otherWorkspaceId = wsB!.id;
   const bothWorkspaces = [workspaceId, otherWorkspaceId];
@@ -263,7 +270,7 @@ async function main() {
     );
     check(
       "the cap holds exactly, not approximately",
-      await spentTodayNanos(db, workspaceId, now),
+      await spentTodayNanos(db, now),
       2 * ESTIMATED_RUN_NANOS,
     );
     check(
@@ -332,7 +339,7 @@ async function main() {
 
     check(
       "the reservation is spend the moment it is taken",
-      await spentTodayNanos(db, workspaceId, accrueNow),
+      await spentTodayNanos(db, accrueNow),
       ESTIMATED_RUN_NANOS,
     );
 
@@ -347,7 +354,7 @@ async function main() {
     });
     check(
       "an accrual below it does not release headroom",
-      await spentTodayNanos(db, workspaceId, accrueNow),
+      await spentTodayNanos(db, accrueNow),
       ESTIMATED_RUN_NANOS,
     );
 
@@ -359,7 +366,7 @@ async function main() {
     });
     check(
       "an accrual above it charges the excess",
-      await spentTodayNanos(db, workspaceId, accrueNow),
+      await spentTodayNanos(db, accrueNow),
       25_000_000,
     );
 
@@ -519,12 +526,12 @@ async function main() {
 
     check(
       "yesterday's half is yesterday's spend",
-      await spentTodayNanos(db, workspaceId, lastNight),
+      await spentTodayNanos(db, lastNight),
       10_000_000,
     );
     check(
       "and today's sum, before the resume, does not see it",
-      await spentTodayNanos(db, workspaceId, afterMidnight),
+      await spentTodayNanos(db, afterMidnight),
       0,
     );
 
@@ -542,7 +549,7 @@ async function main() {
 
     check(
       "the reservation the resume takes is today's money",
-      await spentTodayNanos(db, workspaceId, afterMidnight),
+      await spentTodayNanos(db, afterMidnight),
       10_000_000 + ESTIMATED_RUN_NANOS,
     );
 
@@ -556,7 +563,7 @@ async function main() {
 
     check(
       "and today's sum carries the whole row once it finishes",
-      await spentTodayNanos(db, workspaceId, afterMidnight),
+      await spentTodayNanos(db, afterMidnight),
       15_000_000,
     );
     /**
@@ -750,33 +757,68 @@ async function main() {
      * Check 8 with one variable changed, so the lock is shown to be
      * load-bearing rather than asserted to be.
      *
-     * Everything here is the fixed code's arithmetic: the same global sum, the
-     * same decision, the same insert. The only difference is which lock is
-     * taken. `select ... for update` on a workspace row serialises that
-     * workspace and nothing else, so five reservations across two workspaces
-     * read a baseline none of the others has written to yet and the cap goes
-     * out the window exactly as it did before Day 8.
+     * Everything here is the fixed code's arithmetic: the same global sum of
+     * today's spend, the same `decideReservation`, the same insert of the
+     * estimate. The only difference is which lock is taken.
+     *
+     * **The cap fits one, not two, and the reason is worth stating.** A
+     * workspace row lock still serialises each workspace's own reservations,
+     * so with two workspaces exactly two reservations ever race: the first
+     * from each. Two racers cannot over-admit against a cap that fits two, and
+     * a control that quietly passed would have proved nothing. A cap of one is
+     * the smallest one that can tell the two locks apart here, and the same
+     * arithmetic says a deployment with ten sandboxes has ten racers.
+     *
+     * Both halves run against the same cap so the numbers are comparable.
      */
     const controlNow = new Date();
+    const fits1: BudgetConfig = budget({ dailyCapNanos: ESTIMATED_RUN_NANOS });
+    const fiveAcross = [
+      workspaceId,
+      workspaceId,
+      workspaceId,
+      otherWorkspaceId,
+      otherWorkspaceId,
+    ];
+
+    const withLock = await Promise.all(
+      fiveAcross.map((id) =>
+        reserveRun(db, {
+          workspaceId: id,
+          ticketId: null,
+          model: "haiku",
+          now: controlNow,
+          config: fits1,
+          estimatedRunNanos: ESTIMATED_RUN_NANOS,
+          rateVerified: true,
+        }),
+      ),
+    );
+
+    check(
+      "with the global lock, one got through",
+      withLock.filter((r) => r.ok).length,
+      1,
+    );
+
+    await clear();
+
     const controlAdmitted = (
       await Promise.all(
-        [
-          workspaceId,
-          workspaceId,
-          workspaceId,
-          otherWorkspaceId,
-          otherWorkspaceId,
-        ].map((id) => reserveWithoutGlobalLock(id, controlNow, globalFits2)),
+        fiveAcross.map((id) =>
+          reserveWithoutGlobalLock(id, controlNow, fits1),
+        ),
       )
     ).filter(Boolean).length;
+    const controlSpend = await spentTodayNanos(db, controlNow);
 
     console.log(
-      `  (the control admitted ${controlAdmitted} against a cap that fits 2)`,
+      `  (the control admitted ${controlAdmitted} and spent ${usd(controlSpend)} against a cap of ${usd(ESTIMATED_RUN_NANOS)})`,
     );
-    check("more than two got through", controlAdmitted > 2, true);
+    check("without it, more than one did", controlAdmitted > 1, true);
     check(
       "and the day's spend is over the cap",
-      (await spentTodayNanos(db, controlNow)) > 2 * ESTIMATED_RUN_NANOS,
+      controlSpend > ESTIMATED_RUN_NANOS,
       true,
     );
 

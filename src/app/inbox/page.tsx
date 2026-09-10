@@ -110,13 +110,17 @@ interface BudgetView {
   capNanos: number;
 }
 
-async function loadBudgetView(workspaceId: string): Promise<BudgetView | null> {
+async function loadBudgetView(): Promise<BudgetView | null> {
   try {
     const parsed = budgetConfigSchema.safeParse(process.env);
     if (!parsed.success) return null;
 
     const db = getDb();
-    const spentNanos = await spentTodayNanos(db, workspaceId, new Date());
+    // Every workspace, matching the gate. A banner that read this sandbox's
+    // own spend while `reserveRun` enforced the demo's would draw a live
+    // button over an exhausted cap, which is the exact failure the comment
+    // above this function rejects.
+    const spentNanos = await spentTodayNanos(db, new Date());
     const capNanos = parsed.data.dailyCapNanos;
 
     return {
@@ -149,7 +153,7 @@ export default async function Home() {
     [ticketList, pendingApprovals, budget] = await Promise.all([
       loadTickets(sandbox.workspaceId),
       countPendingApprovals(sandbox.workspaceId),
-      loadBudgetView(sandbox.workspaceId),
+      loadBudgetView(),
     ]);
   } catch (error) {
     // A missing sandbox header means the proxy did not run for this route.
