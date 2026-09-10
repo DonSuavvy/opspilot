@@ -399,4 +399,27 @@ describe("budgetConfigSchema", () => {
   ])("refuses a %s daily cap rather than defaulting to unlimited", (_l, env) => {
     expect(() => budgetConfigSchema.parse(env)).toThrow();
   });
+
+  /**
+   * The refusal must not quote what it read.
+   *
+   * `/api/agent/run` returns `error.message` in a 500 body, so a message that
+   * echoes the environment value publishes it — and the operator who has to
+   * fix it is looking at their own `.env` anyway. Saying what the variable
+   * must be is the whole job.
+   */
+  it("does not echo the rejected value back into the message", () => {
+    const secret = "not-a-number-9f3c1a";
+
+    expect(() =>
+      budgetConfigSchema.parse({ OPSPILOT_DAILY_BUDGET_USD: secret }),
+    ).toThrow(/OPSPILOT_DAILY_BUDGET_USD must be a positive number/);
+
+    try {
+      budgetConfigSchema.parse({ OPSPILOT_DAILY_BUDGET_USD: secret });
+      expect.unreachable("a non-numeric cap must not parse");
+    } catch (error) {
+      expect((error as Error).message).not.toContain(secret);
+    }
+  });
 });
