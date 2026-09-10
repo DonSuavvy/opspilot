@@ -156,6 +156,33 @@ export async function POST(request: Request) {
     );
   }
 
+  /**
+   * Read here, before anything is decided or reserved, because the answer can
+   * refuse the request.
+   *
+   * A resumed run must not regain a tool the first invocation lacked, and the
+   * narrowing is not carried in `serialized_messages` — that is the
+   * conversation, not the tool block — so it has to be re-derived from the
+   * ticket. Without the row there is nothing to re-derive from, and the
+   * fallback used to be the full registry: a security control defaulting
+   * open. It refuses instead.
+   *
+   * Unreachable today — `agent_runs.ticket_id` cascades on delete, so a run
+   * with a ticket id has a ticket. The default still has to be closed.
+   */
+  const [ticketRow] = await db
+    .select({ subject: tickets.subject, body: tickets.body })
+    .from(tickets)
+    .where(eq(tickets.id, ticketId))
+    .limit(1);
+
+  if (!ticketRow) {
+    return Response.json(
+      { error: `run ${runId} cannot be resumed: ticket ${ticketId} is gone` },
+      { status: 409 },
+    );
+  }
+
   let messages: MessageParam[];
   try {
     messages = JSON.parse(run.serializedMessages) as MessageParam[];
@@ -254,39 +281,28 @@ export async function POST(request: Request) {
   await markRunning(db, runId);
 
   /**
-   * A resumed run must not regain a tool the first invocation lacked.
+   * The narrowing, re-derived from the ticket read above.
    *
-   * The narrowing is not carried in `serialized_messages` — that is the
-   * conversation, not the tool block — so it has to be re-derived here. The
-   * scan is pure and deterministic, so re-running it on the same ticket
-   * returns the same answer the first invocation acted on.
-   *
-   * Only the registry is taken. `prepared.messages` is discarded: a resume
-   * replays the serialized conversation, which already carries the opening
-   * turn and its guardrail notice. And no span is emitted — the scan is the
-   * same one span 0 already records, and a second row would claim a control
-   * fired twice when it fired once.
+   * The scan is pure and deterministic, so re-running it returns the same
+   * answer the first invocation acted on. Only the registry is taken:
+   * `prepared.messages` is discarded, because a resume replays the serialized
+   * conversation, which already carries the opening turn and its guardrail
+   * notice. And no span is emitted — the scan is the same one span 0 already
+   * records, and a second row would claim a control fired twice when it fired
+   * once.
    */
-  const [ticketRow] = await db
-    .select({ subject: tickets.subject, body: tickets.body })
-    .from(tickets)
-    .where(eq(tickets.id, ticketId))
-    .limit(1);
-
-  const registry = ticketRow
-    ? prepareTicketRun({
-        registry: buildRegistry(TOOLS),
-        ticket: {
-          id: ticketId,
-          subject: ticketRow.subject,
-          // The scan reads subject and body only, and the messages this
-          // builds are thrown away. Nothing here depends on the customer.
-          customer: null,
-          body: ticketRow.body,
-        },
-        now,
-      }).registry
-    : buildRegistry(TOOLS);
+  const registry = prepareTicketRun({
+    registry: buildRegistry(TOOLS),
+    ticket: {
+      id: ticketId,
+      subject: ticketRow.subject,
+      // The scan reads subject and body only, and the messages this builds
+      // are thrown away. Nothing here depends on the customer.
+      customer: null,
+      body: ticketRow.body,
+    },
+    now,
+  }).registry;
 
   const encoder = new TextEncoder();
 
