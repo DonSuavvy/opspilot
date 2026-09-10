@@ -4,6 +4,7 @@ import {
   budgetConfigSchema,
   checkBudget,
   decideReservation,
+  DEFAULT_GLOBAL_RUNS_PER_MINUTE,
   ESTIMATED_RUN_NANOS,
   UNVERIFIED_RATE_SAFETY_FACTOR,
   type BudgetConfig,
@@ -217,6 +218,7 @@ describe("decideReservation", () => {
     const d = decideReservation({
       spentTodayNanos: 0,
       runsInLastMinute: 0,
+      globalRunsInLastMinute: 0,
       estimatedRunNanos: ESTIMATED_RUN_NANOS,
       rateVerified: true,
       config: config(),
@@ -231,6 +233,7 @@ describe("decideReservation", () => {
     const d = decideReservation({
       spentTodayNanos: 0,
       runsInLastMinute: 10,
+      globalRunsInLastMinute: 0,
       estimatedRunNanos: 1,
       rateVerified: true,
       config: config({ runsPerMinute: 10 }),
@@ -245,6 +248,7 @@ describe("decideReservation", () => {
       decideReservation({
         spentTodayNanos: 0,
         runsInLastMinute,
+        globalRunsInLastMinute: 0,
         estimatedRunNanos: 1,
         rateVerified: true,
         config: config({ runsPerMinute: 3 }),
@@ -264,6 +268,7 @@ describe("decideReservation", () => {
     const d = decideReservation({
       spentTodayNanos: 0,
       runsInLastMinute: 99,
+      globalRunsInLastMinute: 0,
       estimatedRunNanos: 1,
       rateVerified: true,
       config: config({ runsPerMinute: 1 }),
@@ -281,6 +286,7 @@ describe("decideReservation", () => {
     const d = decideReservation({
       spentTodayNanos: 9_000_000_000,
       runsInLastMinute: 500,
+      globalRunsInLastMinute: 0,
       estimatedRunNanos: ESTIMATED_RUN_NANOS,
       rateVerified: false,
       config: config({ killSwitch: true, runsPerMinute: 1 }),
@@ -293,6 +299,7 @@ describe("decideReservation", () => {
     const d = decideReservation({
       spentTodayNanos: 4_900_000_000,
       runsInLastMinute: 0,
+      globalRunsInLastMinute: 0,
       estimatedRunNanos: 200_000_000,
       rateVerified: true,
       config: config(),
@@ -306,11 +313,140 @@ describe("decideReservation", () => {
       decideReservation({
         spentTodayNanos: 0,
         runsInLastMinute: Number.NaN,
+        globalRunsInLastMinute: 0,
         estimatedRunNanos: 1,
         rateVerified: true,
         config: config(),
       }),
     ).toThrow();
+  });
+});
+
+/**
+ * The second rate axis, and the one per-visitor sandboxes made necessary.
+ *
+ * `runsPerMinute` counts one workspace. That was the whole story while there
+ * was one workspace, and it becomes no story at all the moment every visitor
+ * cookie mints a sandbox of its own: ten strangers under ten separate
+ * per-workspace limits are ten times the arrival rate covara sees, and covara
+ * is the account a law firm's live generation runs on. So a second ceiling
+ * counts every workspace together.
+ *
+ * The scope travels with the refusal because the two mean different things to
+ * whoever is reading. "You are clicking too fast" is something a visitor can
+ * act on. "The demo is busy" is not their fault and not their problem to fix,
+ * and telling them the first when the second is true is a lie a sandbox can
+ * be caught in.
+ */
+describe("decideReservation across every workspace", () => {
+  it("refuses a sandbox that is under its own limit when the demo is full", () => {
+    const d = decideReservation({
+      spentTodayNanos: 0,
+      runsInLastMinute: 1,
+      globalRunsInLastMinute: 20,
+      estimatedRunNanos: 1,
+      rateVerified: true,
+      config: config({ runsPerMinute: 10, globalRunsPerMinute: 20 }),
+    });
+
+    expect(d.allowed).toBe(false);
+    expect(d.reason).toBe("rate_limited");
+    expect(d.rateLimitScope).toBe("global");
+    expect(d.retryAfterSeconds).toBe(60);
+  });
+
+  it("allows the last run of the global allowance, and refuses the next", () => {
+    const at = (globalRunsInLastMinute: number) =>
+      decideReservation({
+        spentTodayNanos: 0,
+        runsInLastMinute: 0,
+        globalRunsInLastMinute,
+        estimatedRunNanos: 1,
+        rateVerified: true,
+        config: config({ globalRunsPerMinute: 3 }),
+      });
+
+    expect(at(2).allowed).toBe(true);
+    expect(at(3).allowed).toBe(false);
+  });
+
+  /**
+   * Ordering, pinned as evidence rather than left in a comment. A visitor
+   * whose own sandbox is over its limit is told about their own sandbox, even
+   * when the demo is full as well: it is the more specific answer and the only
+   * one they can do anything about.
+   */
+  it("names the sandbox, not the demo, when both limits are tripped", () => {
+    const d = decideReservation({
+      spentTodayNanos: 0,
+      runsInLastMinute: 10,
+      globalRunsInLastMinute: 20,
+      estimatedRunNanos: 1,
+      rateVerified: true,
+      config: config({ runsPerMinute: 10, globalRunsPerMinute: 20 }),
+    });
+
+    expect(d.rateLimitScope).toBe("workspace");
+  });
+
+  it("leaves the scope off a decision that was not rate limited", () => {
+    const allowed = decideReservation({
+      spentTodayNanos: 0,
+      runsInLastMinute: 0,
+      globalRunsInLastMinute: 0,
+      estimatedRunNanos: ESTIMATED_RUN_NANOS,
+      rateVerified: true,
+      config: config(),
+    });
+    const broke = decideReservation({
+      spentTodayNanos: 5_000_000_000,
+      runsInLastMinute: 99,
+      globalRunsInLastMinute: 99,
+      estimatedRunNanos: ESTIMATED_RUN_NANOS,
+      rateVerified: true,
+      config: config(),
+    });
+
+    expect(allowed.rateLimitScope).toBeUndefined();
+    expect(broke.reason).toBe("daily_cap_reached");
+    expect(broke.rateLimitScope).toBeUndefined();
+  });
+
+  /**
+   * Same lesson as every other count here: a comparison against NaN is false,
+   * so a poisoned figure would *allow* rather than refuse.
+   */
+  it("throws rather than allowing on a poisoned global count", () => {
+    expect(() =>
+      decideReservation({
+        spentTodayNanos: 0,
+        runsInLastMinute: 0,
+        globalRunsInLastMinute: Number.NaN,
+        estimatedRunNanos: 1,
+        rateVerified: true,
+        config: config(),
+      }),
+    ).toThrow();
+  });
+
+  /**
+   * The eval fixtures under `src/evals/` build `BudgetConfig` literals without
+   * this key, so it has to be optional on the type. Optional must not mean
+   * uncapped: an omitted ceiling falls back to the documented default rather
+   * than to infinity.
+   */
+  it("falls back to the default when a config omits the global ceiling", () => {
+    const d = decideReservation({
+      spentTodayNanos: 0,
+      runsInLastMinute: 0,
+      globalRunsInLastMinute: DEFAULT_GLOBAL_RUNS_PER_MINUTE,
+      estimatedRunNanos: 1,
+      rateVerified: true,
+      config: config({ globalRunsPerMinute: undefined }),
+    });
+
+    expect(d.reason).toBe("rate_limited");
+    expect(d.rateLimitScope).toBe("global");
   });
 });
 
@@ -358,6 +494,44 @@ describe("budgetConfigSchema", () => {
       budgetConfigSchema.parse({ OPSPILOT_DAILY_BUDGET_USD: "5" })
         .runsPerMinute,
     ).toBe(10);
+  });
+
+  it("reads the global ceiling beside the per-sandbox one", () => {
+    const c = budgetConfigSchema.parse({
+      OPSPILOT_DAILY_BUDGET_USD: "5",
+      OPSPILOT_RUNS_PER_MINUTE: "4",
+      OPSPILOT_GLOBAL_RUNS_PER_MINUTE: "12",
+    });
+
+    expect(c.runsPerMinute).toBe(4);
+    expect(c.globalRunsPerMinute).toBe(12);
+  });
+
+  /**
+   * Same posture as `OPSPILOT_RUNS_PER_MINUTE`: an absent key takes a default
+   * that already holds, because refusing to boot over it would be theatre.
+   * The number itself is defended where it is defined.
+   */
+  it("defaults the global ceiling rather than leaving it uncapped", () => {
+    expect(
+      budgetConfigSchema.parse({ OPSPILOT_DAILY_BUDGET_USD: "5" })
+        .globalRunsPerMinute,
+    ).toBe(DEFAULT_GLOBAL_RUNS_PER_MINUTE);
+  });
+
+  it.each([
+    ["empty", ""],
+    ["not a number", "twelve"],
+    ["zero", "0"],
+    ["negative", "-1"],
+    ["fractional", "2.5"],
+  ])("refuses a %s global runs-per-minute rather than ignoring it", (_l, v) => {
+    expect(() =>
+      budgetConfigSchema.parse({
+        OPSPILOT_DAILY_BUDGET_USD: "5",
+        OPSPILOT_GLOBAL_RUNS_PER_MINUTE: v,
+      }),
+    ).toThrow();
   });
 
   it.each([
