@@ -330,14 +330,22 @@ function GuardrailsCard({ snapshot }: { snapshot: OpsSnapshot }) {
 
 export default async function OpsPage() {
   let loaded: Awaited<ReturnType<typeof loadSnapshot>> = null;
-  let loadError: string | null = null;
+  let loadFailed = false;
 
   try {
     loaded = await loadSnapshot();
   } catch (error) {
-    // Usually an unseeded database or a missing daily cap, and the command to
-    // fix either is a better answer than a stack trace in the browser.
-    loadError = error instanceof Error ? error.message : String(error);
+    /**
+     * Logged, never rendered — the same call `/api/health` makes.
+     *
+     * This page is public and the two failures that actually occur here are
+     * an unreachable database and a missing daily cap. `pg` puts the user,
+     * host and port of the connection in the first one's message, which is
+     * reconnaissance handed to whoever opens the page. The command below
+     * fixes both causes and is a better answer than the message anyway.
+     */
+    console.error("[ops] could not read the operating state", error);
+    loadFailed = true;
   }
 
   return (
@@ -367,10 +375,13 @@ export default async function OpsPage() {
         </p>
       </header>
 
-      {loadError ? (
+      {loadFailed ? (
         <div className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm dark:border-amber-900 dark:bg-amber-950">
           <p className="font-medium">Could not read the operating state.</p>
-          <p className="mt-1 text-zinc-600 dark:text-zinc-300">{loadError}</p>
+          <p className="mt-1 text-zinc-600 dark:text-zinc-300">
+            The database is unreachable or the daily cap is unset. The reason
+            is in the server log.
+          </p>
           <p className="mt-2 font-mono text-xs">
             npm run db:up &amp;&amp; npm run db:migrate &amp;&amp; npm run
             db:seed
@@ -378,7 +389,7 @@ export default async function OpsPage() {
         </div>
       ) : null}
 
-      {!loadError && loaded === null ? (
+      {!loadFailed && loaded === null ? (
         <p className="text-sm text-zinc-500">
           No workspace found — run <code>npm run db:seed</code>.
         </p>
