@@ -1,0 +1,141 @@
+# The eval gate.
+#
+# Runs the golden suite against a real model whenever a pull request touches
+# the prompt, the SOP or the suite itself, and posts the scorecard as one PR
+# comment that it edits in place on every push.
+#
+# It costs money on every run: roughly $0.16 on Haiku for eight cases, charged
+# to an AWS account shared with a production system. That is why the `paths`
+# filter is narrow, why `concurrency` cancels a superseded run rather than
+# letting two suites race, and why nothing here retries a red job. A case that
+# lost to a Bedrock 429 says so in its own row on the scorecard.
+#
+# Fork PRs get no secrets from GitHub, so this job fails at the env check with
+# "Evals need AWS_ANTHROPIC_* secrets; see docs/RUNBOOK.md" rather than
+# somewhere deep in the SDK. That is acceptable: the repo is solo, and a fork
+# PR here would be a surprise. If that changes, move to
+# `pull_request_target` and gate it on a label rather than handing secrets to
+# unreviewed code.
+name: Evals
+
+on:
+  pull_request:
+    paths:
+      - src/db/sop-content.ts
+      - src/agent/prompt.ts
+      - src/agent/sop.ts
+      - src/evals/**
+      - .github/workflows/evals.yml
+
+# One suite per PR. A second push while the first is still running cancels it,
+# because the comment is upserted in place and two jobs writing it would leave
+# whichever finished last, not whichever ran on the newer commit.
+concurrency:
+  group: evals-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  # The scorecard comment, and nothing else.
+  pull-requests: write
+
+jobs:
+  evals:
+    name: golden suite
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: opspilot
+        ports:
+          - 5432:5432
+        # Without this the migrate step races the container's first boot and
+        # fails with ECONNREFUSED perhaps one run in three.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/opspilot
+      # budgetConfigSchema fails closed on an absent cap, so this is required,
+      # not decoration. A dollar is about six suites: enough that a legitimate
+      # re-run works, small enough that a loop cannot spend the account.
+      OPSPILOT_DAILY_BUDGET_USD: "1.00"
+      # Eight sequential runs against a default of 10 leaves a margin of two,
+      # and a case refused `budget: rate_limited` is a red scorecard that says
+      # nothing about the agent. The suite is sequential either way, so the
+      # burst protection that matters is the SDK's retry budget, not this.
+      OPSPILOT_RUNS_PER_MINUTE: "12"
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # drizzle-kit and the seed both load `.env.local` when it exists and read
+      # process.env when it does not, which is the CI case.
+      - name: Migrate
+        run: npm run db:migrate
+
+      - name: Seed
+        run: npm run db:seed
+
+      - name: Run the golden suite
+        run: npm run evals:ci
+        env:
+          AWS_ANTHROPIC_ACCESS_KEY_ID: ${{ secrets.AWS_ANTHROPIC_ACCESS_KEY_ID }}
+          AWS_ANTHROPIC_SECRET_ACCESS_KEY: ${{ secrets.AWS_ANTHROPIC_SECRET_ACCESS_KEY }}
+          AWS_ANTHROPIC_REGION: ${{ secrets.AWS_ANTHROPIC_REGION }}
+
+      # `always()`, because the comment matters most when the step above failed.
+      # A red job with no comment is the failure mode this whole workflow exists
+      # to avoid: the reader gets an X and has to go read a log to find out
+      # which case moved.
+      - name: Comment the scorecard
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const MARKER = '<!-- opspilot-scorecard -->';
+
+            let body;
+            try {
+              body = fs.readFileSync('scorecard.md', 'utf8');
+            } catch {
+              // The suite never got far enough to write one. Say so in the
+              // same place the scorecard would have been, and keep the marker
+              // so this comment is the one the next run edits.
+              body = `${MARKER}\n\n## Eval scorecard\n\nThe suite produced no scorecard. See the job log.\n`;
+            }
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number, per_page: 100 },
+            );
+            const mine = comments.find((c) => c.body && c.body.includes(MARKER));
+
+            if (mine) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: mine.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number, body,
+              });
+            }

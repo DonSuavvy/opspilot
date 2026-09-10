@@ -5,8 +5,9 @@ on:
     branches: [main]
   pull_request:
 
-# Day 8 adds a second job here: the eval suite runs on any PR touching
-# prompts/ or sops/, posts a scorecard comment, and fails on regression.
+# The eval gate is its own workflow, `evals.yml`. It stays separate because it
+# spends real money on a shared account and so runs on a narrow `paths` filter,
+# while this one must run on every push and every PR.
 jobs:
   verify:
     name: typecheck + test + lint

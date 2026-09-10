@@ -40,3 +40,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# the CI eval gate writes its scorecard into the checkout
+scorecard.md
