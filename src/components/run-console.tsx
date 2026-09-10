@@ -21,6 +21,8 @@ import { ApprovalDecision } from "@/components/approval-decision";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { describeApproval } from "@/lib/approval-copy";
+import { compactJson } from "@/lib/eval-labels";
+import { describeSpan } from "@/lib/span-copy";
 import { readAgentStream, type Done, type Span } from "@/lib/agent-stream";
 
 export interface TicketSummary {
@@ -283,6 +285,41 @@ export function RunConsole({
                   : ""}
                 {usd(span.costNanos)}
               </span>
+              {/*
+                Closed by default, and `col-span-4` because the row above is a
+                four-column grid — a fifth child without it lands in the first
+                column of an implicit new row, 2rem wide.
+
+                Native `<details>`, not a controlled panel: expanded state that
+                lives in React is state the streaming appends have to preserve,
+                and a span the viewer opened mid-run must not close itself when
+                the next one arrives. The browser already gets this right.
+
+                A guardrail that is not an error reads amber like its bar —
+                the injection scan is a control that worked, and the only
+                thing in this list that must never be mistaken for a failure.
+              */}
+              <details className="col-span-4">
+                <summary
+                  className={`cursor-pointer text-xs ${
+                    span.type === "guardrail" && !span.isError
+                      ? "text-amber-700 dark:text-amber-300"
+                      : "text-zinc-500"
+                  }`}
+                >
+                  {describeSpan(span)}
+                </summary>
+                <dl className="mt-1 grid grid-cols-[3.5rem_1fr] gap-x-2 gap-y-1 font-mono text-xs text-zinc-600 dark:text-zinc-400">
+                  <dt className="text-zinc-400">input</dt>
+                  <dd className="overflow-x-auto break-all">
+                    {compactJson(span.input)}
+                  </dd>
+                  <dt className="text-zinc-400">output</dt>
+                  <dd className="overflow-x-auto break-all">
+                    {compactJson(span.output)}
+                  </dd>
+                </dl>
+              </details>
             </li>
           ))}
           {running ? (
