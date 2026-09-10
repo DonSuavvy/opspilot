@@ -355,7 +355,7 @@ export default async function OpsPage() {
           <h1 className="text-2xl font-semibold tracking-tight">
             Mission control
           </h1>
-          <Link href="/" className="text-sm text-zinc-500 underline">
+          <Link href="/inbox" className="text-sm text-zinc-500 underline">
             back to the inbox
           </Link>
           <Link href="/approvals" className="text-sm text-zinc-500 underline">

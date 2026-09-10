@@ -73,7 +73,7 @@ export default async function ApprovalsPage() {
       <header className="mb-8">
         <div className="flex items-baseline gap-3">
           <h1 className="text-2xl font-semibold tracking-tight">Approvals</h1>
-          <Link href="/" className="text-sm text-zinc-500 underline">
+          <Link href="/inbox" className="text-sm text-zinc-500 underline">
             back to the inbox
           </Link>
         </div>

@@ -35,7 +35,7 @@ export default async function SopPage() {
       <header className="flex flex-col gap-2">
         <div className="flex items-baseline gap-3">
           <h1 className="text-xl font-semibold">SOP</h1>
-          <Link href="/" className="text-sm text-zinc-500 underline">
+          <Link href="/inbox" className="text-sm text-zinc-500 underline">
             back to the inbox
           </Link>
         </div>
