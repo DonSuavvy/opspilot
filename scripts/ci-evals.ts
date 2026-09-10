@@ -35,6 +35,7 @@ import { closeDb, getDb, type Db } from "../src/db/client";
 import { workspaces } from "../src/db/schema";
 import { loadActiveSop } from "../src/db/sops";
 import { GOLDEN_CASES } from "../src/evals/cases";
+import { hasProviderEnv, MISSING_PROVIDER } from "../src/evals/provider-env";
 import { resolveGitSha } from "../src/evals/pin";
 import {
   formatScorecard,
@@ -55,17 +56,6 @@ const MAX_RETRIES = 8;
 
 const DEFAULT_SCORECARD_PATH = "scorecard.md";
 
-/**
- * What a missing provider looks like to whoever is reading a red CI job.
- *
- * Named rather than left to `providerFromEnv`'s throw, because the first time
- * this fails it will be on a fork PR or a fresh checkout, and the useful
- * sentence is where the secrets come from, not which variable was empty. No
- * value is echoed: this text lands in a public log.
- */
-const MISSING_PROVIDER =
-  "Evals need AWS_ANTHROPIC_* secrets; see docs/RUNBOOK.md";
-
 /** The demo's single workspace, the same assumption `/api/evals/run` makes. */
 async function seededWorkspaceId(db: Db): Promise<string> {
   const [ws] = await db.select({ id: workspaces.id }).from(workspaces).limit(1);
@@ -79,22 +69,6 @@ function gitShaFromShell(): string {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"],
   });
-}
-
-/**
- * True when the provider trio is present.
- *
- * Checked here rather than caught from `providerFromEnv` so a fork PR, which
- * GitHub gives no secrets, gets the one sentence that tells its author what
- * happened. A partly configured Bedrock block still falls through to
- * `providerFromEnv`, which names the missing variable better than this can.
- */
-function hasProviderEnv(env: NodeJS.ProcessEnv): boolean {
-  const bedrock =
-    (env.AWS_ANTHROPIC_ACCESS_KEY_ID ?? "").length > 0 ||
-    (env.AWS_ANTHROPIC_SECRET_ACCESS_KEY ?? "").length > 0 ||
-    (env.AWS_ANTHROPIC_REGION ?? "").length > 0;
-  return bedrock || (env.ANTHROPIC_API_KEY ?? "").length > 0;
 }
 
 async function main(): Promise<number> {
