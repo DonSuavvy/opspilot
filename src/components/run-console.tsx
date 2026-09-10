@@ -260,7 +260,13 @@ export function RunConsole({
           {spans.map((span) => (
             <li
               key={span.seq}
-              className="grid grid-cols-[2rem_9rem_1fr_auto] items-center gap-3 rounded px-2 py-1.5 text-sm odd:bg-zinc-50 dark:odd:bg-zinc-900/50"
+              // `gap-x-3`, not `gap-3`. Until this row had a second line the
+              // two were the same thing; with the summary below the bar,
+              // `gap-3` would put 12px between every span's two lines and
+              // roughly double the height of the whole waterfall — undoing
+              // the `md:grid-cols` fix above, which exists because the trace
+              // fell below the fold on a laptop-sized split view.
+              className="grid grid-cols-[2rem_9rem_1fr_auto] items-center gap-x-3 gap-y-0.5 rounded px-2 py-1.5 text-sm odd:bg-zinc-50 dark:odd:bg-zinc-900/50"
             >
               <span className="font-mono text-xs text-zinc-400">
                 {span.seq}
