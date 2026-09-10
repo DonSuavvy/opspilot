@@ -74,7 +74,10 @@ async function checkDb(): Promise<{
       workspaceId: ws?.id ?? null,
     };
   } catch (error) {
-    // Logged, never returned: `pg` puts the connection string in this message.
+    // Logged, never returned. Measured rather than assumed: `pg` does not put
+    // the whole connection string in the message, but an auth failure names
+    // the database user, the host and the port — enough reconnaissance to be
+    // worth withholding from an endpoint anyone can poll.
     console.error("[health] database check failed", error);
     return {
       check: { ok: false, latencyMs: Date.now() - startedAt },
