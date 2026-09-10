@@ -69,9 +69,18 @@ export function Architecture() {
               </span>
               <Box node={approvalQueue} />
             </div>
-            <div className="flex flex-1 items-center gap-3">
+            <div className="flex flex-1 flex-col items-center gap-3 sm:flex-row">
               <Box node={evalSuite} />
-              <span aria-hidden className="text-zinc-400 dark:text-zinc-600">
+              <span
+                aria-hidden
+                className="text-zinc-400 sm:hidden dark:text-zinc-600"
+              >
+                ↓
+              </span>
+              <span
+                aria-hidden
+                className="hidden text-zinc-400 sm:inline dark:text-zinc-600"
+              >
                 →
               </span>
               <Box node={architecture.ci} />
