@@ -16,6 +16,7 @@ export interface ArcStep {
   title: string;
   description: string;
   href: string;
+  linkLabel: string;
 }
 
 export interface DiagramNode {
@@ -65,24 +66,28 @@ export const landingCopy = {
         description:
           "Watch the agent resolve it live, with a streaming trace of every span.",
         href: "/inbox",
+        linkLabel: "Open the inbox",
       },
       {
         title: "Edit the SOP",
         description:
           "Change the refund window from 30 days to 14, then re-run the same ticket. The decision changes.",
         href: "/sop",
+        linkLabel: "Edit the SOP",
       },
       {
         title: "Run the eval suite",
         description:
           "One case regresses. The diff shows why. Fix it, and the suite goes green.",
         href: "/evals",
+        linkLabel: "Open the eval lab",
       },
       {
         title: "Inject the adversarial ticket",
         description:
           "The injection is flagged at span 0, the money tools are withheld, and the run escalates.",
         href: "/inbox",
+        linkLabel: "Open the inbox",
       },
     ] satisfies ArcStep[],
   },
@@ -97,21 +102,28 @@ export const landingCopy = {
       },
       { label: "Hand-rolled tool loop", detail: "the seam under test" },
     ] satisfies DiagramNode[],
+    streamLabel: "SSE",
+    fanOutLabel: "fans out to",
     fanOut: [
       { label: "Policy engine", detail: "pure function, no I/O" },
       { label: "Nine tools", detail: "read, auto-write, confirm-write" },
       { label: "Postgres", detail: "via Drizzle" },
     ] satisfies DiagramNode[],
+    approvalLabel: "confirm-write pauses into",
     downstream: [
       {
         label: "Approval queue",
-        detail: "a confirm-write call pauses here",
+        detail: "a human approves or denies",
       },
       {
         label: "Eval suite",
-        detail: "feeds CI on every prompt change",
+        detail: "the golden cases, pinned and scored",
       },
     ] satisfies DiagramNode[],
+    ci: {
+      label: "CI",
+      detail: "runs on every prompt change",
+    } satisfies DiagramNode,
     facts: [
       "The loop is hand-rolled, so a paused run can be serialized mid-loop and resumed in a later serverless invocation.",
       "The public demo runs Claude Haiku 4.5 on Bedrock.",
