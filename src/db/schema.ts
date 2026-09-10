@@ -474,10 +474,27 @@ export const agentRuns = pgTable(
     startedAt: timestamp("started_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
+    /**
+     * When this row's `cost_usd` was last written — the day the money counts
+     * against, which is not always the day the run started.
+     *
+     * `reserveResume`, `accrueRunCost` and `finishRun` all write cost back
+     * into the *original* row, so a run paused at 23:50 and resumed at 00:10
+     * spends today's money on yesterday's row. Summing spend on `started_at`
+     * made that spend invisible to today's cap. Every writer of `cost_usd`
+     * moves this column with it, and `spentTodayNanos` reads it.
+     *
+     * Run *counts* — the rate limit, "runs today" — stay on `started_at`,
+     * which is what they are actually asking about.
+     */
+    chargedAt: timestamp("charged_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
     endedAt: timestamp("ended_at", { withTimezone: true }),
   },
   (t) => [
     index("agent_runs_workspace_started_idx").on(t.workspaceId, t.startedAt),
+    index("agent_runs_workspace_charged_idx").on(t.workspaceId, t.chargedAt),
     index("agent_runs_ticket_idx").on(t.ticketId),
     index("agent_runs_status_idx").on(t.status),
     costSane("agent_runs_cost_usd_sane", t.costUsd),

@@ -259,6 +259,10 @@ export async function POST(request: Request) {
             priorNanos,
             reservationNanos: ESTIMATED_RUN_NANOS,
             accruedNanos,
+            // The instant the call landed, not the instant the run opened —
+            // a run that crosses midnight charges each call to the day it
+            // actually spent on.
+            now: span.endedAt,
           });
         }
 

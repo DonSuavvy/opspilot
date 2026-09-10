@@ -201,7 +201,12 @@ Each of these cost real time. Don't rediscover them.
   *two*-accrual sequence tells the two forms apart, so `verify:budget` runs one.
   A run whose process dies between reserving and finishing holds its
   reservation until midnight: the cap under-spends rather than over-spends,
-  which is the direction to be wrong in.
+  which is the direction to be wrong in. **One further hole, found and closed
+  the same way**: the day was keyed on `started_at`, so a run paused at 23:50
+  and resumed at 00:10 charged its second half to yesterday and today's sum
+  never saw the money — `agent_runs.charged_at` now moves with every write of
+  `cost_usd` and `spentTodayNanos` reads it, while run *counts* (the rate
+  limit, "runs today") stay on `started_at`, which is what they actually ask.
 - **A burst is a second axis, and it is not about money.** Ten runs at two
   cents each are eight cents inside a five-dollar cap and still enough to trip
   Bedrock's 429 on an account shared with Causa's live generation. So

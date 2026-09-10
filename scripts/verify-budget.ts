@@ -254,6 +254,7 @@ async function main() {
       priorNanos: 0,
       reservationNanos: ESTIMATED_RUN_NANOS,
       accruedNanos: 5_000_000,
+      now: accrueNow,
     });
     check(
       "an accrual below it does not release headroom",
@@ -265,6 +266,7 @@ async function main() {
       priorNanos: 0,
       reservationNanos: ESTIMATED_RUN_NANOS,
       accruedNanos: 25_000_000,
+      now: accrueNow,
     });
     check(
       "an accrual above it charges the excess",
@@ -288,6 +290,7 @@ async function main() {
       priorNanos: 0,
       reservationNanos: ESTIMATED_RUN_NANOS,
       accruedNanos: 30_000_000,
+      now: accrueNow,
     });
     check(
       "a second accrual is absolute, not compounded",
@@ -467,10 +470,33 @@ async function main() {
       await spentTodayNanos(db, workspaceId, afterMidnight),
       15_000_000,
     );
+    /**
+     * The two timestamps having parted ways is the whole mechanism, so it is
+     * asserted directly rather than inferred.
+     *
+     * Not asserted: that yesterday's sum has *dropped* to zero.
+     * `spentTodayNanos` is a `>= midnight` sum with no upper bound, so asking
+     * it about yesterday necessarily includes today as well — a check written
+     * that way fails under the fix and under the bug alike, and says nothing
+     * about either.
+     */
+    const timestamps = await db
+      .select({
+        startedAt: agentRuns.startedAt,
+        chargedAt: agentRuns.chargedAt,
+      })
+      .from(agentRuns)
+      .where(eq(agentRuns.id, overnight.runId));
+
     check(
-      "with yesterday no longer counting what today already has",
-      await spentTodayNanos(db, workspaceId, lastNight),
-      0,
+      "the row still records when it started",
+      timestamps[0]?.startedAt.getTime(),
+      lastNight.getTime(),
+    );
+    check(
+      "and separately when it was last charged",
+      timestamps[0]?.chargedAt.getTime(),
+      afterMidnight.getTime(),
     );
 
     await clear();

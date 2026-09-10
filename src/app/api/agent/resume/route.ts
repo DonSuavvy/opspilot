@@ -241,7 +241,7 @@ export async function POST(request: Request) {
     // The run is not going to happen, so the headroom goes back. Left in
     // place it would consume $0.02 of the day's cap for every losing racer,
     // and every retry would stack another one on top.
-    await releaseReservation(db, runId, priorNanos).catch(() => {});
+    await releaseReservation(db, runId, priorNanos, now).catch(() => {});
 
     if (error instanceof ApprovalNotPendingError) {
       return Response.json({ error: error.message }, { status: 409 });
@@ -307,6 +307,10 @@ export async function POST(request: Request) {
             priorNanos,
             reservationNanos: ESTIMATED_RUN_NANOS,
             accruedNanos,
+            // The instant the call landed, not the instant the run opened —
+            // a run that crosses midnight charges each call to the day it
+            // actually spent on.
+            now: span.endedAt,
           });
         }
 

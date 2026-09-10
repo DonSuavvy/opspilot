@@ -72,6 +72,12 @@ function usdToNanos(usd: string | null): number {
  * Today's spend for a workspace, in nano-dollars — the baseline the loop's
  * pre-flight adds its own in-run accrual to.
  *
+ * **Keyed on `charged_at`, not `started_at`.** Every writer of `cost_usd`
+ * writes back into the run's original row, so a run paused at 23:50 and
+ * resumed at 00:10 spends today's money on a row that started yesterday.
+ * Summed on `started_at`, that second half was invisible here — real spend
+ * against a cap that could not see it. `charged_at` moves with the money.
+ *
  * `cost_usd` is `numeric(12,6)`, i.e. dollars at micro-dollar resolution, and
  * `pg` hands numerics back as strings precisely so a large sum cannot lose
  * precision through a float. `Number()` once, at the end, on a figure bounded
@@ -91,7 +97,7 @@ export async function spentTodayNanos(
     .where(
       and(
         eq(agentRuns.workspaceId, workspaceId),
-        gte(agentRuns.startedAt, midnight),
+        gte(agentRuns.chargedAt, midnight),
       ),
     );
 
@@ -157,8 +163,9 @@ export interface ReserveRunInput {
   ticketId: string | null;
   model: string;
   sopVersionId?: string | null;
-  /** Injected, never `Date.now()` — and written to `started_at`, so the rate
-   * window is measured against the same instant the decision used. */
+  /** Injected, never `Date.now()` — and written to `started_at` *and*
+   * `charged_at`, so the rate window is measured against the same instant the
+   * decision used and the reservation counts on the day it is taken. */
   now: Date;
   config: BudgetConfig;
   estimatedRunNanos: number;
@@ -275,6 +282,9 @@ export async function reserveRun(
         // Explicit rather than `defaultNow()`, so the row this reservation
         // writes falls inside the same rate window the decision measured.
         startedAt: input.now,
+        // The reservation is money spent now, so the row is charged now. The
+        // two are the same instant on an insert and part ways on a resume.
+        chargedAt: input.now,
         costUsd: runCostUsd(input.estimatedRunNanos, "reservation"),
       })
       .returning({ id: agentRuns.id });
@@ -349,6 +359,10 @@ export async function reserveResume(
       .update(agentRuns)
       .set({
         costUsd: runCostUsd(priorNanos + input.estimatedRunNanos, "reservation"),
+        // The row moves to the day this reservation is taken on. Yesterday's
+        // half comes with it: one timestamp per row means today's sum is
+        // never short, which is the direction to be wrong in.
+        chargedAt: input.now,
       })
       .where(eq(agentRuns.id, input.runId));
 
@@ -380,6 +394,8 @@ export async function accrueRunCost(
     priorNanos: number;
     reservationNanos: number;
     accruedNanos: number;
+    /** Injected, never `Date.now()`. Stamps the day this accrual counts on. */
+    now: Date;
   },
 ): Promise<void> {
   const held =
@@ -387,7 +403,7 @@ export async function accrueRunCost(
 
   await db
     .update(agentRuns)
-    .set({ costUsd: runCostUsd(held, "accrual") })
+    .set({ costUsd: runCostUsd(held, "accrual"), chargedAt: input.now })
     .where(eq(agentRuns.id, runId));
 }
 
@@ -403,11 +419,13 @@ export async function releaseReservation(
   db: Db,
   runId: string,
   priorNanos: number,
+  now: Date,
 ): Promise<void> {
   await accrueRunCost(db, runId, {
     priorNanos,
     reservationNanos: 0,
     accruedNanos: 0,
+    now,
   });
 }
 
@@ -465,6 +483,9 @@ export async function finishRun(
       costUsd: runCostUsd(reservation.priorNanos + result.costNanos),
       refusalCategory: result.refusal?.category ?? null,
       error: result.error,
+      // The final write of `cost_usd`, so the final word on which day it
+      // counts against. `endedAt` is already the instant it landed.
+      chargedAt: endedAt,
       endedAt,
     })
     .where(eq(agentRuns.id, runId));
