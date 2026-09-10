@@ -64,9 +64,49 @@ export interface BudgetConfig {
   killSwitch: boolean;
   /** Runs allowed to *start* in any 60-second window, per workspace. */
   runsPerMinute: number;
+  /**
+   * Runs allowed to start in that same window across **every** workspace.
+   *
+   * Optional on the type and never optional in effect. The eval fixtures
+   * build `BudgetConfig` literals without this key, so requiring it would
+   * break files this change is not allowed to touch; an omitted value falls
+   * back to `DEFAULT_GLOBAL_RUNS_PER_MINUTE` rather than to no ceiling at
+   * all, which is the only reading that keeps "optional" from meaning
+   * "uncapped".
+   */
+  globalRunsPerMinute?: number;
 }
 
+/** Which of the two ceilings refused a run. */
+export type RateLimitScope = "workspace" | "global";
+
 const TRUTHY = new Set(["true", "1", "yes", "on"]);
+
+/**
+ * One parser for both rate-limit keys, so the two can never drift.
+ *
+ * The default arrives as a thunk because the constants it returns are
+ * declared below the schema, where they read next to the reasoning that
+ * chose them. Nothing calls this until something parses an environment, by
+ * which time the module has finished evaluating.
+ */
+function runsPerMinuteKey(name: string, fallback: () => number) {
+  return z
+    .string()
+    .optional()
+    .transform((s, ctx) => {
+      if (s === undefined) return fallback();
+      const n = Number(s);
+      if (!Number.isSafeInteger(n) || n <= 0) {
+        ctx.addIssue({
+          code: "custom",
+          message: `${name} must be a positive integer, got "${s}"`,
+        });
+        return z.NEVER;
+      }
+      return n;
+    });
+}
 
 /**
  * `OPSPILOT_DAILY_BUDGET_USD` and `OPSPILOT_KILL_SWITCH` have sat in
@@ -108,31 +148,48 @@ export const budgetConfigSchema = z
      * the demo does — so refusing to boot over it would be theatre. A *set but
      * unreadable* one still throws: someone wrote it down for a reason.
      */
-    OPSPILOT_RUNS_PER_MINUTE: z
-      .string()
-      .optional()
-      .transform((s, ctx) => {
-        if (s === undefined) return DEFAULT_RUNS_PER_MINUTE;
-        const n = Number(s);
-        if (!Number.isSafeInteger(n) || n <= 0) {
-          ctx.addIssue({
-            code: "custom",
-            message: `OPSPILOT_RUNS_PER_MINUTE must be a positive integer, got "${s}"`,
-          });
-          return z.NEVER;
-        }
-        return n;
-      }),
+    OPSPILOT_RUNS_PER_MINUTE: runsPerMinuteKey(
+      "OPSPILOT_RUNS_PER_MINUTE",
+      () => DEFAULT_RUNS_PER_MINUTE,
+    ),
+    /**
+     * Same posture, one scope up. Absent takes the default, and a value
+     * someone wrote down but got wrong still throws.
+     */
+    OPSPILOT_GLOBAL_RUNS_PER_MINUTE: runsPerMinuteKey(
+      "OPSPILOT_GLOBAL_RUNS_PER_MINUTE",
+      () => DEFAULT_GLOBAL_RUNS_PER_MINUTE,
+    ),
   })
   .transform(
     (env): BudgetConfig => ({
       dailyCapNanos: Math.round(env.OPSPILOT_DAILY_BUDGET_USD * NANOS_PER_USD),
       killSwitch: TRUTHY.has((env.OPSPILOT_KILL_SWITCH ?? "").toLowerCase()),
       runsPerMinute: env.OPSPILOT_RUNS_PER_MINUTE,
+      globalRunsPerMinute: env.OPSPILOT_GLOBAL_RUNS_PER_MINUTE,
     }),
   );
 
 const DEFAULT_RUNS_PER_MINUTE = 10;
+
+/**
+ * The ceiling on the whole demo when nobody has set one.
+ *
+ * Twice the per-workspace default, and the number is picked from two measured
+ * facts rather than rounded to something comfortable. The golden suite is
+ * eight runs back to back inside one minute, so anything at or below ten
+ * would throttle the eval suite the moment a single visitor ran a ticket
+ * beside it, and the suite's zero-failure baseline is a thing this change is
+ * not allowed to regress. Upward, CLAUDE.md records that eight runs is
+ * roughly 25 model calls and that covara answered some of them with a 429, so
+ * twenty runs is already about 60 calls a minute against an account a law
+ * firm depends on. A larger default would be a promise the account cannot
+ * keep.
+ *
+ * Set `OPSPILOT_GLOBAL_RUNS_PER_MINUTE` to override it. Lowering it is the
+ * safe direction.
+ */
+export const DEFAULT_GLOBAL_RUNS_PER_MINUTE = 20;
 
 export type BudgetRefusal =
   | "kill_switch"
@@ -206,11 +263,22 @@ export function checkBudget(input: BudgetCheck): BudgetDecision {
 export interface ReservationCheck extends BudgetCheck {
   /** Runs already *started* in this workspace inside the rate window. */
   runsInLastMinute: number;
+  /**
+   * Runs already started in **every** workspace inside the same window.
+   *
+   * Required, unlike the config key it is measured against. A caller who
+   * forgets a limit gets a documented default; a caller who forgets a *count*
+   * would be comparing the ceiling to nothing, and `undefined >= 20` is
+   * false, so the omission would read as headroom.
+   */
+  globalRunsInLastMinute: number;
 }
 
 export interface ReservationDecision extends BudgetDecision {
   /** Set only on `rate_limited`, so a 429 can carry `Retry-After`. */
   retryAfterSeconds?: number;
+  /** Set only on `rate_limited`, so the copy can name what refused. */
+  rateLimitScope?: RateLimitScope;
 }
 
 /**
@@ -230,6 +298,12 @@ export interface ReservationDecision extends BudgetDecision {
  * account balance someone else depends on and are not retryable; a rate limit
  * is a "come back in a minute". Telling a caller to retry into an exhausted
  * budget would be worse than useless.
+ *
+ * Two ceilings, one refusal. `runsPerMinute` bounds a single sandbox and
+ * `globalRunsPerMinute` bounds the whole demo, because per-visitor sandboxes
+ * make the first one meaningless on its own: a limit that resets with every
+ * new cookie is not a limit. The reason stays `rate_limited` either way and
+ * `rateLimitScope` says which one answered.
  */
 export function decideReservation(
   input: ReservationCheck,
@@ -238,18 +312,46 @@ export function decideReservation(
     input.runsInLastMinute,
     "runsInLastMinute",
   );
+  const globalInWindow = finiteNonNegative(
+    input.globalRunsInLastMinute,
+    "globalRunsInLastMinute",
+  );
+  const perWorkspace = finiteNonNegative(
+    input.config.runsPerMinute,
+    "runsPerMinute",
+  );
+  const global = finiteNonNegative(
+    input.config.globalRunsPerMinute ?? DEFAULT_GLOBAL_RUNS_PER_MINUTE,
+    "globalRunsPerMinute",
+  );
 
   // The money questions first, so their answers are never masked by a
   // retryable one — and so the kill switch keeps outranking everything.
   const budget = checkBudget(input);
   if (!budget.allowed) return budget;
 
-  if (inWindow >= finiteNonNegative(input.config.runsPerMinute, "runsPerMinute")) {
+  /**
+   * The visitor's own sandbox is asked first, and the order is the message.
+   *
+   * Both ceilings can be tripped at once. "This sandbox is going too fast" is
+   * something the person reading it did and can stop doing; "the demo is
+   * busy" is neither. Answering with the second while the first is true
+   * blames strangers for a limit they hit themselves.
+   */
+  const rateLimitScope: RateLimitScope | null =
+    inWindow >= perWorkspace
+      ? "workspace"
+      : globalInWindow >= global
+        ? "global"
+        : null;
+
+  if (rateLimitScope !== null) {
     return {
       allowed: false,
       reason: "rate_limited",
       remainingNanos: budget.remainingNanos,
       retryAfterSeconds: RATE_WINDOW_SECONDS,
+      rateLimitScope,
     };
   }
 
