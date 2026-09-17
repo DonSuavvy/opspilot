@@ -1,5 +1,7 @@
 # OpsPilot
 
+[![CI](https://github.com/DonSuavvy/opspilot/actions/workflows/ci.yml/badge.svg)](https://github.com/DonSuavvy/opspilot/actions/workflows/ci.yml)
+
 An AI agent that runs a SaaS company's support and billing back office, where
 **the reliability engineering is the product**.
 
@@ -8,8 +10,8 @@ cost, latency). Risky actions pause for human approval. The prompt regression
 suite is deterministic and runs from the UI and the command line.
 
 > **Status: Days 1 to 7 of a 10-day build are on `main`.** 606 tests across 31
-> files, 13 pull requests, CI green on every merge, and the failing test
-> committed before the fix in 51 of the 209 commits so the RED step is visible
+> files, every change merged through a pull request with CI green, and the
+> failing test committed before the fix in 51 commits so the RED step is visible
 > in `git log`. Day 8 (per-visitor sandboxes, an eval gate in CI, and the
 > deploy) is on a branch waiting on the deploy step; there is no public URL yet.
 > Roadmap and per-day gates: [`docs/PLAN.md`](docs/PLAN.md).
