@@ -7,8 +7,8 @@ The reliability engineering **is** the product: the SOP is a versioned editable
 prompt, every run is fully traced, risky actions are gated behind human
 approval, and the eval suite runs in CI.
 
-Portfolio project for the Data Skill Source "AI Prompt Engineer & Agent Builder"
-application.
+Portfolio project: a public, readable example of running an agent with
+production-grade controls.
 
 ## Source of truth
 
