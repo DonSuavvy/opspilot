@@ -56,10 +56,12 @@ npm run db:migrate
 npm run db:seed        # idempotent; deletes the demo workspace and re-seeds
 npm run db:studio
 
-npm run verify:boot    # proves boot validation rejects a bad tool definition
-npm run verify:seed    # proves the seeded DB supports the demo arc (needs DB)
-npm run verify:evals   # proves an eval run is pinned, totalled, and harmless (needs DB)
-npm run verify:budget  # proves the spend guard holds under concurrency (needs DB)
+npm run verify:boot     # proves boot validation rejects a bad tool definition
+npm run verify:seed     # proves the seeded DB supports the demo arc (needs DB)
+npm run verify:evals    # proves an eval run is pinned, totalled, and harmless (needs DB)
+npm run verify:budget   # proves the spend guard holds under concurrency (needs DB)
+npm run verify:sandbox  # proves a sandbox seeds itself and can't see another's data (needs DB)
+npm run evals:ci        # the CI gate's own entry point — same suite, posts a scorecard comment
 ```
 
 ## Conventions
@@ -183,7 +185,10 @@ Each of these cost real time. Don't rediscover them.
   replaces the reservation with the actual. The lock is on `workspaces`, not
   `agent_runs`, because the thing being serialised is the decision and there is
   no row to lock for a run that does not exist yet — so one sandbox's burst
-  never blocks another's. **What the concurrent test proved**
+  never blocks another's. (Superseded on Day 8 below: once the cap is global
+  across sandboxes, there is no longer one `workspaces` row that means "the
+  whole system," so the lock moves from that row to a Postgres advisory lock.)
+  **What the concurrent test proved**
   (`npm run verify:budget`, 21 checks): five `reserveRun` calls through
   `Promise.all` against a cap that fits two let exactly two through and land
   the day's spend on the cap exactly. Delete the `for update` and the same
@@ -207,6 +212,17 @@ Each of these cost real time. Don't rediscover them.
   never saw the money — `agent_runs.charged_at` now moves with every write of
   `cost_usd` and `spentTodayNanos` reads it, while run *counts* (the rate
   limit, "runs today") stay on `started_at`, which is what they actually ask.
+- **Day 8 made the cap global, because a sandbox is not a workspace anyone
+  can lock alone.** The mechanism above reserves against one `workspaces`
+  row, which is correct when there is one tenant and wrong the moment
+  visitor sandboxes exist: `OPSPILOT_DAILY_BUDGET_USD` has to cap every
+  sandbox combined, and no single row speaks for that total. The reservation
+  now takes a Postgres advisory lock instead of a row lock, so every
+  workspace's reserve-accrue-replace cycle queues behind the same lock rather
+  than each behind its own row. `OPSPILOT_RUNS_PER_MINUTE` is unchanged and
+  stays per sandbox; the new `OPSPILOT_GLOBAL_RUNS_PER_MINUTE` repeats the
+  same check across every sandbox combined, because Bedrock's 429 does not
+  care which workspace's runs added up to the burst.
 - **A burst is a second axis, and it is not about money.** Ten runs at two
   cents each are eight cents inside a five-dollar cap and still enough to trip
   Bedrock's 429 on an account shared with Causa's live generation. So
@@ -259,6 +275,14 @@ Each of these cost real time. Don't rediscover them.
   precisely so it is inside a 30-day window and outside a 14-day one. If that
   stops being true, demo arc step 2 silently demonstrates nothing.
   `npm run verify:seed` asserts it.
+- **Vercel Hobby crons run once a day, so a sandbox's real TTL is 24 to 48
+  hours, not 24.** `GET /api/cron/cleanup` sweeps every sandbox past its
+  24-hour `expires_at`, but Hobby cannot schedule it more often than daily.
+  A sandbox created right after the 03:00 UTC sweep sits for its full TTL and
+  then waits up to another 24 hours for the next sweep to find it. This is a
+  platform constraint on when cleanup *runs*, not a bug in the TTL check
+  itself, and it is why the sweep can double as the Neon keep-alive: it fires
+  at least once a day no matter how much sandbox traffic there is.
 
 ## Model strategy
 
@@ -299,6 +323,10 @@ IDs and API shapes changed in 2025–26; do not code from memory.
 ```
 docs/PLAN.md            authoritative build plan
 docs/SECURITY.md        the threat model, and which file each control lives in
+docs/RUNBOOK.md         budgets, kill switch, outage, sandbox cleanup, deploy
+vercel.json             regions: ["sin1"] (Neon is ap-southeast-1); the daily cron
+.github/workflows/evals.yml  the Evals CI gate — SOP/prompt PRs, one scorecard comment
+src/proxy.ts            sets the opspilot_sandbox cookie and x-opspilot-sandbox header
 src/policy/             pure policy engine (refund limits, escalation)
 src/agent/registry.ts   tool registry: Zod -> strict JSON Schema, boot validation
 src/agent/tools.ts      the 9 tools — 8 handlers live; update_subscription is a
@@ -314,6 +342,7 @@ src/db/client.ts        lazy getDb()
 src/db/ops-data.ts      Drizzle OpsData, scoped to one workspace
 src/db/ops.ts           Mission Control's read side — budgetGauge, opsSnapshot
 src/db/runs.ts          run + span persistence, today's spend
+src/db/sandbox.ts       ensureSandbox — lazy seed on first use, 24h TTL on expires_at
 src/db/seed.ts          deterministic Beacon Analytics seed
 src/db/evals.ts         eval run/result persistence, and the list + detail reads
 src/evals/case.ts       the eval case schema — closed, so a typo'd key cannot pass
@@ -323,23 +352,51 @@ src/evals/recorded-data.ts  reads through, writes recorded: the eval write barri
 src/evals/pin.ts        prompt version and git SHA, so two runs are comparable
 src/evals/runner.ts     one case: loop + barrier + scorer
 src/evals/suite.ts      the whole suite, sequentially, into one pinned eval_runs row
+src/evals/scorecard.ts  the CI comment's scorecard text, built from a suite result —
+                        not the UI's, which is eval-lab.tsx below
+src/evals/provider-env.ts  whether the eval gate has a provider at all: the whole
+                        Bedrock trio, or the first-party key
 src/lib/agent-stream.ts   SSE trace reader, shared by both islands that start a run
 src/lib/approval-copy.ts  describeApproval — the sentence a reviewer decides on
 src/lib/eval-labels.ts    sopLabel, shortSha, compactJson — total over every null
+src/lib/sandbox.ts        the sandbox slug: sb_ + 32 hex, read from the cookie —
+                          plus displaySlug, the masked form anything public
+                          prints, and resetAllowed, the reset cooldown
+src/lib/ownership.ts      ownedOrMissing — another sandbox's row is a 404, with
+                          the same body as a row that never existed
+src/lib/budget-copy.ts    a refusal body -> the sentence a visitor reads
+src/lib/budget-response.ts  a Reservation -> the 429 or 402 both run routes send
 src/lib/span-copy.ts      describeSpan — one line saying what a span carried
+src/lib/workspace.ts      resolves a request's workspace from its sandbox header,
+                          and throws when there isn't one — there is deliberately
+                          no fallback tenant, since a silent one would put a
+                          visitor inside somebody else's sandbox
 src/components/approval-decision.tsx  approve or deny one paused run, in place
 src/components/approval-queue.tsx     the pending rows, each decided on its own
 src/components/eval-lab.tsx           the streaming scorecard and the run history
+src/app/inbox/          the ticket inbox — moved here from / on Day 8; / is the
+                        landing page now
 src/app/api/agent/run/  POST a ticket id, stream the trace back as SSE
+src/app/api/agent/resume/  POST a decision on a paused run, stream the rest
 src/app/api/evals/run/  POST to run the golden suite, streamed as a scorecard
 src/app/api/health/     liveness and budget state, leaking no environment
+src/app/api/sandbox/reset/  POST — wipes and reseeds the caller's own sandbox,
+                            429 inside a thirty second cooldown
+src/app/api/cron/cleanup/   GET, bearer-gated on CRON_SECRET — sweeps expired
+                            sandboxes and doubles as the Neon keep-alive
 src/app/approvals/      the queue page, server-rendered from listPendingApprovals
 src/app/evals/          run the suite, and the history with a diff link per row
 src/app/evals/[id]/     one run: the pin, then every assertion it made
 src/app/evals/diff/     ?base=&head= — regressed, fixed, added, removed, unchanged
-src/app/ops/            Mission Control — spend, guardrails, approvals, evals
-scripts/verify-*.ts     gate evidence — boot, seed, evals, and budget under load
+src/app/ops/            Mission Control — the whole deployment's spend, rate
+                        counters, guardrails, approvals, evals, and recent runs
+                        badged by masked slug
+scripts/verify-*.ts     gate evidence — boot, seed, evals, budget, and sandbox
 scripts/probe-grammar.ts  which tool set blows the strict grammar cap
+scripts/ci-evals.ts     the evals:ci entry point — runs the suite, upserts the
+                        PR scorecard comment
+scripts/wizard-deploy.sh  the deploy wizard — GitHub secrets, vercel link, prod
+                          env, migrate + seed, deploy, smoke test
 ```
 
 **Two seams carry the whole test strategy.** `MessageCreator` stands in for the

@@ -9,11 +9,8 @@
  * Written against the Next 16 route-handler streaming pattern in
  * `node_modules/next/dist/docs/01-app/02-guides/streaming.md`, not from memory.
  */
-import {
-  budgetConfigSchema,
-  ESTIMATED_RUN_NANOS,
-  type BudgetRefusal,
-} from "@/agent/budget";
+import { budgetConfigSchema, ESTIMATED_RUN_NANOS } from "@/agent/budget";
+import { budgetRefusalResponse } from "@/lib/budget-response";
 import { recordPendingApproval } from "@/db/approvals";
 import { cachedSystem } from "@/agent/cache";
 import { compileSop } from "@/agent/sop";
@@ -34,40 +31,23 @@ import { streamingMessageCreator } from "@/agent/streaming";
 import { TOOLS } from "@/agent/tools";
 import { and, eq } from "drizzle-orm";
 import { customers, tickets } from "@/db/schema";
+import { ownedOrMissing } from "@/lib/ownership";
+import { sandboxFromRequest } from "@/lib/workspace";
 
 export const dynamic = "force-dynamic";
 
 /**
- * How a budget refusal is reported.
+ * One run is a handful of model calls, and Vercel's default cuts them off.
  *
- * 429 for a rate limit and 402 for the money reasons, because they mean
- * different things to a caller: one says "come back in a minute" and carries
- * `Retry-After`, the others say "not today" and retrying makes things worse.
- * Both are decided *before* the stream opens — once the 200 and the
- * event-stream headers are out there is no status code left to report with,
- * and a refusal delivered as an SSE `error` event is one a `curl` pipeline
- * reads as success.
+ * 300 seconds needs **Fluid compute**, which is on by default for new Vercel
+ * projects and is what raises the ceiling above the per-plan function limit.
+ * Without it a Hobby project caps at 60 seconds and a value over the plan's
+ * limit fails the deployment rather than being clamped down to it, so this is
+ * a thing to check in project settings before a deploy rather than a number
+ * that quietly degrades. `/api/evals/run` carries the same number for the
+ * same reason.
  */
-function refusalResponse(refusal: {
-  reason: BudgetRefusal;
-  retryAfterSeconds?: number;
-}): Response {
-  const headers =
-    refusal.retryAfterSeconds !== undefined
-      ? { "Retry-After": String(refusal.retryAfterSeconds) }
-      : undefined;
-
-  return Response.json(
-    {
-      error: `budget: refused (${refusal.reason})`,
-      reason: refusal.reason,
-      ...(refusal.retryAfterSeconds !== undefined
-        ? { retry_after_seconds: refusal.retryAfterSeconds }
-        : {}),
-    },
-    { status: refusal.reason === "rate_limited" ? 429 : 402, headers },
-  );
-}
+export const maxDuration = 300;
 
 /**
  * The public demo runs Haiku 4.5 — rate-capped and ~pennies per run.
@@ -109,7 +89,21 @@ export async function POST(request: Request) {
 
   const db = getDb();
 
-  const [ticket] = await db
+  // Resolved before the ticket is read, because the answer decides whether
+  // this visitor is allowed to see it. Seeds the sandbox if the visitor is new
+  // or their last one expired, which is why a first `curl` against a fresh
+  // cookie works at all.
+  let sandbox;
+  try {
+    sandbox = await sandboxFromRequest(request);
+  } catch (error) {
+    return Response.json(
+      { error: error instanceof Error ? error.message : String(error) },
+      { status: 500 },
+    );
+  }
+
+  const [row] = await db
     .select({
       id: tickets.id,
       workspaceId: tickets.workspaceId,
@@ -121,6 +115,9 @@ export async function POST(request: Request) {
     .where(eq(tickets.id, ticketId))
     .limit(1);
 
+  // One branch and one message for both "no such ticket" and "not yours". A
+  // separate 403 would tell whoever is guessing ids which guesses landed.
+  const ticket = ownedOrMissing(row, sandbox.workspaceId);
   if (!ticket) {
     return Response.json({ error: `no ticket ${ticketId}` }, { status: 404 });
   }
@@ -194,7 +191,7 @@ export async function POST(request: Request) {
     rateVerified: rates.verifiedOn !== null,
   });
 
-  if (!reservation.ok) return refusalResponse(reservation);
+  if (!reservation.ok) return budgetRefusalResponse(reservation);
 
   const { runId, baselineNanos, priorNanos } = reservation;
 

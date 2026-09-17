@@ -21,6 +21,11 @@ import { ApprovalDecision } from "@/components/approval-decision";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { describeApproval } from "@/lib/approval-copy";
+import {
+  describeBudgetRefusal,
+  readBudgetRefusal,
+  type BudgetRefusalView,
+} from "@/lib/budget-copy";
 import { compactJson } from "@/lib/eval-labels";
 import { describeSpan } from "@/lib/span-copy";
 import { readAgentStream, type Done, type Span } from "@/lib/agent-stream";
@@ -96,6 +101,13 @@ export function RunConsole({
   const [runId, setRunId] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * A refusal is kept apart from an error because it is not one. The spend
+   * guard saying no is the feature working, and rendering it in the same red
+   * box as a dead provider teaches whoever is watching to read both as
+   * breakage.
+   */
+  const [refusal, setRefusal] = useState<BudgetRefusalView | null>(null);
   const abort = useRef<AbortController | null>(null);
 
   const run = useCallback(async (ticket: TicketSummary) => {
@@ -107,6 +119,7 @@ export function RunConsole({
     setDone(null);
     setRunId(null);
     setError(null);
+    setRefusal(null);
     setRunning(true);
 
     try {
@@ -121,6 +134,17 @@ export function RunConsole({
       // the only window in which a status code is still available to report.
       if (!response.ok || !response.body) {
         const detail = await response.json().catch(() => ({}));
+
+        // A 402 or a 429 from the spend guard is a decision, not a fault, and
+        // it arrives with enough structure to say so in words. Anything the
+        // reader does not recognise keeps the old handling: better a raw
+        // message than a confident sentence about the wrong thing.
+        const budget = readBudgetRefusal(detail);
+        if (budget) {
+          setRefusal(budget);
+          return;
+        }
+
         throw new Error(detail.error ?? `run failed (${response.status})`);
       }
 
@@ -249,6 +273,15 @@ export function RunConsole({
             </span>
           ) : null}
         </div>
+
+        {refusal ? (
+          <p
+            role="status"
+            className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200"
+          >
+            {describeBudgetRefusal(refusal)}
+          </p>
+        ) : null}
 
         {error ? (
           <p className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900 dark:bg-red-950 dark:text-red-200">

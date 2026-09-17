@@ -41,7 +41,7 @@ import { createHash } from "node:crypto";
 import { eq } from "drizzle-orm";
 
 import { DEFAULT_POLICY } from "../policy/refund";
-import type { Db } from "./client";
+import type { DbOrTx } from "./runs";
 import { SOP_MARKDOWN } from "./sop-content";
 import {
   customers,
@@ -325,15 +325,21 @@ const KB: ReadonlyArray<{ slug: string; title: string; body: string; tags: strin
 /**
  * Plant the full Beacon Analytics fixture set into one workspace.
  *
- * Takes `db` rather than calling `getDb()` so a caller can supply a
+ * Takes `DbOrTx` rather than calling `getDb()` so a caller can supply a
  * transaction, and returns counts rather than printing them — reporting is the
  * caller's business. The CLI wrapper lives at `scripts/seed.ts`.
+ *
+ * `ensureSandbox` is the caller that needs the transaction. It seeds under a
+ * `pg_advisory_xact_lock`, so two visitors arriving on the same slug at the
+ * same instant plant one workspace rather than racing to plant two. The type
+ * is imported from `runs.ts` as a type only, which keeps the budget module
+ * out of this file's runtime graph.
  *
  * Idempotent per workspace: the leading delete cascades to every tenant-scoped
  * table, which is also the single lever behind the demo's Reset button.
  */
 export async function seedWorkspace(
-  db: Db,
+  db: DbOrTx,
   { slug, expiresAt, now }: SeedWorkspaceOptions,
 ): Promise<SeedCounts> {
   const seedId = seedIdsFor(slug);

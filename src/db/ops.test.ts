@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { budgetGauge, summarizeGuardrail } from "./ops";
+import { budgetGauge, summarizeGuardrail, toRecentRun } from "./ops";
 
 /**
  * Mission Control's two pure halves.
@@ -277,5 +277,49 @@ describe("summarizeGuardrail", () => {
         output: { violations: [], error: "denied" },
       }),
     ).toBe("denied");
+  });
+});
+
+describe("toRecentRun", () => {
+  /**
+   * The row the query returns, so the mapper is tested on the shape it is
+   * actually handed rather than on a convenient subset.
+   */
+  const row = {
+    id: "run-1",
+    workspaceSlug: `sb_${"0123456789abcdef".repeat(2)}`,
+    status: "completed",
+    model: "haiku",
+    startedAt: new Date("2026-09-10T03:00:00.000Z"),
+    costUsd: "0.0021",
+  };
+
+  it("masks the sandbox slug, because the slug is the capability", () => {
+    // Mission Control is unauthenticated. A visitor who reads a full slug off
+    // this page can set it as their cookie and approve a stranger's paused
+    // refund or wipe their sandbox. The badge only needs to say *which*
+    // sandbox, which four characters do.
+    expect(toRecentRun(row).workspaceLabel).toBe("sb_…cdef");
+  });
+
+  it("puts no full slug anywhere in the row it returns", () => {
+    expect(JSON.stringify(toRecentRun(row))).not.toMatch(/sb_[0-9a-f]{32}/);
+  });
+
+  it("leaves the durable tenant named", () => {
+    expect(toRecentRun({ ...row, workspaceSlug: "demo" }).workspaceLabel).toBe(
+      "demo",
+    );
+  });
+
+  it("carries the rest of the row through untouched", () => {
+    expect(toRecentRun(row)).toEqual({
+      id: "run-1",
+      workspaceLabel: "sb_…cdef",
+      status: "completed",
+      model: "haiku",
+      startedAt: new Date("2026-09-10T03:00:00.000Z"),
+      costUsd: "0.0021",
+    });
   });
 });

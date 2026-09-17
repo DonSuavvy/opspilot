@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "OpsPilot — a traced, gated support agent",
+  title: "OpsPilot: a traced, gated support agent",
   description:
     "An AI agent running a SaaS support and billing back office. Versioned SOP, " +
     "fully traced runs, risky actions behind human approval, evals in CI.",

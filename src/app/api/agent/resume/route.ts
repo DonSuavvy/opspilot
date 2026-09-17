@@ -10,11 +10,8 @@
  * so the trace viewer shows one continuous waterfall across both invocations
  * rather than two runs that happen to share a ticket.
  */
-import {
-  budgetConfigSchema,
-  ESTIMATED_RUN_NANOS,
-  type BudgetRefusal,
-} from "@/agent/budget";
+import { budgetConfigSchema, ESTIMATED_RUN_NANOS } from "@/agent/budget";
+import { budgetRefusalResponse } from "@/lib/budget-response";
 import { cachedSystem } from "@/agent/cache";
 import { compileSop } from "@/agent/sop";
 import { createOpsData } from "@/db/ops-data";
@@ -39,6 +36,8 @@ import {
 import { prepareTicketRun } from "@/agent/guardrails";
 import { buildRegistry } from "@/agent/registry";
 import { tickets } from "@/db/schema";
+import { ownedOrMissing } from "@/lib/ownership";
+import { sandboxFromRequest } from "@/lib/workspace";
 import { eq } from "drizzle-orm";
 import {
   createClient,
@@ -58,29 +57,20 @@ import { TOOLS } from "@/agent/tools";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * One run is a handful of model calls, and Vercel's default cuts them off.
+ *
+ * 300 seconds needs **Fluid compute**, which is on by default for new Vercel
+ * projects and is what raises the ceiling above the per-plan function limit.
+ * Without it a Hobby project caps at 60 seconds and a value over the plan's
+ * limit fails the deployment rather than being clamped down to it, so this is
+ * a thing to check in project settings before a deploy rather than a number
+ * that quietly degrades. `/api/evals/run` carries the same number for the
+ * same reason.
+ */
+export const maxDuration = 300;
+
 const DEMO_MODEL: LogicalModel = "haiku";
-
-/** Same shape as `/api/agent/run`: 429 for a rate limit, 402 for the rest. */
-function refusalResponse(refusal: {
-  reason: BudgetRefusal;
-  retryAfterSeconds?: number;
-}): Response {
-  const headers =
-    refusal.retryAfterSeconds !== undefined
-      ? { "Retry-After": String(refusal.retryAfterSeconds) }
-      : undefined;
-
-  return Response.json(
-    {
-      error: `budget: refused (${refusal.reason})`,
-      reason: refusal.reason,
-      ...(refusal.retryAfterSeconds !== undefined
-        ? { retry_after_seconds: refusal.retryAfterSeconds }
-        : {}),
-    },
-    { status: refusal.reason === "rate_limited" ? 429 : 402, headers },
-  );
-}
 
 interface ResumeRequest {
   run_id?: string;
@@ -123,7 +113,22 @@ export async function POST(request: Request) {
 
   const db = getDb();
 
-  const run = await loadPausedRun(db, runId);
+  // Same rule as `/api/agent/run`: resolve the visitor first, then decide
+  // whether the id they sent names anything they are allowed to see.
+  let sandbox;
+  try {
+    sandbox = await sandboxFromRequest(request);
+  } catch (error) {
+    return Response.json(
+      { error: error instanceof Error ? error.message : String(error) },
+      { status: 500 },
+    );
+  }
+
+  // A paused run belonging to another sandbox reads as a run that never
+  // existed. Anything else would let one visitor confirm a stranger's refund
+  // is sitting in a queue.
+  const run = ownedOrMissing(await loadPausedRun(db, runId), sandbox.workspaceId);
   if (!run) {
     return Response.json({ error: `no run ${runId}` }, { status: 404 });
   }
@@ -249,7 +254,7 @@ export async function POST(request: Request) {
     rateVerified: rates.verifiedOn !== null,
   });
 
-  if (!reservation.ok) return refusalResponse(reservation);
+  if (!reservation.ok) return budgetRefusalResponse(reservation);
 
   const { baselineNanos, priorNanos } = reservation;
 
