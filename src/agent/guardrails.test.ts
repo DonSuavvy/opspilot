@@ -146,7 +146,7 @@ describe("prepareTicketRun — a flagged ticket", () => {
     expect(prepared.messages[0]!.role).toBe("user");
 
     const content = text(prepared);
-    const base = ticketMessage(ADVERSARIAL);
+    const base = ticketMessage({ ...ADVERSARIAL, now: NOW });
 
     // The ticket is unchanged and comes first; the notice is the last thing
     // the model reads, which is where an instruction has to sit if it is to
@@ -226,7 +226,7 @@ describe("prepareTicketRun — an honest ticket", () => {
     });
 
     expect(prepared.messages).toEqual([
-      { role: "user", content: ticketMessage(HONEST) },
+      { role: "user", content: ticketMessage({ ...HONEST, now: NOW }) },
     ]);
     expect(text(prepared)).not.toContain("guardrail_notice");
     expect(prepared.guardrailSpan).toBeNull();
