@@ -18,10 +18,13 @@ import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { getDb } from "@/db/client";
 import { getEvalRun, type EvalRunDetail } from "@/db/evals";
-import { workspaces } from "@/db/schema";
 import { diffEvalRuns } from "@/evals/diff";
 import type { CaseDiff } from "@/evals/types";
 import { compactJson, shortSha, sopLabel } from "@/lib/eval-labels";
+import {
+  currentSandbox,
+  SandboxHeaderMissingError,
+} from "@/lib/workspace";
 
 export const dynamic = "force-dynamic";
 
@@ -36,15 +39,20 @@ function one(value: string | string[] | undefined): string | null {
   return null;
 }
 
-/** Resolved once and passed to both loads, rather than queried twice. */
-async function firstWorkspaceId(): Promise<string | null> {
+/**
+ * Resolved once and passed to both loads, rather than queried twice.
+ *
+ * Both runs in a diff have to come from the visitor's own sandbox. Comparing
+ * across tenants would render two strangers' scorecards side by side and call
+ * the difference a regression.
+ */
+async function visitorWorkspaceId(): Promise<string | null> {
   try {
-    const [ws] = await getDb()
-      .select({ id: workspaces.id })
-      .from(workspaces)
-      .limit(1);
-    return ws?.id ?? null;
-  } catch {
+    return (await currentSandbox()).workspaceId;
+  } catch (error) {
+    // A routing fault is not a missing run, and the message below would tell
+    // the reader to check their ids.
+    if (error instanceof SandboxHeaderMissingError) throw error;
     return null;
   }
 }
@@ -214,7 +222,7 @@ export default async function EvalDiffPage(props: PageProps<"/evals/diff">) {
     );
   }
 
-  const workspaceId = await firstWorkspaceId();
+  const workspaceId = await visitorWorkspaceId();
   const [base, head] = workspaceId
     ? await Promise.all([
         loadRun(workspaceId, baseId),

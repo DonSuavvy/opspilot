@@ -13,6 +13,7 @@ import {
   decideReservation,
   type BudgetConfig,
   type BudgetRefusal,
+  type RateLimitScope,
 } from "../agent/budget";
 import type { AgentLoopResult } from "../agent/loop";
 import { spanToRow } from "../agent/trace";
@@ -69,8 +70,17 @@ function usdToNanos(usd: string | null): number {
 }
 
 /**
- * Today's spend for a workspace, in nano-dollars — the baseline the loop's
- * pre-flight adds its own in-run accrual to.
+ * Today's spend across **every** workspace, in nano-dollars — the baseline
+ * the loop's pre-flight adds its own in-run accrual to.
+ *
+ * **No workspace filter, and that is the whole point.** The cap is one figure
+ * about one shared Bedrock account, not a per-tenant allowance. Scoped to a
+ * workspace it was already the wrong number and merely looked right while
+ * there was one workspace. Per-visitor sandboxes mint a workspace per cookie,
+ * so a scoped sum would hand every stranger a fresh five dollars and ten
+ * strangers ten caps, against an account a law firm's live generation runs
+ * on. Mission Control, `/api/health` and the reservation gate all read this
+ * one, so all three agree on what "today" cost.
  *
  * **Keyed on `charged_at`, not `started_at`.** Every writer of `cost_usd`
  * writes back into the run's original row, so a run paused at 23:50 and
@@ -85,7 +95,6 @@ function usdToNanos(usd: string | null): number {
  */
 export async function spentTodayNanos(
   db: DbOrTx,
-  workspaceId: string,
   now: Date,
 ): Promise<number> {
   const midnight = new Date(now);
@@ -94,12 +103,7 @@ export async function spentTodayNanos(
   const [row] = await db
     .select({ total: sql<string>`coalesce(sum(${agentRuns.costUsd}), 0)` })
     .from(agentRuns)
-    .where(
-      and(
-        eq(agentRuns.workspaceId, workspaceId),
-        gte(agentRuns.chargedAt, midnight),
-      ),
-    );
+    .where(gte(agentRuns.chargedAt, midnight));
 
   return Math.round(Number(row?.total ?? 0) * NANOS_PER_USD);
 }
@@ -117,14 +121,19 @@ export async function spentTodayNanos(
  *
  * **The fix is to reserve, not to read harder.** No amount of care in the
  * SELECT helps, because the number it wants does not exist yet. So the run
- * writes its own estimate into `cost_usd` before it starts, under a row lock
- * on its workspace, and every concurrent reservation queues behind that lock
- * and sees it. `finishRun` later replaces the estimate with the actual.
+ * writes its own estimate into `cost_usd` before it starts, under a lock, and
+ * every concurrent reservation queues behind that lock and sees it.
+ * `finishRun` later replaces the estimate with the actual.
  *
- * The lock is on `workspaces` rather than on `agent_runs`, because the thing
- * being serialised is *the decision*, and there is no row to lock for a run
- * that does not exist yet. One workspace's burst therefore never blocks
- * another's — which matters the moment public sandboxes exist.
+ * **The lock is global, and it was per workspace until sandboxes arrived.**
+ * A row lock on `workspaces` serialises one tenant's reservations, which is
+ * the right shape when a tenant is a customer and the wrong one when a tenant
+ * is a browser cookie. Under sandboxes, each visitor's runs queued neatly
+ * behind their own lock and read a daily total that excluded everybody else,
+ * so ten visitors were ten daily caps against one shared account. The lock is
+ * now `pg_advisory_xact_lock` on a single fixed key and the day's spend is
+ * summed over every workspace. See `RESERVATION_LOCK_KEY` and
+ * `lockReservations` for why the row lock did not stay alongside it.
  */
 export type Reservation =
   | {
@@ -150,6 +159,15 @@ export type Reservation =
       ok: false;
       reason: BudgetRefusal;
       retryAfterSeconds?: number;
+      /**
+       * Which ceiling refused, on `rate_limited` and nothing else.
+       *
+       * Additive and optional, so every existing caller compiles and behaves
+       * exactly as it did. It exists because "too fast" means two opposite
+       * things once sandboxes are per visitor, and the sentence a stranger
+       * reads has to be able to tell them apart.
+       */
+      rateLimitScope?: RateLimitScope;
       remainingNanos: number;
     };
 
@@ -198,16 +216,54 @@ function killSwitched(config: BudgetConfig): Reservation | null {
 }
 
 /**
- * Serialise every reservation for this workspace.
+ * The one key every reservation in this database queues behind.
  *
- * `for update` on the workspace row, held to the end of the transaction. Two
- * concurrent reservations therefore run the read-decide-write sequence one
- * after the other, which is the whole mechanism: the second one's SELECT
- * happens after the first one's INSERT.
+ * Arbitrary and fixed forever. The only properties that matter are that every
+ * OpsPilot process picks the same number and that nothing else in this
+ * database uses it for an advisory lock of its own. Deliberately **not**
+ * derived from `hashtext` or any other hash of a string: those are not
+ * guaranteed stable across Postgres major versions, and a key that quietly
+ * changes on an upgrade is a lock that quietly stops locking. Below
+ * `Number.MAX_SAFE_INTEGER`, because Drizzle interpolates a JS number and
+ * anything larger loses precision without saying so.
  */
-async function lockWorkspace(tx: DbOrTx, workspaceId: string): Promise<void> {
+const RESERVATION_LOCK_KEY = 4_207_360_001;
+
+/**
+ * Serialise every reservation in the deployment, not just this workspace's.
+ *
+ * `pg_advisory_xact_lock` is held to the end of the transaction, so two
+ * concurrent reservations run the read-decide-write sequence one after the
+ * other and the second one's SELECT happens after the first one's INSERT.
+ * That was already true per workspace. It has to be true across workspaces
+ * now, because the cap is one figure about one shared account and a sandbox
+ * is minted per visitor cookie.
+ *
+ * **The workspace row lock is gone, and its absence is deliberate.** A global
+ * lock subsumes it: a total order over every reservation is also a total
+ * order over each workspace's, so the per-workspace count below is still read
+ * inside the critical section and is still consistent. Keeping it would have
+ * bought nothing and cost something real, because `select ... for update` on
+ * a `workspaces` row would newly contend with the sandbox code that touches
+ * those rows on visitor traffic. A vanished workspace is caught by the FK on
+ * `agent_runs.workspace_id`, which is what actually guaranteed it before.
+ *
+ * An advisory lock needs no table and no migration. There is no row to lock
+ * for a run that does not exist yet, which is the same reason the old lock
+ * was on `workspaces` rather than on `agent_runs`.
+ *
+ * **`_xact_` rather than the session variant, and on Neon that is not a
+ * preference.** A session-level advisory lock is held by a backend, and a
+ * transaction-mode pooler hands backends to whoever asks next, so the lock
+ * outlives the caller and is released by nobody. The transaction-scoped form
+ * lives and dies inside one transaction, which a pooler in transaction mode
+ * keeps on one backend by definition. Deploying behind Neon's pooled endpoint
+ * is the plan of record, so the wrong one of these two would deadlock the
+ * demo rather than fail a test.
+ */
+async function lockReservations(tx: DbOrTx): Promise<void> {
   await tx.execute(
-    sql`select 1 from workspaces where id = ${workspaceId} for update`,
+    sql`select pg_advisory_xact_lock(${RESERVATION_LOCK_KEY}::bigint)`,
   );
 }
 
@@ -230,6 +286,22 @@ async function runsInWindow(
   return Number(row?.n ?? 0);
 }
 
+/**
+ * Runs started anywhere inside the rate window.
+ *
+ * Counted from rows rather than from memory, like its per-workspace twin: a
+ * serverless deployment has no memory to count in, and a counter held in one
+ * process would be blind to every other one.
+ */
+async function globalRunsInWindow(tx: DbOrTx, now: Date): Promise<number> {
+  const [row] = await tx
+    .select({ n: sql<string>`count(*)` })
+    .from(agentRuns)
+    .where(gte(agentRuns.startedAt, new Date(now.getTime() - RATE_WINDOW_MS)));
+
+  return Number(row?.n ?? 0);
+}
+
 function refused(
   decision: ReturnType<typeof decideReservation>,
 ): Reservation & { ok: false } {
@@ -238,6 +310,7 @@ function refused(
     // Only reachable when `allowed` is false, where `reason` is never null.
     reason: decision.reason!,
     retryAfterSeconds: decision.retryAfterSeconds,
+    rateLimitScope: decision.rateLimitScope,
     remainingNanos: decision.remainingNanos,
   };
 }
@@ -261,17 +334,14 @@ export async function reserveRun(
   if (stopped) return stopped;
 
   return db.transaction(async (tx) => {
-    await lockWorkspace(tx, input.workspaceId);
+    await lockReservations(tx);
 
-    const baselineNanos = await spentTodayNanos(
-      tx,
-      input.workspaceId,
-      input.now,
-    );
+    const baselineNanos = await spentTodayNanos(tx, input.now);
 
     const decision = decideReservation({
       spentTodayNanos: baselineNanos,
       runsInLastMinute: await runsInWindow(tx, input.workspaceId, input.now),
+      globalRunsInLastMinute: await globalRunsInWindow(tx, input.now),
       estimatedRunNanos: input.estimatedRunNanos,
       rateVerified: input.rateVerified,
       config: input.config,
@@ -338,17 +408,14 @@ export async function reserveResume(
   if (stopped) return stopped;
 
   return db.transaction(async (tx) => {
-    await lockWorkspace(tx, input.workspaceId);
+    await lockReservations(tx);
 
-    const baselineNanos = await spentTodayNanos(
-      tx,
-      input.workspaceId,
-      input.now,
-    );
+    const baselineNanos = await spentTodayNanos(tx, input.now);
 
     const decision = decideReservation({
       spentTodayNanos: baselineNanos,
       runsInLastMinute: await runsInWindow(tx, input.workspaceId, input.now),
+      globalRunsInLastMinute: await globalRunsInWindow(tx, input.now),
       estimatedRunNanos: input.estimatedRunNanos,
       rateVerified: input.rateVerified,
       config: input.config,

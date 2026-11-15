@@ -53,9 +53,10 @@ interface BudgetCheck {
  * Postgres and get an answer, and a query over real rows would fold table size
  * and seed state into a number that is supposed to mean "reachable".
  *
- * The workspace id comes back on the same handle so the budget check below
- * does not open a second one, and so a database that answers `select 1` but
- * has no rows is reported honestly rather than as a budget failure.
+ * A workspace id comes back on the same handle so a database that answers
+ * `select 1` but has no rows is reported honestly rather than as a budget
+ * failure. It does not scope anything: the budget below sums every
+ * workspace, because the cap is one figure about one shared account.
  */
 async function checkDb(): Promise<{
   check: DbCheck;
@@ -145,7 +146,10 @@ async function checkBudgetState(
   }
 
   try {
-    const spent = await spentTodayNanos(getDb(), workspaceId, new Date());
+    // Every workspace, because the cap is. `workspaceId` above is only a
+    // signal that the database has rows at all; it never scoped this figure
+    // once sandboxes made a workspace a browser cookie.
+    const spent = await spentTodayNanos(getDb(), new Date());
     const gauge = budgetGauge({
       spentNanos: spent,
       capNanos: config.dailyCapNanos,

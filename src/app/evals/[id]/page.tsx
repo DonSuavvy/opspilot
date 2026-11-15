@@ -13,8 +13,8 @@ import { notFound } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { getDb } from "@/db/client";
 import { getEvalRun, type EvalRunDetail } from "@/db/evals";
-import { workspaces } from "@/db/schema";
 import { compactJson, shortSha, sopLabel } from "@/lib/eval-labels";
+import { currentSandbox } from "@/lib/workspace";
 
 export const dynamic = "force-dynamic";
 
@@ -28,15 +28,16 @@ export const dynamic = "force-dynamic";
  * existed.
  */
 async function loadRun(id: string): Promise<EvalRunDetail | null> {
-  try {
-    const db = getDb();
-    // The demo has one workspace, and the lookup is scoped to it rather than
-    // trusting the id in the URL: a run belonging elsewhere is a 404 here,
-    // which is what it is.
-    const [ws] = await db.select({ id: workspaces.id }).from(workspaces).limit(1);
-    if (!ws) return null;
+  // Deliberately outside the catch. Resolving the visitor can fail because the
+  // proxy did not run or because Postgres is down, and neither of those means
+  // "no such run". Reporting either as a 404 hides an outage behind a page
+  // that looks like a typo.
+  const { workspaceId } = await currentSandbox();
 
-    return await getEvalRun(db, id, ws.id);
+  try {
+    // Scoped to the visitor rather than trusting the id in the URL. A run
+    // belonging to another sandbox is a 404 here, which is what it is.
+    return await getEvalRun(getDb(), id, workspaceId);
   } catch {
     return null;
   }

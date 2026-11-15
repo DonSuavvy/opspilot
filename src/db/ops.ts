@@ -11,13 +11,18 @@
  * Nothing here writes. Mission Control is a window, and a page that can change
  * the thing it is reporting on is a worse instrument.
  */
-import { and, count, desc, eq, gte, type SQL } from "drizzle-orm";
+import { count, desc, eq, gte, type SQL } from "drizzle-orm";
 
-import type { BudgetConfig } from "@/agent/budget";
+import {
+  DEFAULT_GLOBAL_RUNS_PER_MINUTE,
+  type BudgetConfig,
+} from "@/agent/budget";
+
+import { displaySlug } from "@/lib/sandbox";
 
 import type { DbOrTx } from "./runs";
 import { spentTodayNanos } from "./runs";
-import { agentRuns, approvals, evalRuns, runSpans } from "./schema";
+import { agentRuns, approvals, evalRuns, runSpans, workspaces } from "./schema";
 
 /**
  * How far back `runsInLastMinute` looks.
@@ -31,6 +36,9 @@ const RATE_WINDOW_MS = 60_000;
 
 /** How many guardrail spans the page shows. Recent, not historical. */
 const RECENT_GUARDRAILS = 10;
+
+/** How many runs the page lists. Enough to see a burst, short enough to read. */
+const RECENT_RUNS = 12;
 
 /** Longest a guardrail summary may be before it stops fitting a table row. */
 const SUMMARY_MAX = 120;
@@ -217,18 +225,71 @@ export interface RecentGuardrail {
   summary: string;
 }
 
+export interface RecentRun {
+  id: string;
+  /**
+   * What the badge prints, never what a cookie would be accepted from.
+   *
+   * `demo` is the durable workspace. A sandbox reads `sb_` plus a mask and four hex
+   * characters, because the full slug is the capability protecting that
+   * visitor and this page has no login in front of it.
+   */
+  workspaceLabel: string;
+  status: string;
+  model: string;
+  startedAt: Date;
+  costUsd: string | null;
+}
+
+/** The row `loadRecentRuns` selects, before anything is done to it. */
+export interface RecentRunRow {
+  id: string;
+  workspaceSlug: string;
+  status: string;
+  model: string;
+  startedAt: Date;
+  costUsd: string | null;
+}
+
+/**
+ * One row to one badge, and the only place the slug is allowed to be dropped.
+ *
+ * Split out of the query so the rule is testable without Postgres — `npm test`
+ * runs without a database and the assertion that matters here is a regex over
+ * the mapper's output, not a round trip through a table.
+ *
+ * Masking happens at this boundary rather than in the page, so `OpsSnapshot`
+ * itself never carries a full slug. A view model that holds the secret and
+ * trusts every renderer not to print it is one JSX edit away from leaking it.
+ */
+export function toRecentRun(row: RecentRunRow): RecentRun {
+  return {
+    id: row.id,
+    workspaceLabel: displaySlug(row.workspaceSlug),
+    status: row.status,
+    model: row.model,
+    startedAt: row.startedAt,
+    costUsd: row.costUsd,
+  };
+}
+
 export interface OpsSnapshot {
   spentTodayNanos: number;
   capNanos: number;
   gauge: BudgetGauge;
   killSwitch: boolean;
+  /** The ceiling on one sandbox. */
   runsPerMinute: number;
+  /** The ceiling on every sandbox at once, which is what the account sees. */
+  globalRunsPerMinute: number;
+  /** Runs started anywhere in the last minute, against the global ceiling. */
   runsInLastMinute: number;
   inFlight: number;
   runsToday: { total: number; byStatus: Record<string, number> };
   pendingApprovals: number;
   evalRunsToday: number;
   recentGuardrails: RecentGuardrail[];
+  recentRuns: RecentRun[];
 }
 
 /** UTC, so "today" means the same thing to the page and to `spentTodayNanos`. */
@@ -246,18 +307,12 @@ function utcMidnight(now: Date): Date {
  */
 async function loadRunsToday(
   db: DbOrTx,
-  workspaceId: string,
   midnight: Date,
 ): Promise<{ total: number; byStatus: Record<string, number> }> {
   const rows = await db
     .select({ status: agentRuns.status, n: count() })
     .from(agentRuns)
-    .where(
-      and(
-        eq(agentRuns.workspaceId, workspaceId),
-        gte(agentRuns.startedAt, midnight),
-      ),
-    )
+    .where(gte(agentRuns.startedAt, midnight))
     .groupBy(agentRuns.status);
 
   const byStatus: Record<string, number> = {};
@@ -275,10 +330,7 @@ async function countRuns(db: DbOrTx, where: SQL | undefined): Promise<number> {
   return row?.n ?? 0;
 }
 
-async function loadRecentGuardrails(
-  db: DbOrTx,
-  workspaceId: string,
-): Promise<RecentGuardrail[]> {
+async function loadRecentGuardrails(db: DbOrTx): Promise<RecentGuardrail[]> {
   const rows = await db
     .select({
       runId: runSpans.runId,
@@ -290,12 +342,7 @@ async function loadRecentGuardrails(
       output: runSpans.output,
     })
     .from(runSpans)
-    .where(
-      and(
-        eq(runSpans.workspaceId, workspaceId),
-        eq(runSpans.type, "guardrail"),
-      ),
-    )
+    .where(eq(runSpans.type, "guardrail"))
     .orderBy(desc(runSpans.startedAt))
     .limit(RECENT_GUARDRAILS);
 
@@ -314,6 +361,34 @@ async function loadRecentGuardrails(
 }
 
 /**
+ * The last few runs, whichever sandbox started them.
+ *
+ * A label is carried per row because it is the only thing that tells them
+ * apart on this page. `demo` is the durable workspace behind the scripted
+ * arc; everything beginning `sb_` is one visitor's sandbox. An operator
+ * watching a burst wants to know whether it is one person clicking or twenty
+ * people arriving, and four characters of tail answer that. The rest of the
+ * slug is a capability and stops at {@link toRecentRun}.
+ */
+async function loadRecentRuns(db: DbOrTx): Promise<RecentRun[]> {
+  const rows: RecentRunRow[] = await db
+    .select({
+      id: agentRuns.id,
+      workspaceSlug: workspaces.slug,
+      status: agentRuns.status,
+      model: agentRuns.model,
+      startedAt: agentRuns.startedAt,
+      costUsd: agentRuns.costUsd,
+    })
+    .from(agentRuns)
+    .innerJoin(workspaces, eq(workspaces.id, agentRuns.workspaceId))
+    .orderBy(desc(agentRuns.startedAt))
+    .limit(RECENT_RUNS);
+
+  return rows.map(toRecentRun);
+}
+
+/**
  * Everything Mission Control renders, read in one pass.
  *
  * `now` is injected for the same reason the policy engine's is: a page that
@@ -321,13 +396,15 @@ async function loadRecentGuardrails(
  * different reads of `Date.now()` would silently disagree about which runs are
  * "today". One instant, one midnight, one rate window.
  *
- * Every query is workspace-scoped. `page.tsx` counts approvals unscoped and
- * defends that in a comment — this one is scoped, so the two may legitimately
- * differ once sandboxes exist, and this is the figure an operator wants.
+ * **No query is workspace-scoped any more.** Every figure here is about the
+ * deployment, because that is what the thing being guarded is: one daily cap,
+ * one arrival rate, one shared Bedrock account. Scoping them made sense while
+ * a workspace was the demo; per-visitor sandboxes make a workspace a browser
+ * cookie, and a dashboard that reported one cookie's spend while the gate
+ * enforced everybody's would be an instrument that lies.
  */
 export async function opsSnapshot(
   db: DbOrTx,
-  workspaceId: string,
   now: Date,
   config: BudgetConfig,
 ): Promise<OpsSnapshot> {
@@ -342,44 +419,24 @@ export async function opsSnapshot(
     pendingApprovals,
     evalRunsToday,
     recentGuardrails,
+    recentRuns,
   ] = await Promise.all([
-    spentTodayNanos(db, workspaceId, now),
-    countRuns(
-      db,
-      and(
-        eq(agentRuns.workspaceId, workspaceId),
-        gte(agentRuns.startedAt, windowStart),
-      ),
-    ),
-    countRuns(
-      db,
-      and(
-        eq(agentRuns.workspaceId, workspaceId),
-        eq(agentRuns.status, "running"),
-      ),
-    ),
-    loadRunsToday(db, workspaceId, midnight),
+    spentTodayNanos(db, now),
+    countRuns(db, gte(agentRuns.startedAt, windowStart)),
+    countRuns(db, eq(agentRuns.status, "running")),
+    loadRunsToday(db, midnight),
     db
       .select({ n: count() })
       .from(approvals)
-      .where(
-        and(
-          eq(approvals.workspaceId, workspaceId),
-          eq(approvals.status, "pending"),
-        ),
-      )
+      .where(eq(approvals.status, "pending"))
       .then((rows) => rows[0]?.n ?? 0),
     db
       .select({ n: count() })
       .from(evalRuns)
-      .where(
-        and(
-          eq(evalRuns.workspaceId, workspaceId),
-          gte(evalRuns.startedAt, midnight),
-        ),
-      )
+      .where(gte(evalRuns.startedAt, midnight))
       .then((rows) => rows[0]?.n ?? 0),
-    loadRecentGuardrails(db, workspaceId),
+    loadRecentGuardrails(db),
+    loadRecentRuns(db),
   ]);
 
   return {
@@ -392,11 +449,14 @@ export async function opsSnapshot(
     }),
     killSwitch: config.killSwitch,
     runsPerMinute: config.runsPerMinute,
+    globalRunsPerMinute:
+      config.globalRunsPerMinute ?? DEFAULT_GLOBAL_RUNS_PER_MINUTE,
     runsInLastMinute,
     inFlight,
     runsToday,
     pendingApprovals,
     evalRunsToday,
     recentGuardrails,
+    recentRuns,
   };
 }

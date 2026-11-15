@@ -13,7 +13,10 @@ import {
 } from "@/components/approval-queue";
 import { describeApproval, listPendingApprovals } from "@/db/approvals";
 import { getDb } from "@/db/client";
-import { workspaces } from "@/db/schema";
+import {
+  currentSandbox,
+  SandboxHeaderMissingError,
+} from "@/lib/workspace";
 
 // The queue is run state, and a cached one would show refunds already paid.
 export const dynamic = "force-dynamic";
@@ -39,11 +42,12 @@ function formatAge(createdAt: Date, now: Date): string {
 
 async function loadQueue(): Promise<ApprovalQueueRow[] | null> {
   const db = getDb();
-  const [ws] = await db.select({ id: workspaces.id }).from(workspaces).limit(1);
-  if (!ws) return null;
+  // Scoped to the visitor. A queue showing a stranger's paused refund would be
+  // a decision one person makes about another person's money.
+  const { workspaceId } = await currentSandbox();
 
   const now = new Date();
-  const pending = await listPendingApprovals(db, ws.id);
+  const pending = await listPendingApprovals(db, workspaceId);
 
   return pending.map((row) => ({
     id: row.id,
@@ -63,6 +67,10 @@ export default async function ApprovalsPage() {
   try {
     rows = await loadQueue();
   } catch (error) {
+    // A missing sandbox header is a routing fault, not a database fault. The
+    // copy below would send whoever reads it to rebuild Postgres over a
+    // proxy matcher, so it propagates instead.
+    if (error instanceof SandboxHeaderMissingError) throw error;
     // Almost always an unseeded or unreachable database, and the command to
     // fix it is a better answer than a stack trace in the browser.
     loadError = error instanceof Error ? error.message : String(error);
@@ -73,7 +81,7 @@ export default async function ApprovalsPage() {
       <header className="mb-8">
         <div className="flex items-baseline gap-3">
           <h1 className="text-2xl font-semibold tracking-tight">Approvals</h1>
-          <Link href="/" className="text-sm text-zinc-500 underline">
+          <Link href="/inbox" className="text-sm text-zinc-500 underline">
             back to the inbox
           </Link>
         </div>
