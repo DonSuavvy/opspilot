@@ -255,6 +255,7 @@ describe("runCase", () => {
       {
         role: "user",
         content:
+          "Today's date: 2026-09-08 (UTC)\n" +
           "Ticket refund-in-window\n" +
           "Subject: Please refund last week's charge\n" +
           "Customer: cus_0001\n" +
@@ -283,7 +284,8 @@ describe("runCase", () => {
     );
 
     expect(calls[0]!.messages[0]!.content).toBe(
-      "Ticket missing-info\n" +
+      "Today's date: 2026-09-08 (UTC)\n" +
+        "Ticket missing-info\n" +
         "Subject: Please refund last week's charge\n" +
         "\n<ticket_body>\n" +
         "We were billed on INV-2001 and would like it back.\n" +

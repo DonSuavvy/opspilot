@@ -112,6 +112,7 @@ export function prepareTicketRun(input: PrepareTicketRunInput): PreparedRun {
     subject: ticket.subject,
     customer: ticket.customer,
     body: ticket.body,
+    now,
   });
 
   if (!flagged) {
