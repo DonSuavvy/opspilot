@@ -10,7 +10,7 @@ cost, latency). Risky actions pause for human approval. The prompt regression
 suite is deterministic and runs from the UI and the command line.
 
 > **Status: Days 1 to 8 of a 10-day build are on `main`, and the demo is
-> live.** 744 tests across 42 files, every change merged through a pull request
+> live.** 782 tests across 43 files, every change merged through a pull request
 > with CI green, and the golden eval suite gating any pull request that touches
 > the agent, the policy or the SOP. Roadmap and per-day gates:
 > [`docs/PLAN.md`](docs/PLAN.md).
