@@ -177,10 +177,14 @@ export function RunConsole({
    * tokens reported "prefix was eligible but not cached", because 5563 clears
    * the 4096 floor even though neither prompt ever did. Token counts sum across
    * calls; eligibility does not.
+   *
+   * The floor comes from the wire id on the model spans, because the same tier
+   * has a different floor on each provider's generation.
    */
   const cache = done
     ? describeRunCache({
         model: done.model,
+        modelId: spans.find((s) => s.type === "llm_call")?.name,
         usages: spans
           .filter((s) => s.type === "llm_call")
           .map((s) => s.usage)

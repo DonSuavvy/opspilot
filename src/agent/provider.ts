@@ -13,7 +13,8 @@
  *
  * **Model identity.** Bedrock wants
  * `global.anthropic.claude-haiku-4-5-20251001-v1:0`; the first-party API wants
- * `claude-haiku-4-5`. Same model, two names. Everything
+ * `claude-haiku-5-5`. The same tier under two names, and since 2026-11-15 two
+ * generations: Bedrock is still pinned to the ids verified on covara. Everything
  * else in the codebase refers to models by the logical name — `haiku` — so a
  * provider swap never reaches the call sites.
  *
@@ -40,9 +41,9 @@ export type ProviderId = "bedrock" | "anthropic";
 export type LogicalModel = "haiku" | "sonnet" | "opus";
 
 const FIRST_PARTY_ID: Readonly<Record<LogicalModel, ModelId>> = {
-  haiku: "claude-haiku-4-5",
-  sonnet: "claude-sonnet-5",
-  opus: "claude-opus-5",
+  haiku: "claude-haiku-5-5",
+  sonnet: "claude-sonnet-5-5",
+  opus: "claude-opus-5-5",
 };
 
 /**

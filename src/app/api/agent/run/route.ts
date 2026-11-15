@@ -50,12 +50,11 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 /**
- * The public demo runs Haiku 4.5 — rate-capped and ~pennies per run.
+ * The public demo runs the Haiku tier — rate-capped and well under a cent a run.
  *
  * Named once because it is read three times below, and because the *logical*
- * name is what the trace needs: the cache floor is per model (4096 on Haiku
- * against 512 on Opus 5), so the console cannot explain a non-cache without
- * knowing which model ran.
+ * name is what the trace needs. The cache floor is looked up from the wire id
+ * on each model span, with the tier as the fallback.
  */
 const DEMO_MODEL: LogicalModel = "haiku";
 
@@ -304,8 +303,8 @@ export async function POST(request: Request) {
           model: provider.modelId(DEMO_MODEL),
           rates: provider.rateCard(DEMO_MODEL),
           // Marked as a cacheable prefix. Whether it *actually* caches depends
-          // on clearing the model's floor — 4096 tokens on Haiku, which demo
-          // mode runs — and that is reported from measured usage rather than
+          // on clearing the model's floor — 512 tokens on Haiku 5.5, 4096 on
+          // the Haiku 4.5 that Bedrock serves — and that is reported from measured usage rather than
           // predicted, so the trace never claims a hit that did not happen.
           system: cachedSystem(
             compileSop({

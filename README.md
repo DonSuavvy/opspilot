@@ -381,7 +381,8 @@ agent loop over a provider adapter, `@anthropic-ai/sdk` in the deployed demo
 and `@anthropic-ai/bedrock-sdk` as the alternative.
 
 Models are named logically (`haiku`, `sonnet`, `opus`) everywhere except the
-provider adapter. The demo path runs `haiku`, rate-capped, at pennies per run.
+provider adapter. The demo path runs `haiku`, which is Claude Haiku 5.5 on the deployed demo,
+rate-capped, at well under a cent per run.
 The deployed demo runs on Vercel and Neon, against the first-party Anthropic
 API.
 

@@ -7,7 +7,6 @@ import {
   providerFromEnv,
   type LogicalModel,
 } from "./provider";
-import { ANTHROPIC_RATES } from "./cost";
 
 /**
  * OpsPilot runs Claude through **two** providers: Amazon Bedrock (the covara

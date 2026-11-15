@@ -18,12 +18,15 @@
  * table below can be transcribed straight from the pricing page — there is no
  * conversion arithmetic to get wrong.
  *
- * Rates verified against the `claude-api` skill on 2026-08-13 rather than from
+ * Rates verified against the `claude-api` skill on 2026-11-15 rather than from
  * memory, per CLAUDE.md: model IDs and prices changed in 2025-26.
  */
 
 /** The three models this project runs. See CLAUDE.md's model strategy table. */
-export type ModelId = "claude-haiku-4-5" | "claude-sonnet-5" | "claude-opus-5";
+export type ModelId =
+  | "claude-haiku-5-5"
+  | "claude-sonnet-5-5"
+  | "claude-opus-5-5";
 
 /** Which cache TTL a write was billed at. 5 minutes is the API default. */
 export type CacheTtl = "5m" | "1h";
@@ -64,12 +67,24 @@ export function rateCard(
   inputPerMTok: number,
   outputPerMTok: number,
   provenance: { verifiedOn: string | null; source: string },
+  /**
+   * The published cache-read rate, for the models where it is not a tenth of
+   * input. Sonnet 5.5 and Opus 5.5 list theirs separately, at 0.05x.
+   */
+  overrides: { cacheReadPerMTok?: number } = {},
 ): RateCard {
-  const input = inputPerMTok * 1_000;
+  // Rounded because the rates are now fractions of a dollar, and
+  // `0.1 * 1_000` is only an integer by luck of the float grid. Every
+  // published rate is a whole number of nano-dollars per token.
+  const input = Math.round(inputPerMTok * 1_000);
+  const cacheRead =
+    overrides.cacheReadPerMTok === undefined
+      ? input / 10
+      : Math.round(overrides.cacheReadPerMTok * 1_000);
   return {
     inputNanosPerToken: input,
-    outputNanosPerToken: outputPerMTok * 1_000,
-    cacheReadNanosPerToken: input / 10,
+    outputNanosPerToken: Math.round(outputPerMTok * 1_000),
+    cacheReadNanosPerToken: cacheRead,
     cacheWrite5mNanosPerToken: (input * 5) / 4,
     cacheWrite1hNanosPerToken: input * 2,
     ...provenance,
@@ -77,7 +92,7 @@ export function rateCard(
 }
 
 const ANTHROPIC_PROVENANCE = {
-  verifiedOn: "2026-08-13",
+  verifiedOn: "2026-11-15",
   source: "claude-api skill, first-party list rates",
 } as const;
 
@@ -86,11 +101,20 @@ const ANTHROPIC_PROVENANCE = {
  * cache rate is a multiple of the input rate, so writing them out by hand
  * would create four more places for a typo to hide. The multipliers are the
  * part nobody quotes and therefore the part most likely to be wrong.
+ *
+ * **Haiku 5.5 has a second, dearer card for prompts over 100K tokens**
+ * ($0.50 / $2.50). This table carries only the first. OpsPilot's prompts are
+ * around 4K tokens, so the second card cannot apply to a run this agent makes;
+ * if a prompt ever approaches 100K, price it here before trusting the figure.
  */
 export const ANTHROPIC_RATES: Readonly<Record<ModelId, RateCard>> = {
-  "claude-haiku-4-5": rateCard(1, 5, ANTHROPIC_PROVENANCE),
-  "claude-sonnet-5": rateCard(3, 15, ANTHROPIC_PROVENANCE),
-  "claude-opus-5": rateCard(5, 25, ANTHROPIC_PROVENANCE),
+  "claude-haiku-5-5": rateCard(0.1, 0.5, ANTHROPIC_PROVENANCE),
+  "claude-sonnet-5-5": rateCard(2, 10, ANTHROPIC_PROVENANCE, {
+    cacheReadPerMTok: 0.1,
+  }),
+  "claude-opus-5-5": rateCard(4, 20, ANTHROPIC_PROVENANCE, {
+    cacheReadPerMTok: 0.2,
+  }),
 };
 
 /**

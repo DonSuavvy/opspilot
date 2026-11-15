@@ -252,7 +252,10 @@ export interface AgentLoopResult {
 /** PLAN.md's loop guard. Twelve is generous for the seeded scenarios. */
 const DEFAULT_MAX_ITERATIONS = 12;
 
-/** Haiku 4.5 tops out at 64K; this leaves headroom without inviting essays. */
+/**
+ * Headroom without inviting essays. On Haiku 5.5 thinking counts toward this
+ * cap, and a support turn's thinking plus one tool call sits far below it.
+ */
 const DEFAULT_MAX_TOKENS = 8_192;
 
 const EMPTY_USAGE: TokenUsage = {
