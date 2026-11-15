@@ -76,6 +76,58 @@ describe("withRecordedWrites — reads", () => {
     await expect(data.findInvoice("INV-2001")).resolves.toEqual(INVOICE);
   });
 
+  /**
+   * Found on the deployed demo. The suite reads the visitor's own sandbox, and
+   * a visitor who approved the INV-2001 refund in the inbox then ran the suite
+   * got `refund-in-window` red: the agent read `refundedCents: 4900`, rightly
+   * did not refund it again, and the case expected a pause. Every case is
+   * written against the seeded scenario, where no invoice has been refunded,
+   * so that is what an eval read shows. The write barrier already keeps the
+   * suite from changing the sandbox; this keeps the sandbox from changing the
+   * suite.
+   */
+  it("shows a refunded invoice as it was seeded", async () => {
+    const real = realData();
+    const refunded = { ...INVOICE, refundedCents: 4_900, status: "refunded" as const };
+    vi.mocked(real.findInvoice).mockResolvedValue(refunded);
+    vi.mocked(real.listInvoices).mockResolvedValue([refunded]);
+    const { data } = withRecordedWrites(real);
+
+    await expect(data.findInvoice("INV-2001")).resolves.toEqual(INVOICE);
+    await expect(data.listInvoices("cus_0001", 12)).resolves.toEqual([INVOICE]);
+  });
+
+  it("shows a partly refunded invoice as it was seeded too", async () => {
+    const real = realData();
+    vi.mocked(real.findInvoice).mockResolvedValue({
+      ...INVOICE,
+      refundedCents: 1_000,
+    });
+    const { data } = withRecordedWrites(real);
+
+    const invoice = await data.findInvoice("INV-2001");
+
+    expect(invoice?.refundedCents).toBe(0);
+    expect(invoice?.status).toBe("paid");
+  });
+
+  it("leaves an invoice nobody refunded exactly as it is", async () => {
+    const real = realData();
+    const open = { ...INVOICE, status: "open" as const, paidAt: null };
+    vi.mocked(real.findInvoice).mockResolvedValue(open);
+    const { data } = withRecordedWrites(real);
+
+    await expect(data.findInvoice("INV-2001")).resolves.toEqual(open);
+  });
+
+  it("still answers null for an invoice that does not exist", async () => {
+    const real = realData();
+    vi.mocked(real.findInvoice).mockResolvedValue(null);
+    const { data } = withRecordedWrites(real);
+
+    await expect(data.findInvoice("INV-9999")).resolves.toBeNull();
+  });
+
   it("records nothing for a read", async () => {
     const { data, writes } = withRecordedWrites(realData());
 
