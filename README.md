@@ -9,15 +9,13 @@ The SOP is a versioned, editable prompt. Every run is fully traced (tokens,
 cost, latency). Risky actions pause for human approval. The prompt regression
 suite is deterministic and runs from the UI and the command line.
 
-> **Status: Days 1 to 7 of a 10-day build are on `main`.** 606 tests across 31
-> files, every change merged through a pull request with CI green, and the
-> failing test committed before the fix in 51 commits so the RED step is visible
-> in `git log`. Day 8 (per-visitor sandboxes, an eval gate in CI, and the
-> deploy) is on a branch waiting on the deploy step; there is no public URL yet.
-> Roadmap and per-day gates: [`docs/PLAN.md`](docs/PLAN.md).
+> **Status: Days 1 to 8 of a 10-day build are on `main`, and the demo is
+> live.** 744 tests across 42 files, every change merged through a pull request
+> with CI green, and the golden eval suite gating any pull request that touches
+> the agent, the policy or the SOP. Roadmap and per-day gates:
+> [`docs/PLAN.md`](docs/PLAN.md).
 
-**Live demo:** fill in the URL here after running `scripts/wizard-deploy.sh`
-(for example, `https://opspilot.vercel.app`).
+**Live demo: <https://opspilot-one-ashy.vercel.app>**
 
 Every visitor gets a disposable sandbox: a cookie-scoped workspace, seeded on
 first use and swept clean after its TTL expires. Prompt changes go through CI
@@ -70,12 +68,13 @@ cannot satisfy on its own, which is why it is enforced in code.
 | Day | What landed | Where to look |
 |---|---|---|
 | **1** Foundation | 15-table Drizzle schema and migrations. Pure policy engine with the stored policy blob *and* the evaluation input parsed rather than trusted, and limits bounded absolutely. Tool registry: nine tools with Zod schemas compiled to JSON Schema, three-class safety model, boot-time validation that lists every problem at once. Deterministic Beacon Analytics seed, ids scoped per workspace. | `src/policy/`, `src/agent/registry.ts`, `src/db/schema.ts`, `src/db/seed.ts` |
-| **2** Agent loop | Hand-rolled tool loop over a provider adapter (Amazon Bedrock by default, the first-party API as fallback). Seven live tool handlers. Run and span persistence. Integer nano-dollar cost accounting with rate cards that carry their own provenance. Spend guard with a daily cap and kill switch, pulled forward from Day 7 because the Bedrock account is shared with a live workload. | `src/agent/loop.ts`, `src/agent/provider.ts`, `src/agent/cost.ts`, `src/agent/budget.ts` |
+| **2** Agent loop | Hand-rolled tool loop over a provider adapter (the first-party Anthropic API in the deployed demo, Amazon Bedrock as the alternative). Seven live tool handlers. Run and span persistence. Integer nano-dollar cost accounting with rate cards that carry their own provenance. Spend guard with a daily cap and kill switch, pulled forward from Day 7 because the Bedrock account is shared with a live workload. | `src/agent/loop.ts`, `src/agent/provider.ts`, `src/agent/cost.ts`, `src/agent/budget.ts` |
 | **3** Inbox and trace | Ticket inbox. Live trace waterfall streamed over SSE, one row per span, each opening to show what it carried. | `src/app/page.tsx`, `src/agent/trace.ts`, `src/lib/agent-stream.ts` |
 | **4** SOP as code | The SOP is a versioned document that *is* the system prompt. Figures render from `policy_config` at request time, so the prose and the enforced limits cannot drift. Every run pins `sop_version_id`. SOP editor and versions API. Prompt-cache accounting that reports a miss honestly when the prefix is below the model's minimum. | `src/agent/sop.ts`, `src/agent/prompt.ts`, `src/agent/cache.ts`, `src/app/sop/` |
 | **5** Approval queue | Confirm-write tools serialise the in-flight conversation, pause the run, and end the invocation. A reviewer approves or denies from the queue; `/api/agent/resume` rebuilds the conversation in a separate process and continues. The decision is a conditional `UPDATE ... WHERE status = 'pending'`, so two reviewers cannot both approve. `issue_refund` revalidates against the pinned policy before the pause and again after approval, and an approved refund writes `refunded_cents` with the run that moved it. | `src/app/approvals/`, `src/app/api/agent/resume/`, `src/db/ops-data.ts`, `src/lib/approval-copy.ts` |
 | **6** Eval lab | Eight golden cases built from the seeded tickets. Deterministic scorer over structure, never prose, with no LLM judge. Writes go through a recording barrier so a suite run never touches the workspace. Each run is pinned to SOP version, logical model, git SHA, and a hash of the compiled prompt. Streaming scorecard, run history, and a diff between any two runs. | `src/evals/`, `src/app/evals/`, [`docs/EVALS.md`](docs/EVALS.md) |
 | **7** Guardrails | Deterministic prompt-injection pre-scan, five signals, no model call. A flagged run is rebuilt without confirm-write tools on all three entry points, including resume. Per-workspace runs-per-minute limit refused with 429, distinct from the money reasons refused with 402. Spend guard rewritten to reserve, accrue, and replace under a row lock, proven under concurrency. Mission Control: spend, guardrails, approvals, evals on one page. | `src/agent/injection.ts`, `src/agent/guardrails.ts`, `src/app/ops/`, [`docs/SECURITY.md`](docs/SECURITY.md) |
+| **8** Sandboxes and deploy | Every visitor gets a cookie-scoped sandbox, seeded on first use under an advisory lock, swept by a daily cron. The daily cap and a runs-per-minute ceiling are global across sandboxes. The golden suite runs in CI on Haiku and posts one scorecard comment per pull request. Static landing page, deploy wizard, runbook. | `src/proxy.ts`, `src/db/sandbox.ts`, `.github/workflows/evals.yml`, `scripts/wizard-deploy.sh`, [`docs/RUNBOOK.md`](docs/RUNBOOK.md) |
 
 **606 tests** across 31 files: 313 agent, 110 policy, 93 evals, 57 db, 33 lib.
 No test requires a database or a model key. Two seams carry that:
@@ -90,10 +89,7 @@ but its handler does not change a plan. The other eight tools are live.
 
 ### Coming (see [`docs/PLAN.md`](docs/PLAN.md))
 
-Day 8, on the `claude/day8-demo` branch: a disposable sandbox per visitor,
-the eval suite as a CI gate on any pull request touching the SOP or the
-prompt, and the deploy. Day 9: docs and a recorded walkthrough. Day 10: the
-model bake-off.
+Day 9: docs and a recorded walkthrough. Day 10: the model bake-off.
 
 ---
 
@@ -381,12 +377,13 @@ something else.
 
 Next.js 16 (App Router, TypeScript strict) · Tailwind v4 · shadcn/ui on Radix
 · Drizzle ORM over Postgres · Zod 4 · Vitest · GitHub Actions · a hand-rolled
-agent loop over a provider adapter, `@anthropic-ai/bedrock-sdk` by default
-and `@anthropic-ai/sdk` as fallback.
+agent loop over a provider adapter, `@anthropic-ai/sdk` in the deployed demo
+and `@anthropic-ai/bedrock-sdk` as the alternative.
 
 Models are named logically (`haiku`, `sonnet`, `opus`) everywhere except the
 provider adapter. The demo path runs `haiku`, rate-capped, at pennies per run.
-Neon and Vercel arrive with Day 8; there is no deployed demo yet.
+The deployed demo runs on Vercel and Neon, against the first-party Anthropic
+API.
 
 ---
 
