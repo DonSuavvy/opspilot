@@ -15,12 +15,17 @@ import {
  * request succeeds, reports `cache_creation_input_tokens: 0`, and the hit-rate
  * metric reads zero forever — indistinguishable from a caching bug.
  *
- * Demo mode runs Haiku 4.5, whose floor is 4096 against 512 on Opus 5, so the
- * SOP prefix is the *most* likely thing to sit under it. Decided 2026-08-14:
- * report the shortfall honestly rather than padding the constitution to clear
- * it, since a pad sized for Haiku is noise on Opus and padding that isn't real
- * policy content is theatre.
+ * The floor belongs to the model generation, not the tier. Haiku 4.5, which
+ * the Bedrock path still serves, needs 4096 tokens; Haiku 5.5, which the
+ * deployed demo runs, needs 512. So the floor is looked up from the wire model
+ * id a span carries, and the logical name is only the fallback. Decided
+ * 2026-08-14 and still true: report a shortfall honestly rather than padding
+ * the constitution to clear it.
  */
+
+/** The Bedrock ids, which are the previous generation and keep its floors. */
+const HAIKU_4_5 = "global.anthropic.claude-haiku-4-5-20251001-v1:0";
+const SONNET_4_6 = "global.anthropic.claude-sonnet-4-6";
 
 function usage(overrides: Partial<TokenUsage> = {}): TokenUsage {
   return {
@@ -33,14 +38,54 @@ function usage(overrides: Partial<TokenUsage> = {}): TokenUsage {
 }
 
 describe("cacheEligibility", () => {
-  it("knows each model's documented minimum cacheable prefix", () => {
-    expect(CACHE_MINIMUM_TOKENS.haiku).toBe(4096);
-    expect(CACHE_MINIMUM_TOKENS.sonnet).toBe(1024);
+  it("defaults each tier to the floor of the current first-party generation", () => {
+    expect(CACHE_MINIMUM_TOKENS.haiku).toBe(512);
+    expect(CACHE_MINIMUM_TOKENS.sonnet).toBe(512);
     expect(CACHE_MINIMUM_TOKENS.opus).toBe(512);
   });
 
-  it("reports a short Haiku prefix as below threshold", () => {
-    const result = cacheEligibility({ model: "haiku", promptTokens: 400 });
+  it.each([
+    ["claude-haiku-5-5", 512],
+    ["claude-sonnet-5-5", 512],
+    ["claude-opus-5-5", 512],
+    [HAIKU_4_5, 4096],
+    [SONNET_4_6, 1024],
+    ["global.anthropic.claude-opus-4-6-v1", 4096],
+  ] as const)("looks the floor up from the wire id %s", (modelId, floor) => {
+    expect(
+      cacheEligibility({ model: "haiku", modelId, promptTokens: 1 }).minimumTokens,
+    ).toBe(floor);
+  });
+
+  it("falls back to the tier's floor for a wire id it does not know", () => {
+    expect(
+      cacheEligibility({ model: "haiku", modelId: "some-future-model", promptTokens: 1 })
+        .minimumTokens,
+    ).toBe(512);
+  });
+
+  /**
+   * The case the upgrade exists for. A 2,945-token SOP prompt never cached on
+   * Haiku 4.5 and is well clear of the floor on Haiku 5.5. Reporting it as
+   * "below threshold" there would be the label lying in the other direction.
+   */
+  it("treats the demo's SOP prompt as eligible on Haiku 5.5", () => {
+    const result = cacheEligibility({
+      model: "haiku",
+      modelId: "claude-haiku-5-5",
+      promptTokens: 2_945,
+    });
+
+    expect(result.eligible).toBe(true);
+    expect(result.shortfallTokens).toBe(0);
+  });
+
+  it("reports a short Haiku 4.5 prefix as below threshold", () => {
+    const result = cacheEligibility({
+      model: "haiku",
+      modelId: HAIKU_4_5,
+      promptTokens: 400,
+    });
 
     expect(result.eligible).toBe(false);
     expect(result.minimumTokens).toBe(4096);
@@ -55,8 +100,9 @@ describe("cacheEligibility", () => {
   });
 
   it("treats exactly the minimum as eligible", () => {
-    expect(cacheEligibility({ model: "sonnet", promptTokens: 1024 }).eligible).toBe(true);
-    expect(cacheEligibility({ model: "sonnet", promptTokens: 1023 }).eligible).toBe(false);
+    const on46 = { model: "sonnet", modelId: SONNET_4_6 } as const;
+    expect(cacheEligibility({ ...on46, promptTokens: 1024 }).eligible).toBe(true);
+    expect(cacheEligibility({ ...on46, promptTokens: 1023 }).eligible).toBe(false);
   });
 });
 
@@ -123,11 +169,12 @@ describe("describeCache", () => {
   /**
    * The case the honest-display decision exists for. Nothing cached, and the
    * whole prompt was billed as input — so the prompt is 900 tokens, which is
-   * under Haiku's 4096 floor. That is a measured explanation, not a hunch.
+   * under Haiku 4.5's 4096 floor. That is a measured explanation, not a hunch.
    */
   it("explains a non-cache as below-threshold using the measured prompt size", () => {
     const report = describeCache({
       model: "haiku",
+      modelId: HAIKU_4_5,
       usage: usage({ inputTokens: 900 }),
     });
 
@@ -165,7 +212,11 @@ describe("describeCache", () => {
 
   it("carries a label that never claims a hit that did not happen", () => {
     expect(
-      describeCache({ model: "haiku", usage: usage({ inputTokens: 900 }) }).label,
+      describeCache({
+        model: "haiku",
+        modelId: HAIKU_4_5,
+        usage: usage({ inputTokens: 900 }),
+      }).label,
     ).toMatch(/below cache threshold/i);
 
     expect(
@@ -195,7 +246,7 @@ describe("describeCache", () => {
  * the run's *summed* usage and rendered "cache miss — prefix was eligible but
  * not cached" on a Haiku run whose two prompts were 2618 and 2945 tokens.
  *
- * Neither was ever eligible — Haiku's floor is 4096 — but 2618 + 2945 = 5563
+ * Neither was ever eligible — Haiku 4.5's floor is 4096 — but 2618 + 2945 = 5563
  * clears it arithmetically. The sum describes a prompt that never existed, and
  * the badge blamed the wrong thing in the confident voice of a measurement.
  *
@@ -203,12 +254,27 @@ describe("describeCache", () => {
  * individual prefix, so the aggregate has to combine *verdicts*, never tokens.
  */
 describe("describeRunCache", () => {
+  /**
+   * The same two prompts on Haiku 5.5 were both eligible, so a run where
+   * neither cached is a miss, and saying "below threshold" would be false.
+   */
+  it("reports a miss, not below-threshold, for the same prompts on Haiku 5.5", () => {
+    const report = describeRunCache({
+      model: "haiku",
+      modelId: "claude-haiku-5-5",
+      usages: [usage({ inputTokens: 2_618 }), usage({ inputTokens: 2_945 })],
+    });
+
+    expect(report?.status).toBe("miss");
+  });
+
   const belowFloor = usage({ inputTokens: 2_618 });
   const alsoBelowFloor = usage({ inputTokens: 2_945 });
 
   it("reports below-threshold when no single prompt cleared the floor", () => {
     const report = describeRunCache({
       model: "haiku",
+      modelId: HAIKU_4_5,
       usages: [belowFloor, alsoBelowFloor],
     });
 
@@ -218,6 +284,7 @@ describe("describeRunCache", () => {
   it("reports the largest prompt, since that is the one closest to clearing", () => {
     const report = describeRunCache({
       model: "haiku",
+      modelId: HAIKU_4_5,
       usages: [belowFloor, alsoBelowFloor],
     });
 
@@ -228,6 +295,7 @@ describe("describeRunCache", () => {
   it("never sums token counts across calls into one prompt", () => {
     const report = describeRunCache({
       model: "haiku",
+      modelId: HAIKU_4_5,
       usages: [belowFloor, alsoBelowFloor],
     });
 

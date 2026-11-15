@@ -21,18 +21,49 @@ import type { LogicalModel } from "./provider";
 import type { TokenUsage } from "./cost";
 
 /**
- * The minimum cacheable prefix, per model, in tokens.
+ * The minimum cacheable prefix per tier, for the current first-party
+ * generation: Haiku 5.5, Sonnet 5.5 and Opus 5.5 all take 512 tokens.
  *
- * Not monotonic across generations, which is why this is a lookup and not a
- * constant: a 3K-token prompt caches on Opus 5 and Sonnet 5 and silently does
- * not on Haiku 4.5.
+ * This is the fallback. The floor really belongs to the model generation, so
+ * `CACHE_MINIMUM_BY_MODEL_ID` below is consulted first.
  */
 export const CACHE_MINIMUM_TOKENS: Readonly<Record<LogicalModel, number>> =
   Object.freeze({
-    haiku: 4096,
-    sonnet: 1024,
+    haiku: 512,
+    sonnet: 512,
     opus: 512,
   });
+
+/**
+ * The minimum cacheable prefix, by the wire id a model call was made with.
+ *
+ * Not monotonic across generations, which is why this is a lookup and not a
+ * constant: a 3K-token prompt caches on Haiku 5.5 and silently does not on
+ * Haiku 4.5. Both run in this project, because the Bedrock path is pinned to
+ * the previous generation, and the tier name "haiku" cannot tell them apart.
+ * The wire id can, and every `llm_call` span carries it.
+ *
+ * Plain strings rather than an import from `provider.ts`: the run console is a
+ * client component and reads this module, and the provider module pulls in
+ * both SDKs.
+ */
+export const CACHE_MINIMUM_BY_MODEL_ID: Readonly<Record<string, number>> =
+  Object.freeze({
+    "claude-haiku-5-5": 512,
+    "claude-sonnet-5-5": 512,
+    "claude-opus-5-5": 512,
+    "global.anthropic.claude-haiku-4-5-20251001-v1:0": 4096,
+    "global.anthropic.claude-sonnet-4-6": 1024,
+    "global.anthropic.claude-opus-4-6-v1": 4096,
+  });
+
+/** The floor for one call: by wire id when it is known, by tier otherwise. */
+function minimumFor(model: LogicalModel, modelId?: string): number {
+  if (modelId !== undefined && Object.hasOwn(CACHE_MINIMUM_BY_MODEL_ID, modelId)) {
+    return CACHE_MINIMUM_BY_MODEL_ID[modelId]!;
+  }
+  return CACHE_MINIMUM_TOKENS[model];
+}
 
 export interface CacheEligibility {
   eligible: boolean;
@@ -48,12 +79,15 @@ export interface CacheEligibility {
  */
 export function cacheEligibility({
   model,
+  modelId,
   promptTokens,
 }: {
   model: LogicalModel;
+  /** The wire id the call was made with, when the caller has it. */
+  modelId?: string;
   promptTokens: number;
 }): CacheEligibility {
-  const minimumTokens = CACHE_MINIMUM_TOKENS[model];
+  const minimumTokens = minimumFor(model, modelId);
   const eligible = promptTokens >= minimumTokens;
   return {
     eligible,
@@ -125,9 +159,11 @@ export interface CacheReport {
  */
 export function describeCache({
   model,
+  modelId,
   usage,
 }: {
   model: LogicalModel;
+  modelId?: string;
   usage: TokenUsage;
 }): CacheReport {
   const readTokens = usage.cacheReadInputTokens ?? 0;
@@ -136,6 +172,7 @@ export function describeCache({
 
   const { minimumTokens, shortfallTokens, eligible } = cacheEligibility({
     model,
+    modelId,
     promptTokens,
   });
 
@@ -207,14 +244,18 @@ export function describeCache({
  */
 export function describeRunCache({
   model,
+  modelId,
   usages,
 }: {
   model: LogicalModel;
+  modelId?: string;
   usages: readonly TokenUsage[];
 }): CacheReport | null {
   if (usages.length === 0) return null;
 
-  const reports = usages.map((usage) => describeCache({ model, usage }));
+  const reports = usages.map((usage) =>
+    describeCache({ model, modelId, usage }),
+  );
 
   const readTokens = reports.reduce((sum, r) => sum + r.readTokens, 0);
   if (readTokens > 0) {

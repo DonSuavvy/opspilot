@@ -298,7 +298,17 @@ them. Never write a wire model id anywhere else.
 | Bake-off | all three | Haiku 4.5 + Sonnet 4.6 + Opus 4.6 |
 
 **As of 2026-11-15 the deployed demo and the CI eval gate run on the
-first-party Anthropic API** (`ANTHROPIC_API_KEY`), not Bedrock. The Bedrock
+first-party Anthropic API** (`ANTHROPIC_API_KEY`), not Bedrock, **on the 5.5
+generation**: `haiku` is `claude-haiku-5-5`, `sonnet` is `claude-sonnet-5-5`,
+`opus` is `claude-opus-5-5`. Four things differ from the Haiku 4.5 the rest of
+this file describes. Thinking is adaptive and on by default at `medium`
+effort, so a turn can open with a `thinking` block that must be passed back
+untouched; `streaming.ts` sends neither `thinking` nor `effort`. The cache
+floor is 512 tokens, not 4096, so the SOP prefix now caches; `cache.ts` looks
+the floor up from the wire id on each span. Haiku 5.5 is $0.10 / $0.50 per
+MTok for prompts up to 100K tokens, and counts about 30% more tokens for the
+same text. Sonnet 5.5 and Opus 5.5 reject a forced `tool_choice` and have
+never been run through this loop: test before routing quality mode to them. The Bedrock
 path below still works and still wins if the `AWS_ANTHROPIC_*` trio is set, so
 leave those three unset wherever the first-party key is meant to be used. The
 Bedrock notes in this file describe that path and its history.

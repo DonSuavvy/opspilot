@@ -13,10 +13,12 @@
  * event types, and reassembling them by hand is precisely how a run comes to
  * book zero cache cost without anyone noticing. Let the SDK do it.
  *
- * **No `thinking`, no `effort`.** The demo runs Haiku 4.5, which has neither —
- * sending either is an error rather than a no-op. When quality mode routes to
- * Sonnet/Opus (4.6 on covara), those parameters belong here, chosen from the
- * logical model, and nowhere else.
+ * **No `thinking`, no `effort`, on purpose.** Both are left at the model's
+ * default. On the first-party API the demo runs Haiku 5.5, where that means
+ * adaptive thinking at `medium` effort, so a turn can open with a `thinking`
+ * block; the loop reads blocks by type and passes them back untouched. On
+ * Bedrock it runs Haiku 4.5, where sending `effort` is an error. If either is
+ * ever set, it belongs here, chosen per provider, and nowhere else.
  */
 import type { AnthropicBedrock } from "@anthropic-ai/bedrock-sdk";
 import type Anthropic from "@anthropic-ai/sdk";

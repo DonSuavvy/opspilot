@@ -126,7 +126,7 @@ export const landingCopy = {
     } satisfies DiagramNode,
     facts: [
       "The loop is hand-rolled, so a paused run can be serialized mid-loop and resumed in a later serverless invocation.",
-      "The public demo runs Claude Haiku 4.5 on Bedrock.",
+      "The public demo runs Claude Haiku 5.5 on the Anthropic API.",
       "Scoring is deterministic, so a regression is a diff, not an opinion.",
     ],
   },
