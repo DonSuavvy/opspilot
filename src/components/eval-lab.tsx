@@ -238,7 +238,7 @@ export function EvalLab({ runs }: { runs: EvalRunRow[] }) {
             <table className="w-full text-left text-sm">
               <thead className="text-xs text-zinc-500">
                 <tr className="border-b border-zinc-200 dark:border-zinc-800">
-                  <th className="py-2 pr-4 font-medium">Started</th>
+                  <th className="py-2 pr-4 font-medium">Started (UTC)</th>
                   <th className="py-2 pr-4 font-medium">SOP</th>
                   <th className="py-2 pr-4 font-medium">Model</th>
                   <th className="py-2 pr-4 font-medium">Commit</th>

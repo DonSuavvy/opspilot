@@ -28,6 +28,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { getDb } from "@/db/client";
 import { opsSnapshot, type BudgetState, type OpsSnapshot } from "@/db/ops";
 import { workspaces } from "@/db/schema";
+import { formatUtc } from "@/lib/utc";
 
 // Every number here is run state, and a cached one is a wrong one.
 export const dynamic = "force-dynamic";
@@ -68,7 +69,7 @@ const BAR_TONE: Record<BudgetState, string> = {
 
 /** UTC, fixed width, no locale — an operator comparing rows wants one clock. */
 function formatAt(at: Date): string {
-  return at.toISOString().slice(0, 19).replace("T", " ");
+  return formatUtc(at, "second");
 }
 
 /**
@@ -251,7 +252,7 @@ function RecentRunsCard({ snapshot }: { snapshot: OpsSnapshot }) {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-xs text-zinc-500">
-                  <th className="pb-2 font-normal">Started</th>
+                  <th className="pb-2 font-normal">Started (UTC)</th>
                   <th className="pb-2 font-normal">Sandbox</th>
                   <th className="pb-2 font-normal">Status</th>
                   <th className="pb-2 font-normal">Model</th>
@@ -379,7 +380,7 @@ function GuardrailsCard({ snapshot }: { snapshot: OpsSnapshot }) {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-xs text-zinc-500">
-                  <th className="pb-2 font-normal">When</th>
+                  <th className="pb-2 font-normal">When (UTC)</th>
                   <th className="pb-2 font-normal">Gate</th>
                   <th className="pb-2 font-normal">What it stopped</th>
                 </tr>
