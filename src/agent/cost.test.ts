@@ -29,22 +29,23 @@ import {
  * is why the table below can be read straight off the pricing page with no
  * conversion arithmetic to get wrong.
  *
- * Rates verified against the `claude-api` skill on 2026-08-13:
- * Haiku 4.5 $1/$5 · Sonnet 5 $3/$15 · Opus 5 $5/$25 per MTok.
+ * Rates verified against the `claude-api` skill on 2026-11-15:
+ * Haiku 5.5 $0.10/$0.50 (prompts up to 100K tokens) · Sonnet 5.5 $2/$10 ·
+ * Opus 5.5 $4/$20 per MTok.
  */
 describe("ANTHROPIC_RATES", () => {
   it("prices the three models the project actually runs", () => {
     expect(Object.keys(ANTHROPIC_RATES).sort()).toEqual([
-      "claude-haiku-4-5",
-      "claude-opus-5",
-      "claude-sonnet-5",
+      "claude-haiku-5-5",
+      "claude-opus-5-5",
+      "claude-sonnet-5-5",
     ]);
   });
 
   it.each([
-    ["claude-haiku-4-5", 1_000, 5_000],
-    ["claude-sonnet-5", 3_000, 15_000],
-    ["claude-opus-5", 5_000, 25_000],
+    ["claude-haiku-5-5", 100, 500],
+    ["claude-sonnet-5-5", 2_000, 10_000],
+    ["claude-opus-5-5", 4_000, 20_000],
   ] as const)(
     "%s costs the published per-MTok rate, in nanos per token",
     (model, inputNanos, outputNanos) => {
@@ -55,15 +56,21 @@ describe("ANTHROPIC_RATES", () => {
 
   /**
    * The multipliers are the part most likely to be mis-set, because they are
-   * the part nobody quotes. Cache reads are ~0.1x base input; a 5-minute cache
-   * write is 1.25x; a 1-hour write is 2x. Asserted as exact integers so a
-   * float multiplier cannot creep in unnoticed.
+   * the part nobody quotes. A 5-minute cache write is 1.25x base input and a
+   * 1-hour write is 2x on all three. The read is the one that is not uniform:
+   * 0.1x on Haiku 5.5, but a published $0.10 and $0.20 on Sonnet 5.5 and Opus
+   * 5.5, which is 0.05x. Asserted as exact integers so a float multiplier
+   * cannot creep in unnoticed.
    */
-  it.each(["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"] as const)(
+  it.each([
+    ["claude-haiku-5-5", 10],
+    ["claude-sonnet-5-5", 100],
+    ["claude-opus-5-5", 200],
+  ] as const)(
     "%s derives cache rates from its input rate exactly",
-    (model) => {
+    (model, cacheReadNanos) => {
       const p = ANTHROPIC_RATES[model];
-      expect(p.cacheReadNanosPerToken).toBe(p.inputNanosPerToken / 10);
+      expect(p.cacheReadNanosPerToken).toBe(cacheReadNanos);
       expect(p.cacheWrite5mNanosPerToken).toBe(
         (p.inputNanosPerToken * 5) / 4,
       );
@@ -83,17 +90,17 @@ describe("ANTHROPIC_RATES", () => {
    * assertion rather than an estimate — the first-party card has a date
    * because these rates were read off the claude-api skill today.
    */
-  it.each(["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"] as const)(
+  it.each(["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"] as const)(
     "%s records when and where its rates were verified",
     (model) => {
-      expect(ANTHROPIC_RATES[model].verifiedOn).toBe("2026-08-13");
+      expect(ANTHROPIC_RATES[model].verifiedOn).toBe("2026-11-15");
       expect(ANTHROPIC_RATES[model].source).toMatch(/claude-api skill/i);
     },
   );
 
   it("prices a first-party run as measured, not estimated", () => {
     expect(
-      costOf(ANTHROPIC_RATES["claude-haiku-4-5"], usage({ inputTokens: 1 }))
+      costOf(ANTHROPIC_RATES["claude-haiku-5-5"], usage({ inputTokens: 1 }))
         .estimated,
     ).toBe(false);
   });
@@ -104,7 +111,7 @@ describe("ANTHROPIC_RATES", () => {
    */
   it("flags a run priced with an unverified card as an estimate", () => {
     const unverified: RateCard = {
-      ...ANTHROPIC_RATES["claude-haiku-4-5"],
+      ...ANTHROPIC_RATES["claude-haiku-5-5"],
       verifiedOn: null,
       source: "UNVERIFIED placeholder",
     };
@@ -125,21 +132,21 @@ function usage(over: Partial<TokenUsage> = {}): TokenUsage {
 
 describe("costOf", () => {
   it("charges nothing for a run that used nothing", () => {
-    expect(costOf(ANTHROPIC_RATES["claude-haiku-4-5"], usage()).totalNanos).toBe(0);
+    expect(costOf(ANTHROPIC_RATES["claude-haiku-5-5"], usage()).totalNanos).toBe(0);
   });
 
   /**
-   * The identity the whole table rests on: a million input tokens on a $1/MTok
-   * model costs exactly one dollar — 10^9 nanos — with no rounding applied.
+   * The identity the whole table rests on: a million input tokens at
+   * $0.10/MTok cost exactly ten cents — 10^8 nanos — with no rounding applied.
    */
-  it("charges exactly $1.00 for 1M input tokens at $1/MTok", () => {
-    const c = costOf(ANTHROPIC_RATES["claude-haiku-4-5"], usage({ inputTokens: 1_000_000 }));
-    expect(c.inputNanos).toBe(1_000_000_000);
-    expect(c.totalNanos).toBe(1_000_000_000);
+  it("charges exactly $0.10 for 1M input tokens at $0.10/MTok", () => {
+    const c = costOf(ANTHROPIC_RATES["claude-haiku-5-5"], usage({ inputTokens: 1_000_000 }));
+    expect(c.inputNanos).toBe(100_000_000);
+    expect(c.totalNanos).toBe(100_000_000);
   });
 
   it("charges each token class at its own rate and sums them", () => {
-    const c = costOf(ANTHROPIC_RATES["claude-opus-5"],
+    const c = costOf(ANTHROPIC_RATES["claude-opus-5-5"],
       usage({
         inputTokens: 1_000,
         outputTokens: 500,
@@ -148,10 +155,10 @@ describe("costOf", () => {
       }),
     );
 
-    expect(c.inputNanos).toBe(1_000 * 5_000);
-    expect(c.outputNanos).toBe(500 * 25_000);
-    expect(c.cacheReadNanos).toBe(10_000 * 500);
-    expect(c.cacheWriteNanos).toBe(2_000 * 6_250);
+    expect(c.inputNanos).toBe(1_000 * 4_000);
+    expect(c.outputNanos).toBe(500 * 20_000);
+    expect(c.cacheReadNanos).toBe(10_000 * 200);
+    expect(c.cacheWriteNanos).toBe(2_000 * 5_000);
     expect(c.totalNanos).toBe(
       c.inputNanos + c.outputNanos + c.cacheReadNanos + c.cacheWriteNanos,
     );
@@ -163,26 +170,36 @@ describe("costOf", () => {
    * tokens. If this inverts, the cache badge is advertising a saving that
    * isn't there.
    */
-  it("makes a cache read exactly a tenth of an uncached input token", () => {
-    const cached = costOf(ANTHROPIC_RATES["claude-sonnet-5"],
+  it("makes a cache read exactly a tenth of an uncached input token on Haiku", () => {
+    const cached = costOf(ANTHROPIC_RATES["claude-haiku-5-5"],
       usage({ cacheReadInputTokens: 10_000 }),
     );
-    const uncached = costOf(ANTHROPIC_RATES["claude-sonnet-5"], usage({ inputTokens: 10_000 }));
+    const uncached = costOf(ANTHROPIC_RATES["claude-haiku-5-5"], usage({ inputTokens: 10_000 }));
 
     expect(cached.totalNanos * 10).toBe(uncached.totalNanos);
   });
 
+  it.each(["claude-sonnet-5-5", "claude-opus-5-5"] as const)(
+    "makes a cache read exactly a twentieth of an uncached input token on %s",
+    (model) => {
+      const cached = costOf(ANTHROPIC_RATES[model], usage({ cacheReadInputTokens: 10_000 }));
+      const uncached = costOf(ANTHROPIC_RATES[model], usage({ inputTokens: 10_000 }));
+
+      expect(cached.totalNanos * 20).toBe(uncached.totalNanos);
+    },
+  );
+
   it("charges a 1-hour cache write more than a 5-minute one", () => {
-    const short = costOf(ANTHROPIC_RATES["claude-sonnet-5"],
+    const short = costOf(ANTHROPIC_RATES["claude-sonnet-5-5"],
       usage({ cacheCreationInputTokens: 1_000 }),
     );
-    const long = costOf(ANTHROPIC_RATES["claude-sonnet-5"],
+    const long = costOf(ANTHROPIC_RATES["claude-sonnet-5-5"],
       usage({ cacheCreationInputTokens: 1_000 }),
       { cacheTtl: "1h" },
     );
 
-    expect(short.cacheWriteNanos).toBe(1_000 * 3_750);
-    expect(long.cacheWriteNanos).toBe(1_000 * 6_000);
+    expect(short.cacheWriteNanos).toBe(1_000 * 2_500);
+    expect(long.cacheWriteNanos).toBe(1_000 * 4_000);
   });
 
   /**
@@ -191,11 +208,11 @@ describe("costOf", () => {
    * in "cost per resolved ticket", which is the number on the dashboard.
    */
   it("sums ten thousand spans without drift", () => {
-    const one = costOf(ANTHROPIC_RATES["claude-haiku-4-5"], usage({ outputTokens: 3 }));
+    const one = costOf(ANTHROPIC_RATES["claude-haiku-5-5"], usage({ outputTokens: 3 }));
     let total = 0;
     for (let i = 0; i < 10_000; i++) total += one.totalNanos;
 
-    expect(total).toBe(10_000 * 3 * 5_000);
+    expect(total).toBe(10_000 * 3 * 500);
     expect(Number.isSafeInteger(total)).toBe(true);
   });
 
@@ -212,7 +229,7 @@ describe("costOf", () => {
     ["fractional", 1.5],
   ])("rejects a %s token count rather than costing it", (_label, value) => {
     expect(() =>
-      costOf(ANTHROPIC_RATES["claude-haiku-4-5"], usage({ inputTokens: value })),
+      costOf(ANTHROPIC_RATES["claude-haiku-5-5"], usage({ inputTokens: value })),
     ).toThrow();
   });
 
@@ -251,12 +268,12 @@ describe("nanosToMicros", () => {
    * a reader sees in the trace viewer is reproducible from the rates.
    */
   it("prices a realistic Haiku run to a stable micro figure", () => {
-    const c = costOf(ANTHROPIC_RATES["claude-haiku-4-5"],
+    const c = costOf(ANTHROPIC_RATES["claude-haiku-5-5"],
       usage({ inputTokens: 4_000, outputTokens: 800 }),
     );
 
-    // 4000 * 1000 + 800 * 5000 = 8_000_000 nanos = $0.008
-    expect(c.totalNanos).toBe(8_000_000);
-    expect(nanosToMicros(c.totalNanos)).toBe(8_000);
+    // 4000 * 100 + 800 * 500 = 800_000 nanos = $0.0008
+    expect(c.totalNanos).toBe(800_000);
+    expect(nanosToMicros(c.totalNanos)).toBe(800);
   });
 });

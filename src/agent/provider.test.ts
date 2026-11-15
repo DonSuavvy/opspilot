@@ -36,6 +36,12 @@ import { ANTHROPIC_RATES } from "./cost";
  */
 const MODELS: LogicalModel[] = ["haiku", "sonnet", "opus"];
 
+/**
+ * Bedrock still serves Haiku 4.5, so its placeholder stays at that model's
+ * first-party $1 per MTok even though the first-party table has moved to 5.5.
+ */
+const HAIKU_4_5_PLACEHOLDER_INPUT_NANOS = 1_000;
+
 describe("model identity is per-provider", () => {
   it.each([
     ["haiku", "global.anthropic.claude-haiku-4-5-20251001-v1:0"],
@@ -46,9 +52,9 @@ describe("model identity is per-provider", () => {
   });
 
   it.each([
-    ["haiku", "claude-haiku-4-5"],
-    ["sonnet", "claude-sonnet-5"],
-    ["opus", "claude-opus-5"],
+    ["haiku", "claude-haiku-5-5"],
+    ["sonnet", "claude-sonnet-5-5"],
+    ["opus", "claude-opus-5-5"],
   ] as const)("anthropic maps %s to the bare model id", (model, id) => {
     expect(anthropicProvider.modelId(model)).toBe(id);
   });
@@ -107,9 +113,9 @@ describe("rate cards carry their provenance", () => {
    * moment real rates land, this test fails and forces `verifiedOn` to be set
    * in the same change.
    */
-  it("uses first-party rates as the bedrock placeholder, for now", () => {
+  it("keeps the Haiku 4.5 first-party rate as the bedrock placeholder, for now", () => {
     expect(BEDROCK_RATES.haiku.inputNanosPerToken).toBe(
-      ANTHROPIC_RATES["claude-haiku-4-5"].inputNanosPerToken,
+      HAIKU_4_5_PLACEHOLDER_INPUT_NANOS,
     );
   });
 });
