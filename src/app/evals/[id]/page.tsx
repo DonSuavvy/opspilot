@@ -15,6 +15,7 @@ import { getDb } from "@/db/client";
 import { getEvalRun, type EvalRunDetail } from "@/db/evals";
 import { compactJson, shortSha, sopLabel } from "@/lib/eval-labels";
 import { currentSandbox } from "@/lib/workspace";
+import { formatUtc } from "@/lib/utc";
 
 export const dynamic = "force-dynamic";
 
@@ -88,7 +89,7 @@ export default async function EvalRunPage(props: PageProps<"/evals/[id]">) {
         <Pin label="Prompt version" value={run.promptVersion ?? "none"} />
         <Pin
           label="Started"
-          value={run.startedAt.toISOString().slice(0, 16).replace("T", " ")}
+          value={formatUtc(run.startedAt, "minute", { zone: true })}
         />
         <Pin
           label="Passed"

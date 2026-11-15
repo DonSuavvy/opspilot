@@ -17,6 +17,7 @@ import {
   currentSandbox,
   SandboxHeaderMissingError,
 } from "@/lib/workspace";
+import { formatUtc } from "@/lib/utc";
 
 // The history gains a row every time the button below is pressed.
 export const dynamic = "force-dynamic";
@@ -26,7 +27,7 @@ export const dynamic = "force-dynamic";
  * timestamps across a diff link must be reading the same numbers.
  */
 function formatStartedAt(startedAt: Date): string {
-  return startedAt.toISOString().slice(0, 16).replace("T", " ");
+  return formatUtc(startedAt, "minute");
 }
 
 /**

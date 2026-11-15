@@ -63,7 +63,8 @@ function joinWithAnd(items: string[]): string {
  * Guardrails branch by name before they branch by error, because the budget
  * refusal is an error and the injection scan is not — and the generic
  * "refused by policy" line is for the third kind, a tool preflight, where the
- * span is named after the tool the policy engine turned down.
+ * span is named after the tool the policy engine turned down. A reviewer's
+ * denial has the same shape and its own sentence.
  */
 export function describeSpan(span: DescribableSpan): string {
   const fallback = span.name;
@@ -92,8 +93,14 @@ export function describeSpan(span: DescribableSpan): string {
       return fallback;
     }
 
-    // A tool preflight. The span is named after the call the policy refused.
-    if (span.isError) return `${span.name} refused by policy`;
+    // A tool preflight. The span is named after the call that was turned
+    // down, by the policy engine or by a person: a reviewer's denial travels
+    // the same channel, and the loop marks it with `decision: "denied"`.
+    if (span.isError) {
+      return output?.decision === "denied"
+        ? `${span.name} denied by a reviewer`
+        : `${span.name} refused by policy`;
+    }
 
     return fallback;
   }
