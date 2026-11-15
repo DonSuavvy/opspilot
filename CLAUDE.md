@@ -275,6 +275,18 @@ Each of these cost real time. Don't rediscover them.
   `toolsNever: ["issue_refund"]` are what the case is for and held every time.
   Assert the constraint the policy guarantees, not the route the model happens
   to take to it.
+- **The model has to be told today's date, and for months it was not.** The
+  SOP gives a refund window in days and `get_invoices` gives a paid date;
+  nothing gave the day the run is happening on. Haiku 4.5 called `issue_refund`
+  regardless and the handler decided. Haiku 5.5 thinks first, wrote "my tools
+  give no reliable current date" into an escalation on the deployed demo,
+  inferred a date from the subscription's period end, and escalated INV-2002
+  at 22 days under a 30-day window, which is demo arc step 2. `ticketMessage`
+  now opens with `Today's date: YYYY-MM-DD (UTC)` from the injected `now`. It
+  is in the opening message, not the system prompt, so the cached prefix does
+  not change at midnight. The golden suite passed 8/8 twice with this bug
+  live, so a green suite did not rule it out: the case is a coin flip without
+  the date, not a guaranteed failure.
 - **The seed's invoice ages are load-bearing.** `INV-2002` is paid 22 days ago
   precisely so it is inside a 30-day window and outside a 14-day one. If that
   stops being true, demo arc step 2 silently demonstrates nothing.
