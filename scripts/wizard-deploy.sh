@@ -147,7 +147,19 @@ TOTAL_STAGES=7
 # Repo-specific constants. Change these if the target project or team moves.
 VERCEL_PROJECT="opspilot"
 VERCEL_TEAM="donsuavvys-projects"
-AWS_VARS=(AWS_ANTHROPIC_ACCESS_KEY_ID AWS_ANTHROPIC_SECRET_ACCESS_KEY AWS_ANTHROPIC_REGION)
+# The model provider's credentials. The demo runs on the first-party Anthropic
+# API, so this is one key. For Bedrock, list the three AWS_ANTHROPIC_* names
+# here instead; src/agent/provider.ts accepts either set.
+PROVIDER_VARS=(ANTHROPIC_API_KEY)
+
+# _provider_value KEY: KEY from .env.local, else the value pasted in stage 1.
+# Never prints anything but the value, and only into a command substitution.
+_provider_value() {
+  local key="$1" val
+  val=$(_dotenv_local "$key" || true)
+  [[ -z "$val" ]] && val="${!key:-}"
+  printf '%s' "$val"
+}
 
 # _dotenv_local KEY: reads KEY from .env.local with grep, quotes stripped.
 # Read-only. Never prints the value it finds.
@@ -228,7 +240,7 @@ banner "OpsPilot: deploy to Vercel + Neon"
 # ── Stage 1: preflight ─────────────────────────────────────────────────────
 stage "Preflight"
 say "Checking the tools this wizard drives, and that .env.local has local"
-say "Bedrock credentials to copy into GitHub and Vercel."
+say "the Anthropic API key to copy into GitHub and Vercel."
 for cmd in gh vercel npm openssl curl git; do
   if command -v "$cmd" >/dev/null 2>&1; then
     ok "$cmd found"
@@ -239,40 +251,44 @@ for cmd in gh vercel npm openssl curl git; do
 done
 if [[ -f .env.local ]]; then
   ok ".env.local found"
-  for var in "${AWS_VARS[@]}"; do
+  for var in "${PROVIDER_VARS[@]}"; do
     preflight_value=$(_dotenv_local "$var" || true)
     if [[ -n "$preflight_value" ]]; then
       ok "$var is set in .env.local"
     else
-      warn "$var is missing from .env.local; stage 2 and stage 4 will ask you to skip it"
+      note "$var is not in .env.local, so paste it here. It stays in this shell only."
+      ask_secret "$var" "Paste $var (hidden):"
     fi
   done
 else
-  warn ".env.local not found; copy .env.example first if you need local Bedrock creds"
+  note ".env.local not found, so paste the key here. It stays in this shell only."
+  for var in "${PROVIDER_VARS[@]}"; do
+    ask_secret "$var" "Paste $var (hidden):"
+  done
 fi
 pause "Continue?"
 
 # ── Stage 2: GitHub Actions secrets for the eval gate ──────────────────────
 stage "GitHub secrets for the Evals CI gate"
-say "The Evals workflow (.github/workflows/evals.yml) needs the same three"
-say "Bedrock credentials as production, as repository secrets. Read from"
-say ".env.local, set with --body, never printed."
+say "The Evals workflow (.github/workflows/evals.yml) needs the same Anthropic"
+say "API key as production, as a repository secret. Read from .env.local or"
+say "from what you pasted in stage 1, set with --body, never printed."
 if command -v gh >/dev/null 2>&1; then
-  for var in "${AWS_VARS[@]}"; do
-    value=$(_dotenv_local "$var" || true)
+  for var in "${PROVIDER_VARS[@]}"; do
+    value=$(_provider_value "$var")
     if [[ -z "$value" ]]; then
-      warn "$var not found in .env.local; skipping"
-      SKIPPED+=("GitHub secret $var (no value in .env.local)")
+      warn "$var has no value; skipping"
+      SKIPPED+=("GitHub secret $var (no value given)")
       continue
     fi
     if _gh_secret_exists "$var"; then
       note "GitHub secret $var already exists."
-      if ! confirm "Overwrite it with the .env.local value?"; then
+      if ! confirm "Overwrite it with your value?"; then
         SKIPPED+=("GitHub secret $var (kept existing value)")
         continue
       fi
     else
-      if ! confirm "Set GitHub secret $var from .env.local?"; then
+      if ! confirm "Set GitHub secret $var?"; then
         SKIPPED+=("GitHub secret $var (not set)")
         continue
       fi
@@ -290,7 +306,7 @@ if command -v gh >/dev/null 2>&1; then
   done
 else
   warn "gh not found; set these by hand once it's installed:"
-  for var in "${AWS_VARS[@]}"; do
+  for var in "${PROVIDER_VARS[@]}"; do
     note "  gh secret set $var --body \"<value from .env.local>\""
     SKIPPED+=("GitHub secret $var (gh not installed)")
   done
@@ -351,14 +367,14 @@ if command -v vercel >/dev/null 2>&1; then
     SKIPPED+=("Vercel env DATABASE_URL/production (no value entered)")
   fi
 
-  for var in "${AWS_VARS[@]}"; do
-    value=$(_dotenv_local "$var" || true)
+  for var in "${PROVIDER_VARS[@]}"; do
+    value=$(_provider_value "$var")
     if [[ -z "$value" ]]; then
-      warn "$var not found in .env.local; skipping"
-      SKIPPED+=("Vercel env $var/production (no value in .env.local)")
+      warn "$var has no value; skipping"
+      SKIPPED+=("Vercel env $var/production (no value given)")
       continue
     fi
-    if confirm "Set Vercel production env $var from .env.local?"; then
+    if confirm "Set Vercel production env $var?"; then
       _vercel_env_set "$var" "$value" production --sensitive
     else
       SKIPPED+=("Vercel env $var/production (not set)")

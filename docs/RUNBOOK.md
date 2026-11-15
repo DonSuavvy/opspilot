@@ -210,8 +210,8 @@ vercel env ls production
 ```
 
 Expected: `DATABASE_URL` (the Neon pooled connection string),
-`AWS_ANTHROPIC_ACCESS_KEY_ID`, `AWS_ANTHROPIC_SECRET_ACCESS_KEY`,
-`AWS_ANTHROPIC_REGION`, `OPSPILOT_DAILY_BUDGET_USD`,
+`ANTHROPIC_API_KEY` (or the three `AWS_ANTHROPIC_*` variables if the
+deployment runs on Bedrock instead), `OPSPILOT_DAILY_BUDGET_USD`,
 `OPSPILOT_RUNS_PER_MINUTE`, `OPSPILOT_GLOBAL_RUNS_PER_MINUTE`,
 `OPSPILOT_KILL_SWITCH`, and `CRON_SECRET`. There is no public-model
 environment variable: the public demo's model is the constant `DEMO_MODEL`
@@ -279,12 +279,11 @@ secrets rather than environment variables:
 gh secret list
 ```
 
-Expected: `AWS_ANTHROPIC_ACCESS_KEY_ID`, `AWS_ANTHROPIC_SECRET_ACCESS_KEY`,
-`AWS_ANTHROPIC_REGION`. `scripts/wizard-deploy.sh` sets all three by reading
-`.env.local`, or set them by hand:
+Expected: `ANTHROPIC_API_KEY`. `scripts/wizard-deploy.sh` sets it from
+`.env.local` or from a hidden prompt, or set it by hand:
 
 ```bash
-gh secret set AWS_ANTHROPIC_ACCESS_KEY_ID --body "<value>"
+gh secret set ANTHROPIC_API_KEY --body "<value>"
 ```
 
 Run the suite locally against the same credentials before trusting a CI run

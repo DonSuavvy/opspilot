@@ -297,7 +297,13 @@ them. Never write a wire model id anywhere else.
 | CI eval runs | `haiku` | Haiku 4.5 ✅ |
 | Bake-off | all three | Haiku 4.5 + Sonnet 4.6 + Opus 4.6 |
 
-**The runtime provider is Bedrock, not the first-party API.** OpsPilot runs on
+**As of 2026-11-15 the deployed demo and the CI eval gate run on the
+first-party Anthropic API** (`ANTHROPIC_API_KEY`), not Bedrock. The Bedrock
+path below still works and still wins if the `AWS_ANTHROPIC_*` trio is set, so
+leave those three unset wherever the first-party key is meant to be used. The
+Bedrock notes in this file describe that path and its history.
+
+**The original runtime provider was Bedrock.** OpsPilot ran on
 the `covara` account (345485442040) via `AWS_ANTHROPIC_*` in `.env.local`;
 `ANTHROPIC_API_KEY` is the fallback path and Bedrock wins if both are set.
 That account is **shared with Causa's live Claude generation for a working law
