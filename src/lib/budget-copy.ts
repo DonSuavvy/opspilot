@@ -121,3 +121,37 @@ export function describeBudgetRefusal(refusal: {
       return "Intake is paused. What is left of today's budget will not cover a run. It clears at midnight UTC.";
   }
 }
+
+/**
+ * The sentence for a suite that was refused before it started.
+ *
+ * A suite is several runs, so it can be refused in a sandbox where a single
+ * ticket would still run. The sentence has to say that, or "starting runs too
+ * fast" reads as a bug to someone who pressed one button once.
+ *
+ * Only the rate limit differs. A money refusal means the same thing for one
+ * run as for eight.
+ */
+export function describeSuiteRefusal(refusal: {
+  reason: BudgetRefusal;
+  scope?: RateLimitScope | null;
+}): string {
+  if (refusal.reason !== "rate_limited") return describeBudgetRefusal(refusal);
+
+  if (refusal.scope === "workspace") {
+    return (
+      "The suite is several runs, and this sandbox has started too many in " +
+      "the last minute for all of them to fit. Wait a minute and run it again."
+    );
+  }
+  if (refusal.scope === "global") {
+    return (
+      "The demo is busy. The suite is several runs, and the shared account " +
+      "has no room for all of them right now. Wait a minute and run it again."
+    );
+  }
+  return (
+    "The suite is several runs, and not all of them fit in the next minute. " +
+    "Wait a minute and run it again."
+  );
+}

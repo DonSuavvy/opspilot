@@ -302,6 +302,28 @@ async function globalRunsInWindow(tx: DbOrTx, now: Date): Promise<number> {
   return Number(row?.n ?? 0);
 }
 
+/**
+ * Both window counts at once, for a caller that decides before reserving.
+ *
+ * Read without the reservation lock, unlike the counts inside `reserveRun`.
+ * The eval suite asks this once to decide whether to start at all, and each of
+ * its runs is still reserved under the lock afterwards, so a stale read here
+ * can only cost a visitor a minute or let a suite start that is then throttled
+ * the old way. It cannot let a run past a ceiling.
+ */
+export async function rateWindowCounts(
+  db: DbOrTx,
+  workspaceId: string,
+  now: Date,
+): Promise<{ runsInLastMinute: number; globalRunsInLastMinute: number }> {
+  const [runsInLastMinute, globalRunsInLastMinute] = await Promise.all([
+    runsInWindow(db, workspaceId, now),
+    globalRunsInWindow(db, now),
+  ]);
+
+  return { runsInLastMinute, globalRunsInLastMinute };
+}
+
 function refused(
   decision: ReturnType<typeof decideReservation>,
 ): Reservation & { ok: false } {

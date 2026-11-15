@@ -4,6 +4,7 @@ import {
   budgetConfigSchema,
   checkBudget,
   decideReservation,
+  decideSuiteStart,
   DEFAULT_GLOBAL_RUNS_PER_MINUTE,
   ESTIMATED_RUN_NANOS,
   UNVERIFIED_RATE_SAFETY_FACTOR,
@@ -596,4 +597,126 @@ describe("budgetConfigSchema", () => {
       expect((error as Error).message).not.toContain(secret);
     }
   });
+});
+
+/**
+ * Found on the deployed demo, not by a test. The golden suite is eight runs
+ * and a sandbox may start ten a minute, so a visitor who ran two tickets and
+ * then the suite, or the suite twice, lost the trailing cases to
+ * `budget: rate_limited` and read a 5/8 scorecard. Each refused case is honest
+ * on its own row; the headline is not, because it looks like the agent failed
+ * three times.
+ *
+ * So the suite asks once, before it starts, whether all of its cases fit. If
+ * they do not it is refused whole, with the same 429 a single run gets, and
+ * nothing is written.
+ */
+describe("decideSuiteStart", () => {
+  it("starts a suite in an idle sandbox", () => {
+    const d = decideSuiteStart({
+      caseCount: 8,
+      runsInLastMinute: 0,
+      globalRunsInLastMinute: 0,
+      config: config({ runsPerMinute: 10, globalRunsPerMinute: 30 }),
+    });
+
+    expect(d.allowed).toBe(true);
+  });
+
+  it("starts a suite that exactly fills the sandbox's minute", () => {
+    const d = decideSuiteStart({
+      caseCount: 8,
+      runsInLastMinute: 2,
+      globalRunsInLastMinute: 2,
+      config: config({ runsPerMinute: 10, globalRunsPerMinute: 30 }),
+    });
+
+    expect(d.allowed).toBe(true);
+  });
+
+  it("refuses a suite whose cases would not all fit in the sandbox's minute", () => {
+    const d = decideSuiteStart({
+      caseCount: 8,
+      runsInLastMinute: 3,
+      globalRunsInLastMinute: 3,
+      config: config({ runsPerMinute: 10, globalRunsPerMinute: 30 }),
+    });
+
+    expect(d.allowed).toBe(false);
+    expect(d.rateLimitScope).toBe("workspace");
+    expect(d.retryAfterSeconds).toBe(60);
+  });
+
+  it("refuses a suite the whole demo has no room for, and says so", () => {
+    const d = decideSuiteStart({
+      caseCount: 8,
+      runsInLastMinute: 0,
+      globalRunsInLastMinute: 25,
+      config: config({ runsPerMinute: 10, globalRunsPerMinute: 30 }),
+    });
+
+    expect(d.allowed).toBe(false);
+    expect(d.rateLimitScope).toBe("global");
+  });
+
+  it("blames the sandbox first when both ceilings are short", () => {
+    const d = decideSuiteStart({
+      caseCount: 8,
+      runsInLastMinute: 5,
+      globalRunsInLastMinute: 28,
+      config: config({ runsPerMinute: 10, globalRunsPerMinute: 30 }),
+    });
+
+    expect(d.rateLimitScope).toBe("workspace");
+  });
+
+  /**
+   * A limit set below the suite's size can never be satisfied by waiting. From
+   * an idle window the suite is let through to be throttled case by case, as
+   * before, because refusing it here would refuse it forever.
+   */
+  it("does not refuse forever when the limit is smaller than the suite", () => {
+    const idle = decideSuiteStart({
+      caseCount: 8,
+      runsInLastMinute: 0,
+      globalRunsInLastMinute: 0,
+      config: config({ runsPerMinute: 5, globalRunsPerMinute: 30 }),
+    });
+    const busy = decideSuiteStart({
+      caseCount: 8,
+      runsInLastMinute: 1,
+      globalRunsInLastMinute: 1,
+      config: config({ runsPerMinute: 5, globalRunsPerMinute: 30 }),
+    });
+
+    expect(idle.allowed).toBe(true);
+    expect(busy.allowed).toBe(false);
+  });
+
+  it("uses the default global ceiling when none is configured", () => {
+    const d = decideSuiteStart({
+      caseCount: 8,
+      runsInLastMinute: 0,
+      globalRunsInLastMinute: 13,
+      config: config({ runsPerMinute: 10 }),
+    });
+
+    // 13 + 8 is over the default of 20.
+    expect(d.allowed).toBe(false);
+    expect(d.rateLimitScope).toBe("global");
+  });
+
+  it.each([Number.NaN, -1, Number.POSITIVE_INFINITY])(
+    "rejects a case count of %s rather than comparing against it",
+    (caseCount) => {
+      expect(() =>
+        decideSuiteStart({
+          caseCount,
+          runsInLastMinute: 0,
+          globalRunsInLastMinute: 0,
+          config: config(),
+        }),
+      ).toThrow();
+    },
+  );
 });

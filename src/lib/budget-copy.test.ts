@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { describeBudgetRefusal, readBudgetRefusal } from "./budget-copy";
+import {
+  describeBudgetRefusal,
+  describeSuiteRefusal,
+  readBudgetRefusal,
+} from "./budget-copy";
 
 /**
  * The sentence a visitor reads when the spend guard says no.
@@ -129,5 +133,46 @@ describe("readBudgetRefusal", () => {
     expect(
       readBudgetRefusal({ reason: "kill_switch", scope: "planet" })?.scope,
     ).toBeNull();
+  });
+});
+
+/**
+ * The suite is refused whole when its cases will not fit in the minute, and
+ * the sentence has to say why a page that just ran a ticket fine will not run
+ * the suite: it is several runs, not one.
+ */
+describe("describeSuiteRefusal", () => {
+  it("tells a visitor their own recent runs are what is in the way", () => {
+    const sentence = describeSuiteRefusal({
+      reason: "rate_limited",
+      scope: "workspace",
+    });
+
+    expect(sentence).toMatch(/suite/i);
+    expect(sentence).toMatch(/this sandbox/i);
+    expect(sentence).toMatch(/wait a minute/i);
+  });
+
+  it("does not blame the visitor when the whole demo is busy", () => {
+    const sentence = describeSuiteRefusal({
+      reason: "rate_limited",
+      scope: "global",
+    });
+
+    expect(sentence).toMatch(/demo is busy/i);
+    expect(sentence).not.toMatch(/this sandbox/i);
+  });
+
+  it("names neither when the scope is absent", () => {
+    const sentence = describeSuiteRefusal({ reason: "rate_limited", scope: null });
+
+    expect(sentence).toMatch(/suite/i);
+    expect(sentence).not.toMatch(/this sandbox|demo is busy/i);
+  });
+
+  it("says the same thing a single run would for a money refusal", () => {
+    expect(describeSuiteRefusal({ reason: "kill_switch" })).toBe(
+      describeBudgetRefusal({ reason: "kill_switch" }),
+    );
   });
 });
