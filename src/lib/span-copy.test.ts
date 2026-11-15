@@ -117,6 +117,43 @@ describe("describeSpan", () => {
         ),
       ).toBe("issue_refund refused by policy");
     });
+
+    /**
+     * A reviewer's denial travels the same channel as a policy refusal: a
+     * guardrail span named after the tool, with `isError`. On the deployed
+     * demo that made the trace say "refused by policy" about a decision a
+     * person had just typed a reason for. The loop marks the span with
+     * `decision: "denied"`, and that is what tells the two apart.
+     */
+    it("says a reviewer denied the call when a person did", () => {
+      expect(
+        describeSpan(
+          span({
+            type: "guardrail",
+            name: "issue_refund",
+            isError: true,
+            input: { invoice_id: "INV-2002" },
+            output: {
+              error: "refused by a human reviewer: not this month",
+              decision: "denied",
+            },
+          }),
+        ),
+      ).toBe("issue_refund denied by a reviewer");
+    });
+
+    it("keeps the policy wording for any other decision value", () => {
+      expect(
+        describeSpan(
+          span({
+            type: "guardrail",
+            name: "issue_refund",
+            isError: true,
+            output: { error: "x", decision: 7 },
+          }),
+        ),
+      ).toBe("issue_refund refused by policy");
+    });
   });
 
   describe("an approval wait", () => {
