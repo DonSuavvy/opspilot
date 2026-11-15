@@ -357,3 +357,80 @@ export function decideReservation(
 
   return budget;
 }
+
+export interface SuiteStartCheck {
+  /** How many runs the suite is about to start, one per case. */
+  caseCount: number;
+  /** Runs already started in this workspace inside the rate window. */
+  runsInLastMinute: number;
+  /** Runs already started in every workspace inside the same window. */
+  globalRunsInLastMinute: number;
+  config: BudgetConfig;
+}
+
+export interface SuiteStartDecision {
+  allowed: boolean;
+  /** Set only on a refusal, so the 429 can carry `Retry-After`. */
+  retryAfterSeconds?: number;
+  /** Set only on a refusal, so the copy can name whose ceiling answered. */
+  rateLimitScope?: RateLimitScope;
+}
+
+/**
+ * Whether a whole eval suite fits in the minute, asked once before it starts.
+ *
+ * `decideReservation` is asked per run, so a suite that starts with room for
+ * some of its cases runs those and has the rest refused `rate_limited`. Every
+ * row on that scorecard is true and the headline is not: 5/8 reads as the
+ * agent failing three cases it was never given. A visitor who ran two tickets
+ * and then the suite hit exactly that on the deployed demo.
+ *
+ * So the suite is admitted whole or refused whole. Conservative on purpose:
+ * the suite is sequential and earlier runs age out of the window while it
+ * works, so some refused suites would have squeaked through. A minute's wait
+ * is a cheaper mistake than a scorecard that lies.
+ *
+ * **A ceiling smaller than the suite is not a reason to refuse an idle
+ * window.** Waiting can never make eight runs fit under a limit of five, so
+ * from an empty window the suite is let through to be throttled case by case
+ * as before. That is a misconfiguration, and it should look like one.
+ *
+ * The money questions are not asked here. The suite's own reservations ask
+ * them case by case and stop at the first refusal, which is already honest.
+ */
+export function decideSuiteStart(input: SuiteStartCheck): SuiteStartDecision {
+  const cases = finiteNonNegative(input.caseCount, "caseCount");
+  const inWindow = finiteNonNegative(
+    input.runsInLastMinute,
+    "runsInLastMinute",
+  );
+  const globalInWindow = finiteNonNegative(
+    input.globalRunsInLastMinute,
+    "globalRunsInLastMinute",
+  );
+  const perWorkspace = finiteNonNegative(
+    input.config.runsPerMinute,
+    "runsPerMinute",
+  );
+  const global = finiteNonNegative(
+    input.config.globalRunsPerMinute ?? DEFAULT_GLOBAL_RUNS_PER_MINUTE,
+    "globalRunsPerMinute",
+  );
+
+  // Same order as `decideReservation`, for the same reason: the visitor's own
+  // sandbox is something they did and can stop doing.
+  const rateLimitScope: RateLimitScope | null =
+    inWindow > 0 && inWindow + cases > perWorkspace
+      ? "workspace"
+      : globalInWindow > 0 && globalInWindow + cases > global
+        ? "global"
+        : null;
+
+  if (rateLimitScope === null) return { allowed: true };
+
+  return {
+    allowed: false,
+    retryAfterSeconds: RATE_WINDOW_SECONDS,
+    rateLimitScope,
+  };
+}

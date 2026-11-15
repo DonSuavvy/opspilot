@@ -19,6 +19,7 @@ import { useCallback, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { describeSuiteRefusal, readBudgetRefusal } from "@/lib/budget-copy";
 import { createSseParser } from "@/lib/sse";
 
 /** One row of the history, with every label already resolved on the server. */
@@ -109,7 +110,13 @@ export function EvalLab({ runs }: { runs: EvalRunRow[] }) {
         const payload = (await response.json().catch(() => null)) as {
           error?: string;
         } | null;
-        setError(payload?.error ?? `the suite could not start (${response.status})`);
+        // A refusal by the spend guard gets a sentence, not its enum.
+        const refusal = readBudgetRefusal(payload);
+        setError(
+          refusal
+            ? describeSuiteRefusal(refusal)
+            : (payload?.error ?? `the suite could not start (${response.status})`),
+        );
         return;
       }
 

@@ -236,7 +236,11 @@ Each of these cost real time. Don't rediscover them.
   of 10 leaves a margin of two. Lower `OPSPILOT_RUNS_PER_MINUTE`, or run the
   suite twice inside a minute, and the trailing cases come back
   `budget: rate_limited` — a red scorecard that says nothing about the agent.
-  `verify:evals` runs two cases and cannot see this.
+  `verify:evals` runs two cases and cannot see this. **Closed for the UI on
+  2026-11-15**: `/api/evals/run` asks `decideSuiteStart` once whether all the
+  cases fit and answers 429 before anything runs if they do not, because a
+  visitor who ran two tickets and then the suite read a 5/8 scorecard on the
+  deployed demo. `evals:ci` calls `runEvalSuite` directly and is unchanged.
 - **CLOSED, and the original claim was wrong — constraint stripping stays.**
   This was logged as "stripping is now gratuitous once `strict` is off, and the
   model is told `amount_cents` is a bare `number`". Measuring it before acting

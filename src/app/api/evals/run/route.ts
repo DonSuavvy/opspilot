@@ -13,14 +13,16 @@
  */
 import { execFileSync } from "node:child_process";
 
-import { budgetConfigSchema } from "@/agent/budget";
+import { budgetConfigSchema, decideSuiteStart } from "@/agent/budget";
 import { createClient, providerFromEnv, type LogicalModel } from "@/agent/provider";
 import { streamingMessageCreator } from "@/agent/streaming";
 import { encodeSseEvent } from "@/agent/trace";
 import { getDb } from "@/db/client";
+import { rateWindowCounts } from "@/db/runs";
 import { GOLDEN_CASES } from "@/evals/cases";
 import { resolveGitSha } from "@/evals/pin";
 import { runEvalSuite, type EvalSuiteEvent } from "@/evals/suite";
+import { budgetRefusalResponse } from "@/lib/budget-response";
 import { sandboxFromRequest } from "@/lib/workspace";
 
 export const dynamic = "force-dynamic";
@@ -82,6 +84,7 @@ export async function POST(request: Request) {
   let budgetConfig;
   let provider;
   let client;
+  let suiteStart;
   try {
     db = getDb();
     // Scoped to the visitor, so a suite run scores their SOP against their
@@ -94,11 +97,27 @@ export async function POST(request: Request) {
     // default two retries on covara and killed the last three cases of the
     // first calibration run with a Bedrock 429. See `ClientTuning`.
     client = createClient(provider, process.env, { maxRetries: 8 });
+    // Asked once, for the whole suite, while there is still a status code to
+    // answer with. Without it a suite that starts with room for five of its
+    // eight cases runs five and reports 5/8.
+    suiteStart = decideSuiteStart({
+      caseCount: GOLDEN_CASES.length,
+      ...(await rateWindowCounts(db, workspaceId, new Date())),
+      config: budgetConfig,
+    });
   } catch (error) {
     return Response.json(
       { error: error instanceof Error ? error.message : String(error) },
       { status: 500 },
     );
+  }
+
+  if (!suiteStart.allowed) {
+    return budgetRefusalResponse({
+      reason: "rate_limited",
+      retryAfterSeconds: suiteStart.retryAfterSeconds,
+      rateLimitScope: suiteStart.rateLimitScope,
+    });
   }
 
   const gitSha = resolveGitSha(process.env, gitShaFromShell);
